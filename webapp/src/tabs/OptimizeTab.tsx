@@ -359,11 +359,11 @@ export function OptimizeTab({
           <div className="opt-title-block">
             <h2>Optimize</h2>
             {!dataReady && <span className="opt-warn">Load data first</span>}
-          </div>
+      </div>
           <label className="check opt-toggle">
-            <input
-              type="checkbox"
-              checked={commonOn}
+          <input
+            type="checkbox"
+            checked={commonOn}
               onChange={(e) => {
                 const on = e.target.checked
                 setCommonOn(on)
@@ -389,7 +389,7 @@ export function OptimizeTab({
               value={slipPcts}
               onChange={(e) => setSlipPcts(e.target.value)}
             />
-          </label>
+        </label>
           <label>
             Fee%
             <input
@@ -422,15 +422,15 @@ export function OptimizeTab({
             />
             TStop
           </label>
-          <label>
+        <label>
             Thr
-            <input value={thresholds} onChange={(e) => setThresholds(e.target.value)} />
-          </label>
-          <label>
+          <input value={thresholds} onChange={(e) => setThresholds(e.target.value)} />
+        </label>
+        <label>
             RR
-            <input value={rrs} onChange={(e) => setRrs(e.target.value)} />
-          </label>
-          <label>
+          <input value={rrs} onChange={(e) => setRrs(e.target.value)} />
+        </label>
+        <label>
             Strategy
             <input
               value={waitFlags}
@@ -467,7 +467,7 @@ export function OptimizeTab({
                 On
               </label>
             </div>
-          </label>
+        </label>
           <label>
             BE%
             <input
@@ -476,17 +476,17 @@ export function OptimizeTab({
               onChange={(e) => setBePcts(e.target.value)}
               placeholder="50"
             />
-          </label>
-          <label>
+        </label>
+        <label>
             Rank
-            <select value={rankBy} onChange={(e) => setRankBy(e.target.value)}>
-              {RANK_OPTIONS.map(([v, lab]) => (
-                <option key={v} value={v}>
-                  {lab}
-                </option>
-              ))}
-            </select>
-          </label>
+          <select value={rankBy} onChange={(e) => setRankBy(e.target.value)}>
+            {RANK_OPTIONS.map(([v, lab]) => (
+              <option key={v} value={v}>
+                {lab}
+              </option>
+            ))}
+          </select>
+        </label>
           <label>
             Workers
             <select value={workers} onChange={(e) => setWorkers(Number(e.target.value))}>
@@ -510,7 +510,7 @@ export function OptimizeTab({
           {best && (
             <button className="ghost" onClick={onApplyBest} disabled={busy}>
               Apply best
-            </button>
+        </button>
           )}
           <button className="ghost" disabled={!result?.results?.length} onClick={onCsv}>
             CSV
@@ -649,10 +649,10 @@ export function OptimizeTab({
                     >
                       {lab}
                     </button>
-                  ))}
-                </div>
-              </>
-            )}
+            ))}
+          </div>
+        </>
+      )}
           </section>
 
           <section className="opt-card opt-best-tile">
@@ -785,8 +785,8 @@ export function OptimizeTab({
             <div className="opt-table-scroll">
               {result ? (
                 <table className="opt-table-inner">
-                  <thead>
-                    <tr>
+            <thead>
+              <tr>
                       <th title="Overfit risk">⚠</th>
                       <SortTh col="threshold" sort={optSort.sort} onSort={optSort.toggle}>
                         Thr
@@ -830,9 +830,9 @@ export function OptimizeTab({
                       <SortTh col="max_drawdown" sort={optSort.sort} onSort={optSort.toggle}>
                         DD
                       </SortTh>
-                    </tr>
-                  </thead>
-                  <tbody>
+              </tr>
+            </thead>
+            <tbody>
                     {optSort.sorted.map((r) => {
                       const risk = overfitKeys.has(r._key)
                       const sel = selectedComboKey === r._key
@@ -844,25 +844,25 @@ export function OptimizeTab({
                           style={{ cursor: onLoadCombo ? 'pointer' : undefined }}
                         >
                           <td>{risk ? '⚠' : ''}</td>
-                          <td>{fmt2(r.threshold)}</td>
-                          <td>{fmt2(r.rr)}</td>
+                  <td>{fmt2(r.threshold)}</td>
+                  <td>{fmt2(r.rr)}</td>
                           <td>{r._strategy}</td>
                           <td>{r._be}</td>
                           <td>{minsToTime(Number(r.entry_after ?? 0))}</td>
                           <td>{minsToTime(Number(r.entry_before ?? 0))}</td>
                           <td>{minsToTime(Number(r.exit_time ?? 0))}</td>
-                          <td>{r.trades}</td>
-                          <td className={r.net_pnl >= 0 ? 'pos' : 'neg'}>{fmt2(r.net_pnl)}</td>
-                          <td>{fmt2(r.sharpe)}</td>
+                  <td>{r.trades}</td>
+                  <td className={r.net_pnl >= 0 ? 'pos' : 'neg'}>{fmt2(r.net_pnl)}</td>
+                  <td>{fmt2(r.sharpe)}</td>
                           <td>{fmt2(Number(r.sortino ?? 0))}</td>
-                          <td>{fmt2(r.profit_factor)}</td>
-                          <td>{fmt2(r.win_rate)}</td>
-                          <td>{fmt2(r.max_drawdown)}</td>
-                        </tr>
+                  <td>{fmt2(r.profit_factor)}</td>
+                  <td>{fmt2(r.win_rate)}</td>
+                  <td>{fmt2(r.max_drawdown)}</td>
+                </tr>
                       )
                     })}
-                  </tbody>
-                </table>
+            </tbody>
+          </table>
               ) : (
                 <p className="opt-empty">No results yet.</p>
               )}
