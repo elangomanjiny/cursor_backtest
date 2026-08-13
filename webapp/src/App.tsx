@@ -143,7 +143,6 @@ export default function App() {
         {
           exchange: params.exchange,
           symbol: params.symbol,
-          tf: params.tf,
           volume: params.volume,
           start: params.start,
           end: params.end,
@@ -151,6 +150,7 @@ export default function App() {
           fee_pct: params.fee_pct,
           max_runs: 400,
           ...grid,
+          tf: grid.tf,
         },
         (done, total, workers) => setOptProgress({ done, total, workers }),
         ac.signal,
@@ -182,6 +182,7 @@ export default function App() {
   const applyCombo = (b: OptimizePoint) => {
     setParams((p) => ({
       ...p,
+      tf: Number(opt?.tf_minutes ?? p.tf),
       threshold: b.threshold,
       rr: b.rr,
       wait_and_trade: b.wait_and_trade,
@@ -293,6 +294,7 @@ export default function App() {
             busy={busy}
             dataReady={dataReady}
             progress={optProgress}
+            defaultTf={params.tf}
             defaultEntryAfter={params.entry_after}
             defaultEntryBefore={params.entry_before}
             defaultExitTime={params.exit_time}

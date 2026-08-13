@@ -156,6 +156,9 @@ export type BarRow = {
 export type OptimizeResult = {
   runs: number
   rank_by: string
+  symbol?: string
+  tf_minutes?: number
+  volume?: number
   common_optimizer?: boolean
   time_optimizer?: boolean
   time_step_minutes?: number | null

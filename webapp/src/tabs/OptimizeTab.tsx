@@ -9,6 +9,7 @@ import { OptimizeHeatmap } from '../dashboard/OptimizeHeatmap'
 import { comboKey, flagOverfitRisk } from '../dashboard/overfitHeuristic'
 
 export type OptimizeGrid = {
+  tf: number
   thresholds: string
   rrs: string
   wait_flags: string
@@ -36,11 +37,14 @@ export type OptimizeGrid = {
   workers: number
 }
 
+const TF_OPTS = [1, 3, 5, 15, 30, 60] as const
+
 type Props = {
   result: OptimizeResult | null
   busy: boolean
   dataReady: boolean
   progress?: { done: number; total: number; workers?: number } | null
+  defaultTf?: number
   defaultEntryAfter?: number
   defaultEntryBefore?: number
   defaultExitTime?: number
@@ -133,6 +137,7 @@ export function OptimizeTab({
   busy,
   dataReady,
   progress,
+  defaultTf = 15,
   defaultEntryAfter = 330,
   defaultEntryBefore = 1260,
   defaultExitTime = 1260,
@@ -143,6 +148,7 @@ export function OptimizeTab({
   onApplyBest,
   onLoadCombo,
 }: Props) {
+  const [tf, setTf] = useState(defaultTf)
   const [thresholds, setThresholds] = useState('40,50,60')
   const [rrs, setRrs] = useState('0.5,1,1.5,2')
   const [waitFlags, setWaitFlags] = useState('false')
@@ -197,6 +203,7 @@ export function OptimizeTab({
   }, [commonOn, timeOptOn, entryAfter, entryAfterTo, stepMins])
 
   const buildGrid = (dayStr: string): OptimizeGrid => ({
+    tf,
     thresholds,
     rrs,
     wait_flags: waitFlags,
@@ -360,6 +367,20 @@ export function OptimizeTab({
             <h2>Optimize</h2>
             {!dataReady && <span className="opt-warn">Load data first</span>}
       </div>
+          <label title="Bar timeframe for this optimize run (independent of Backtest TF)">
+            TF
+            <select
+              value={tf}
+              disabled={busy}
+              onChange={(e) => setTf(Number(e.target.value))}
+            >
+              {TF_OPTS.map((m) => (
+                <option key={m} value={m}>
+                  {m}m
+                </option>
+              ))}
+            </select>
+          </label>
           <label className="check opt-toggle">
           <input
             type="checkbox"
@@ -660,6 +681,9 @@ export function OptimizeTab({
             {best ? (
               <>
                 <div className="opt-best-main">
+                  <span>
+                    TF <b>{result?.tf_minutes ?? tf}m</b>
+                  </span>
                   <span>
                     thr <b>{fmt2(best.threshold)}</b>
                   </span>

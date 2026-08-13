@@ -939,6 +939,52 @@ th.sorted-desc .sort-ind {
   accent-color: #3fb950;
   margin: 0;
 }
+.ov-settings-btn {
+  padding: 2px 7px !important;
+  font-size: 0.78rem !important;
+  min-width: 0;
+  line-height: 1.2;
+}
+.ov-settings-btn.on {
+  border-color: #26a69a88;
+  color: #26a69a;
+}
+.vwap-settings {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  background: #12181f;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.vwap-settings label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.vwap-settings select,
+.vwap-settings input {
+  background: #0d1117;
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 0.72rem;
+}
+.vwap-settings input {
+  width: 72px;
+}
+.vwap-settings-hint {
+  color: var(--muted);
+  opacity: 0.85;
+}
+.tt-vwap {
+  margin-top: 2px;
+  color: #26a69a;
+}
 .strategy-strip .check,
 .control-strip .check { color: var(--text); gap: 4px; }
 .strategy-strip button,

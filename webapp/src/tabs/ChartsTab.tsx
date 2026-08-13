@@ -17,6 +17,13 @@ import { loadChartRange, saveChartRange } from '../chartZoomStore'
 import { attachCandlePricePan, resetPriceOnly } from '../chartPricePan'
 import { attachMarkerLabels, type MarkerLabel } from '../chartMarkerLabels'
 import { selectTrade, useChartStudy } from '../chartStudyStore'
+import {
+  computeVwap,
+  parseBandMultipliers,
+  type VwapSession,
+  type VwapSettings,
+  type VwapSource,
+} from '../computeVwap'
 
 type Unit = 'quote' | 'base'
 
@@ -35,7 +42,12 @@ type Tip = {
   volume: number
   delta: number
   delta_pct: number
+  vwap?: number
+  vwapBands?: { mult: number; up: number; dn: number }[]
 }
+
+const VWAP_COLOR = '#26a69a'
+const VWAP_BAND_COLORS = ['#26a69a99', '#26a69a66', '#26a69a44']
 
 type PaneLayout = { top: number; height: number; id: string; state: string }
 
@@ -86,12 +98,35 @@ export function ChartsTab({ data, visible = true }: Props) {
   const [tip, setTip] = useState<Tip | null>(null)
   const [showSignals, setShowSignals] = useState(true)
   const [showTrades, setShowTrades] = useState(true)
+  const [showVwap, setShowVwap] = useState(false)
+  const [vwapSource, setVwapSource] = useState<VwapSource>('hlc3')
+  const [vwapSession, setVwapSession] = useState<VwapSession>('day')
+  const [vwapBandsRaw, setVwapBandsRaw] = useState('1,2')
+  const [showVwapSettings, setShowVwapSettings] = useState(false)
   const [paneLayouts, setPaneLayouts] = useState<PaneLayout[]>([])
   const [panelMax, setPanelMax] = useState(false)
   const dataKey = useRef<string>('')
   const study = useChartStudy()
 
   const unitLabel = unit === 'quote' ? 'USDT' : 'BASE'
+  const vwapBands = useMemo(() => parseBandMultipliers(vwapBandsRaw), [vwapBandsRaw])
+  const vwapSettings: VwapSettings = useMemo(
+    () => ({
+      source: vwapSource,
+      session: vwapSession,
+      bands: vwapBands.length ? vwapBands : [1, 2],
+    }),
+    [vwapSource, vwapSession, vwapBands],
+  )
+  const vwapSeries = useMemo(() => {
+    if (!data || !showVwap) return []
+    return computeVwap(data.bars, unit, vwapSettings)
+  }, [data, showVwap, unit, vwapSettings])
+  const vwapByTime = useMemo(() => {
+    const m = new Map<number, (typeof vwapSeries)[number]>()
+    for (const p of vwapSeries) m.set(p.time, p)
+    return m
+  }, [vwapSeries])
 
   const byTime = useMemo(() => {
     const m = new Map<number, BarRow>()
@@ -148,6 +183,10 @@ export function ChartsTab({ data, visible = true }: Props) {
       unit,
       showSignals,
       showTrades,
+      showVwap,
+      vwapSettings.source,
+      vwapSettings.session,
+      vwapSettings.bands.join(','),
     ].join('|')
     el.innerHTML = ''
     const chart = createChart(el, {
@@ -195,6 +234,46 @@ export function ChartsTab({ data, visible = true }: Props) {
         close: b.close,
       })),
     )
+
+    if (showVwap && vwapSeries.length) {
+      const vwapLine = chart.addSeries(LineSeries, {
+        color: VWAP_COLOR,
+        lineWidth: 2,
+        lastValueVisible: true,
+        priceLineVisible: false,
+      })
+      vwapLine.setData(vwapSeries.map((p) => ({ time: p.time as never, value: p.vwap })))
+
+      vwapSettings.bands.forEach((mult, i) => {
+        const color = VWAP_BAND_COLORS[Math.min(i, VWAP_BAND_COLORS.length - 1)]
+        const up = chart.addSeries(LineSeries, {
+          color,
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          lastValueVisible: false,
+          priceLineVisible: false,
+        })
+        const dn = chart.addSeries(LineSeries, {
+          color,
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          lastValueVisible: false,
+          priceLineVisible: false,
+        })
+        up.setData(
+          vwapSeries.map((p) => ({
+            time: p.time as never,
+            value: p.bands[`up${mult}`],
+          })),
+        )
+        dn.setData(
+          vwapSeries.map((p) => ({
+            time: p.time as never,
+            value: p.bands[`dn${mult}`],
+          })),
+        )
+      })
+    }
 
     const tfSec = Math.max(1, data.tf_minutes) * 60
     const lots = Number(data.volume)
@@ -418,6 +497,7 @@ export function ChartsTab({ data, visible = true }: Props) {
         setTip(null)
         return
       }
+      const vp = showVwap ? vwapByTime.get(t) : undefined
       setTip({
         time: b.time_iso,
         open: b.open,
@@ -427,6 +507,14 @@ export function ChartsTab({ data, visible = true }: Props) {
         volume: volOf(b, unit),
         delta: deltaOf(b, unit),
         delta_pct: b.delta_pct,
+        vwap: vp?.vwap,
+        vwapBands: vp
+          ? vwapSettings.bands.map((mult) => ({
+              mult,
+              up: vp.bands[`up${mult}`],
+              dn: vp.bands[`dn${mult}`],
+            }))
+          : undefined,
       })
     }
     chart.subscribeCrosshairMove(onMove as never)
@@ -471,7 +559,18 @@ export function ChartsTab({ data, visible = true }: Props) {
       panesRef.current = []
       setPaneLayouts([])
     }
-  }, [data, unit, byTime, barTimes, showSignals, showTrades])
+  }, [
+    data,
+    unit,
+    byTime,
+    barTimes,
+    showSignals,
+    showTrades,
+    showVwap,
+    vwapSeries,
+    vwapByTime,
+    vwapSettings,
+  ])
 
   // Camera: jump to selected trade without rebuilding the chart.
   useEffect(() => {
@@ -620,6 +719,28 @@ export function ChartsTab({ data, visible = true }: Props) {
             />
             Trades
           </label>
+          <label className={`ov-toggle ${showVwap ? 'on' : ''}`} title="Session VWAP ± std-dev bands">
+            <input
+              type="checkbox"
+              checked={showVwap}
+              onChange={(e) => {
+                const on = e.target.checked
+                setShowVwap(on)
+                if (on) setShowVwapSettings(true)
+              }}
+            />
+            VWAP
+          </label>
+          {showVwap && (
+            <button
+              type="button"
+              className={`ghost ov-settings-btn ${showVwapSettings ? 'on' : ''}`}
+              title="VWAP settings"
+              onClick={() => setShowVwapSettings((v) => !v)}
+            >
+              ⚙
+            </button>
+          )}
         </div>
 
         {sel !== null && (
@@ -670,6 +791,23 @@ export function ChartsTab({ data, visible = true }: Props) {
               </span>
             </>
           )}
+          {showVwap && (
+            <>
+              <span className="lg">
+                <i style={{ background: VWAP_COLOR }} /> VWAP
+              </span>
+              {vwapSettings.bands.map((m, i) => (
+                <span className="lg" key={m}>
+                  <i
+                    style={{
+                      background: VWAP_BAND_COLORS[Math.min(i, VWAP_BAND_COLORS.length - 1)],
+                    }}
+                  />{' '}
+                  ±{m}σ
+                </span>
+              ))}
+            </>
+          )}
         </div>
 
         <button
@@ -681,6 +819,44 @@ export function ChartsTab({ data, visible = true }: Props) {
           {panelMax ? '❐' : '⛶'}
         </button>
       </div>
+
+      {showVwap && showVwapSettings && (
+        <div className="vwap-settings" role="group" aria-label="VWAP settings">
+          <label>
+            Source
+            <select
+              value={vwapSource}
+              onChange={(e) => setVwapSource(e.target.value as VwapSource)}
+            >
+              <option value="hlc3">HLC/3</option>
+              <option value="ohlc4">OHLC/4</option>
+              <option value="hl2">HL/2</option>
+              <option value="close">Close</option>
+            </select>
+          </label>
+          <label>
+            Session
+            <select
+              value={vwapSession}
+              onChange={(e) => setVwapSession(e.target.value as VwapSession)}
+            >
+              <option value="day">Daily (IST)</option>
+              <option value="range">Entire range</option>
+            </select>
+          </label>
+          <label title="Comma-separated std-dev multipliers, e.g. 1,2 or 0.5,1,2">
+            Bands σ
+            <input
+              value={vwapBandsRaw}
+              onChange={(e) => setVwapBandsRaw(e.target.value)}
+              placeholder="1,2"
+            />
+          </label>
+          <span className="vwap-settings-hint">
+            Vol unit follows {unitLabel} · works on any TF (e.g. 15m)
+          </span>
+        </div>
+      )}
 
       <div className="chart-wrap" ref={wrapRef}>
         {tip && (
@@ -711,6 +887,18 @@ export function ChartsTab({ data, visible = true }: Props) {
                 Δ% <b className={clsSigned(tip.delta_pct)}>{fmt2(tip.delta_pct)}</b>
               </span>
             </div>
+            {tip.vwap != null && (
+              <div className="tt-flow tt-vwap">
+                <span>
+                  VWAP <b>{fmt2(tip.vwap)}</b>
+                </span>
+                {tip.vwapBands?.map((b) => (
+                  <span key={b.mult}>
+                    ±{b.mult}σ <b>{fmt2(b.dn)}</b>–<b>{fmt2(b.up)}</b>
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         )}
         <div className="chart-host" ref={hostRef} />
