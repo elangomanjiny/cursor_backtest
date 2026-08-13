@@ -170,8 +170,6 @@ export function OptimizeTab({
   )
   const [feePcts, setFeePcts] = useState(defaultFee > 0 ? `0,${defaultFee}` : '0,0.01')
   const [minTrades, setMinTrades] = useState(3)
-  const [timeStopMin, setTimeStopMin] = useState(0)
-  const [timeStopOn, setTimeStopOn] = useState(false)
   const [beOff, setBeOff] = useState(true)
   const [beOn, setBeOn] = useState(true)
   const [bePcts, setBePcts] = useState('50')
@@ -229,7 +227,7 @@ export function OptimizeTab({
     slippage_pcts: slipPcts,
     fee_pcts: feePcts,
     min_trades: Math.max(0, minTrades),
-    time_stop_minutes: timeStopOn ? Math.max(30, timeStopMin || 90) : 0,
+    time_stop_minutes: 0,
     pro_vwap_sigma: proSigma,
     workers: Math.max(0, Math.floor(workers)),
   })
@@ -436,18 +434,6 @@ export function OptimizeTab({
               value={minTrades}
               onChange={(e) => setMinTrades(Math.max(0, Number(e.target.value) || 0))}
             />
-          </label>
-          <label className="check opt-toggle">
-            <input
-              type="checkbox"
-              disabled={!commonOn}
-              checked={timeStopOn}
-              onChange={(e) => {
-                setTimeStopOn(e.target.checked)
-                if (e.target.checked && timeStopMin <= 0) setTimeStopMin(90)
-              }}
-            />
-            TStop
           </label>
         <label>
             Thr

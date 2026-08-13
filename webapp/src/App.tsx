@@ -37,7 +37,7 @@ const DEFAULTS: StrategyParams = {
   trade_mode: 2,
   slippage_pct: 0,
   fee_pct: 0,
-  time_stop_minutes: 0,
+  time_stop_minutes: 0, // always off — TStop UI removed
   re_entry: 0,
   stop_to_be: 0,
   break_even: 0,
@@ -204,9 +204,7 @@ export default function App() {
       entry_after: Number(b.entry_after ?? opt?.entry_after ?? p.entry_after),
       entry_before: Number(b.entry_before ?? opt?.entry_before ?? p.entry_before),
       exit_time: Number(b.exit_time ?? opt?.exit_time ?? p.exit_time),
-      time_stop_minutes: Number(
-        b.time_stop_minutes ?? opt?.time_stop_minutes ?? p.time_stop_minutes,
-      ),
+      time_stop_minutes: 0,
     }))
     setView('equity')
     setStep(2)

@@ -260,25 +260,12 @@ export function BacktestStep({
               onChange={(e) => set('entry_before', timeToMins(e.target.value))}
             />
           </label>
-          <label>
+          <label title="IST — force flatten open trades at this clock">
             Flat
             <input
               type="time"
               value={minsToTime(params.exit_time)}
               onChange={(e) => set('exit_time', timeToMins(e.target.value))}
-            />
-          </label>
-          <label>
-            TStop
-            <input
-              className="num-plain cost"
-              type="number"
-              inputMode="numeric"
-              min={0}
-              step={30}
-              value={params.time_stop_minutes}
-              onChange={(e) => set('time_stop_minutes', Math.max(0, Number(e.target.value) || 0))}
-              title="Time-stop minutes in trade (0 = off). Exit reason TTS."
             />
           </label>
         </div>
