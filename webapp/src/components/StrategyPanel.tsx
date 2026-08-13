@@ -1,8 +1,9 @@
+import type { Dispatch, SetStateAction } from 'react'
 import type { StrategyParams } from '../api'
 
 type Props = {
   params: StrategyParams
-  onChange: (next: StrategyParams) => void
+  onChange: Dispatch<SetStateAction<StrategyParams>>
   busy: boolean
   /** Hide exchange/symbol/dates/tf when controlled by Data Loader step */
   hideDataFields?: boolean
@@ -16,7 +17,10 @@ function minsLabel(m: number): string {
 
 export function StrategyPanel({ params, onChange, busy, hideDataFields }: Props) {
   const set = <K extends keyof StrategyParams>(key: K, value: StrategyParams[K]) =>
-    onChange({ ...params, [key]: value })
+    onChange((prev) => ({ ...prev, [key]: value }))
+
+  const setMany = (patch: Partial<StrategyParams>) =>
+    onChange((prev) => ({ ...prev, ...patch }))
 
   return (
     <aside className="strategy-panel">
@@ -122,11 +126,13 @@ export function StrategyPanel({ params, onChange, busy, hideDataFields }: Props)
             const v = e.target.value
             const nd = v === 'non_directional'
             const pro = v === 'pro'
-            set('wait_and_trade', nd)
-            set('pro_mode', pro)
-            set('re_entry', 0)
-            set('stop_to_be', 0)
-            if (nd) set('break_even', 0)
+            setMany({
+              wait_and_trade: nd,
+              pro_mode: pro,
+              re_entry: 0,
+              stop_to_be: 0,
+              ...(nd ? { break_even: 0 } : {}),
+            })
           }}
         >
           <option value="directional">Directional</option>

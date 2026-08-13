@@ -1,3 +1,4 @@
+import type { Dispatch, SetStateAction } from 'react'
 import type { BacktestResult, StrategyParams } from '../api'
 import { ChartsTab } from '../tabs/ChartsTab'
 import { EquityTab } from '../tabs/EquityTab'
@@ -7,7 +8,7 @@ import { fmt2 } from '../format'
 
 type Props = {
   params: StrategyParams
-  onParams: (p: StrategyParams) => void
+  onParams: Dispatch<SetStateAction<StrategyParams>>
   data: BacktestResult | null
   busy: boolean
   sessionStarted: boolean
@@ -47,7 +48,10 @@ export function BacktestStep({
   onView,
 }: Props) {
   const set = <K extends keyof StrategyParams>(key: K, value: StrategyParams[K]) =>
-    onParams({ ...params, [key]: value })
+    onParams((prev) => ({ ...prev, [key]: value }))
+
+  const setMany = (patch: Partial<StrategyParams>) =>
+    onParams((prev) => ({ ...prev, ...patch }))
 
   const net = data ? Number(data.stats.net_pnl) : 0
   const win = data ? Number(data.stats.win_rate) : 0
@@ -160,11 +164,13 @@ export function BacktestStep({
                 const v = e.target.value
                 const nd = v === 'non_directional'
                 const pro = v === 'pro'
-                set('wait_and_trade', nd)
-                set('pro_mode', pro)
-                set('re_entry', 0)
-                set('stop_to_be', 0)
-                if (nd) set('break_even', 0)
+                setMany({
+                  wait_and_trade: nd,
+                  pro_mode: pro,
+                  re_entry: 0,
+                  stop_to_be: 0,
+                  ...(nd ? { break_even: 0 } : {}),
+                })
               }}
             >
               <option value="directional">Directional</option>
