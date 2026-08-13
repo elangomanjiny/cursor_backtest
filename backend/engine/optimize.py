@@ -408,6 +408,7 @@ def _worker_eval(job: dict[str, Any]) -> dict[str, Any]:
         break_even=be,
         break_even_pct=float(job["break_even_pct"]),
         pro_mode=pro,
+        pro_vwap_sigma=float(c.get("pro_vwap_sigma") or 2),
         ticks=_W_TICKS,
     )
     m = compute_trade_metrics(
@@ -459,6 +460,7 @@ def _eval_combo_local(
     trade_mode: int,
     tstop: float,
     job: dict[str, Any],
+    pro_vwap_sigma: float = 2.0,
 ) -> dict[str, Any]:
     """Sequential path (same shape as worker result)."""
     global _W_BARS, _W_TICKS, _W_COMMON
@@ -470,6 +472,7 @@ def _eval_combo_local(
         "volume": volume,
         "trade_mode": trade_mode,
         "time_stop_minutes": tstop,
+        "pro_vwap_sigma": float(pro_vwap_sigma),
     }
     try:
         return _worker_eval(job)
@@ -506,6 +509,7 @@ def _iter_grid(
     fee_pcts: str | list[float] | None = None,
     min_trades: int = 0,
     time_stop_minutes: float = 0.0,
+    pro_vwap_sigma: float = 2.0,
     re_entry_flags: str | list[int] | None = "0,1",
     stop_to_be_flags: str | list[int] | None = "0,1",
     break_even_flags: str | list[int] | None = "0,1",
@@ -584,6 +588,9 @@ def _iter_grid(
     yield {"type": "progress", "done": 0, "total": total, "workers": n_workers}
 
     tstop = float(time_stop_minutes or 0.0)
+    sigma_n = float(pro_vwap_sigma) if float(pro_vwap_sigma or 0) > 0 else 2.0
+    if sigma_n not in (1.0, 2.0, 3.0):
+        sigma_n = min((1.0, 2.0, 3.0), key=lambda x: abs(x - sigma_n))
     jobs: list[dict[str, Any]] = []
     for th, rr, wt, pro, slip, fee, sess, re, stobe, be, be_pct in combos:
         ea, eb, et = sess
@@ -621,6 +628,7 @@ def _iter_grid(
                         trade_mode=trade_mode,
                         tstop=tstop,
                         job=job,
+                        pro_vwap_sigma=sigma_n,
                     )
                 )
                 yield {
@@ -641,6 +649,7 @@ def _iter_grid(
                 "volume": float(volume),
                 "trade_mode": int(trade_mode),
                 "time_stop_minutes": tstop,
+                "pro_vwap_sigma": sigma_n,
             }
             executor = ProcessPoolExecutor(
                 max_workers=n_workers,

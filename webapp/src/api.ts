@@ -3,8 +3,10 @@ export type StrategyParams = {
   symbol: string
   tf: number
   wait_and_trade: boolean
-  /** Pro: Lo/Sh/Se/Co + VWAP±2σ qualifier (Directional-style entries). */
+  /** Pro: Lo/Sh/Se/Co + VWAP±Nσ qualifier (Directional-style entries). */
   pro_mode: boolean
+  /** Pro VWAP band multiplier: 1, 2, or 3 (default 2). */
+  pro_vwap_sigma: number
   rr: number
   volume: number
   threshold: number
@@ -347,6 +349,7 @@ export async function fetchOptimize(
     fee_pcts?: string
     min_trades?: number
     time_stop_minutes?: number
+    pro_vwap_sigma?: number
     re_entry_flags?: string
     stop_to_be_flags?: string
     break_even_flags?: string

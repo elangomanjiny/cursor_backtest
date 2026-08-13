@@ -124,7 +124,7 @@ class Aggressive:
     range: float
     # Pro classifier (Lo/Sh/Se/Co); empty when not Pro or not qualified
     pro_tag: str = ""
-    # True when AGGR is outside VWAP ±2σ (Pro qualifier)
+    # True when AGGR is outside VWAP ±Nσ (Pro qualifier)
     vwap_ok: bool = False
 
 
@@ -146,6 +146,7 @@ class BacktestResult:
     break_even: int = 0
     break_even_pct: float = 50.0
     pro_mode: int = 0
+    pro_vwap_sigma: float = 2.0
 
 
 def _to_ist(ts: pd.Timestamp | datetime) -> datetime:
@@ -205,11 +206,14 @@ class _BinanceVwapTracker:
         return vwap, float(np.sqrt(var))
 
 
-def _outside_vwap_2sigma(high: float, low: float, vwap: float, stdev: float) -> bool:
-    """Pro qualifier: candle must touch above +2σ or below −2σ."""
-    if not (stdev > 0 and np.isfinite(vwap)):
+def _outside_vwap_nsigma(
+    high: float, low: float, vwap: float, stdev: float, n_sigma: float = 2.0
+) -> bool:
+    """Pro qualifier: candle must touch above +Nσ or below −Nσ."""
+    n = float(n_sigma)
+    if n <= 0 or not (stdev > 0 and np.isfinite(vwap)):
         return False
-    return high >= vwap + 2.0 * stdev or low <= vwap - 2.0 * stdev
+    return high >= vwap + n * stdev or low <= vwap - n * stdev
 
 
 def _classify_pro_tag(
@@ -472,6 +476,7 @@ def run_backtest(
     break_even: int = 0,
     break_even_pct: float = 50.0,
     pro_mode: bool = False,
+    pro_vwap_sigma: float = 2.0,
     ticks: pd.DataFrame | None = None,
 ) -> BacktestResult:
     """
@@ -492,13 +497,17 @@ def run_backtest(
 
     Pro (pro_mode=True; wait_and_trade ignored/forced off):
       Classify AGGR as Lo/Sh/Se/Co vs prior close (LTP).
-      Qualifier: candle must be outside Binance VWAP ±2σ (05:30 IST session).
+      Qualifier: candle must be outside Binance VWAP ±Nσ (05:30 IST session; N=1/2/3).
       Long entries from Lo|Co; Short from Sh|Se; next-bar open (Directional-style).
       Optional BreakEven; no reverse / ORB trail.
     """
     pro = bool(pro_mode)
     if pro:
         wait_and_trade = False
+    sigma_n = float(pro_vwap_sigma) if float(pro_vwap_sigma or 0) > 0 else 2.0
+    if sigma_n not in (1.0, 2.0, 3.0):
+        # snap to nearest of 1/2/3
+        sigma_n = min((1.0, 2.0, 3.0), key=lambda x: abs(x - sigma_n))
     allow_long = trade_mode in (0, 2)
     allow_short = trade_mode in (1, 2)
     slip = float(slippage_pct or 0.0)
@@ -1032,13 +1041,13 @@ def run_backtest(
             side = "Buy" if dlt >= threshold else "Sell"
             rng = h - l
             ltp = float(prev_close) if prev_close is not None else o
-            vwap_ok = _outside_vwap_2sigma(h, l, vwap_px, vwap_sd)
+            vwap_ok = _outside_vwap_nsigma(h, l, vwap_px, vwap_sd, sigma_n)
             pro_tag = ""
             if pro:
                 if vwap_ok:
                     pro_tag = _classify_pro_tag(dlt, threshold, h, l, ltp)
                 else:
-                    events.append("AGGR-SKIP-VWAP2S")
+                    events.append(f"AGGR-SKIP-VWAP{int(sigma_n)}S")
             agg = Aggressive(
                 time=_to_ist(ot),
                 side=side,
@@ -1079,7 +1088,7 @@ def run_backtest(
                     }
                     pending_reentry = None
             elif pro:
-                # Pro: only arm when VWAP±2σ qualifier + Lo/Sh/Se/Co tag
+                # Pro: only arm when VWAP±Nσ qualifier + Lo/Sh/Se/Co tag
                 if pro_tag and _pro_long_bias(pro_tag) and allow_long:
                     long_setup = {
                         "signal_time": ot,
@@ -1222,6 +1231,7 @@ def run_backtest(
             "pro" if pro else ("non_directional" if wait_and_trade else "directional")
         ),
         "pro_mode": int(pro),
+        "pro_vwap_sigma": sigma_n,
         "exits": {
             r: sum(1 for t in trades if t.exit_reason == r)
             for r in sorted({t.exit_reason for t in trades})
@@ -1249,6 +1259,7 @@ def run_backtest(
         break_even=int(be_on),
         break_even_pct=round(be_frac * 100.0, 2),
         pro_mode=int(pro),
+        pro_vwap_sigma=sigma_n,
     )
 
 

@@ -27,6 +27,7 @@ const DEFAULTS: StrategyParams = {
   tf: 15,
   wait_and_trade: false,
   pro_mode: false,
+  pro_vwap_sigma: 2,
   rr: 1,
   volume: 0.01,
   threshold: 50,
@@ -188,6 +189,12 @@ export default function App() {
       rr: b.rr,
       wait_and_trade: b.wait_and_trade,
       pro_mode: Boolean((b as { pro_mode?: boolean | number }).pro_mode),
+      pro_vwap_sigma: (() => {
+        const n = Number(
+          (b as { pro_vwap_sigma?: number }).pro_vwap_sigma ?? p.pro_vwap_sigma ?? 2,
+        )
+        return n === 1 || n === 3 ? n : 2
+      })(),
       re_entry: 0,
       stop_to_be: 0,
       break_even: b.wait_and_trade ? 0 : Number(b.break_even ?? 0) ? 1 : 0,

@@ -207,6 +207,7 @@ def backtest(
     break_even: int = 0,
     break_even_pct: float = 50.0,
     pro_mode: bool = False,
+    pro_vwap_sigma: float = 2.0,
     start: str | None = "2026-08-01",
     end: str | None = "2026-08-03",
     exchange: str = "BINANCE_UM",
@@ -246,6 +247,7 @@ def backtest(
             break_even=1 if int(break_even or 0) else 0,
             break_even_pct=float(break_even_pct if break_even_pct is not None else 50),
             pro_mode=bool(pro_mode),
+            pro_vwap_sigma=float(pro_vwap_sigma if pro_vwap_sigma is not None else 2),
             ticks=ticks,
         )
     except FileNotFoundError as e:
@@ -278,6 +280,7 @@ def backtest(
             "tf": tf,
             "wait_and_trade": wait_and_trade,
             "pro_mode": bool(pro_mode),
+            "pro_vwap_sigma": float(pro_vwap_sigma if pro_vwap_sigma is not None else 2),
             "rr": rr,
             "volume": volume,
             "threshold": threshold,
@@ -334,6 +337,7 @@ def optimize(
     min_trades: int = 0,
     time_stop_minutes: float = 0.0,
     workers: int = 0,
+    pro_vwap_sigma: float = 2.0,
     stream: bool = False,
 ):
     _ensure_ready(exchange, symbol, start or "2026-08-01", end or "2026-08-03", tf)
@@ -378,6 +382,7 @@ def optimize(
         min_trades=min_trades,
         time_stop_minutes=time_stop_minutes,
         workers=workers,
+        pro_vwap_sigma=pro_vwap_sigma,
         ticks=ticks,
     )
 

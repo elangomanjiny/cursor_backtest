@@ -60,7 +60,7 @@ export function PerformanceOverviewDashboard({ data, visible = true }: Props) {
           {data.wait_and_trade
             ? 'Non-Directional'
             : data.pro_mode
-              ? 'Pro'
+              ? `Pro ±${Number((data.stats as { pro_vwap_sigma?: number })?.pro_vwap_sigma ?? data.params?.pro_vwap_sigma ?? 2)}σ`
               : 'Directional'}{' '}
           · v1.17.2
         </p>

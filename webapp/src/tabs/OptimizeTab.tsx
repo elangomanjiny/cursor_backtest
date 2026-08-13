@@ -33,6 +33,8 @@ export type OptimizeGrid = {
   fee_pcts: string
   min_trades: number
   time_stop_minutes: number
+  /** Pro VWAP ±Nσ (1/2/3); used when wait_flags includes pro */
+  pro_vwap_sigma: number
   /** 0 = auto (CPU-1, capped at 4) */
   workers: number
 }
@@ -152,6 +154,7 @@ export function OptimizeTab({
   const [thresholds, setThresholds] = useState('40,50,60')
   const [rrs, setRrs] = useState('0.5,1,1.5,2')
   const [waitFlags, setWaitFlags] = useState('false')
+  const [proSigma, setProSigma] = useState<1 | 2 | 3>(2)
   const [rankBy, setRankBy] = useState('sharpe')
   const [commonOn, setCommonOn] = useState(true)
   const [timeOptOn, setTimeOptOn] = useState(false)
@@ -227,6 +230,7 @@ export function OptimizeTab({
     fee_pcts: feePcts,
     min_trades: Math.max(0, minTrades),
     time_stop_minutes: timeStopOn ? Math.max(30, timeStopMin || 90) : 0,
+    pro_vwap_sigma: proSigma,
     workers: Math.max(0, Math.floor(workers)),
   })
 
@@ -459,8 +463,22 @@ export function OptimizeTab({
               value={waitFlags}
               onChange={(e) => setWaitFlags(e.target.value)}
               placeholder="false"
-              title="false=Directional, true=Non-Directional, pro=Pro (Lo/Sh/Se/Co + VWAP±2σ)"
+              title="false=Directional, true=Non-Directional, pro=Pro (Lo/Sh/Se/Co + VWAP±Nσ)"
             />
+          </label>
+          <label title="Pro VWAP band used when Strategy includes pro">
+            Pro σ
+            <select
+              value={proSigma}
+              onChange={(e) => {
+                const n = Number(e.target.value)
+                setProSigma(n === 1 || n === 3 ? n : 2)
+              }}
+            >
+              <option value={1}>±1σ</option>
+              <option value={2}>±2σ</option>
+              <option value={3}>±3σ</option>
+            </select>
           </label>
           <label title="Directional BreakEven">
             BE

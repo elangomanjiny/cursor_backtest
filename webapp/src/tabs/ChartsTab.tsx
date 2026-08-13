@@ -20,7 +20,7 @@ import { selectTrade, useChartStudy } from '../chartStudyStore'
 import {
   classifyAggrTag,
   computeVwap,
-  outsideVwap2Sigma,
+  outsideVwapNSigma,
   parseBandMultipliers,
   type AggrTag,
   type VwapSession,
@@ -372,10 +372,15 @@ export function ChartsTab({ data, visible = true }: Props) {
 
     if (showSignals) {
       const thr = Number(data.threshold) || 50
+      const sigmaN = Number(
+        (data.params as { pro_vwap_sigma?: number } | undefined)?.pro_vwap_sigma ??
+          (data.stats as { pro_vwap_sigma?: number } | undefined)?.pro_vwap_sigma ??
+          2,
+      )
       const vwapPts = computeVwap(data.bars, unit, {
         source: 'hlc3',
         session: 'binance',
-        bands: [2],
+        bands: [sigmaN],
       })
       const vwapMap = new Map(vwapPts.map((p) => [p.time, p]))
       for (const a of data.aggressive) {
@@ -386,7 +391,9 @@ export function ChartsTab({ data, visible = true }: Props) {
         const vp = vwapMap.get(t)
         const vwapOk =
           a.vwap_ok === true ||
-          (vp ? outsideVwap2Sigma(Number(a.high), Number(a.low), vp.vwap, vp.stdev) : false)
+          (vp
+            ? outsideVwapNSigma(Number(a.high), Number(a.low), vp.vwap, vp.stdev, sigmaN)
+            : false)
         const tag =
           backendTag === 'Lo' ||
           backendTag === 'Sh' ||
