@@ -33,7 +33,7 @@ from backend.engine.volume_delta import (  # noqa: E402
     write_parity_report,
 )
 
-APP_VERSION = "1.17.2"
+APP_VERSION = "2.0.0"
 app = FastAPI(title="cursor_backtest", version=APP_VERSION)
 app.add_middleware(
     CORSMiddleware,
@@ -211,6 +211,8 @@ def backtest(
     start: str | None = "2026-08-01",
     end: str | None = "2026-08-03",
     exchange: str = "BINANCE_UM",
+    # Optional IST weekday filter (same tokens as optimize) for Apply parity.
+    dayofweek: str | None = None,
 ):
     avail = _ensure_ready(
         exchange, symbol, start or "2026-08-01", end or "2026-08-03", tf
@@ -220,6 +222,19 @@ def backtest(
     scoped = _scope_bars(bars, start, end)
     if scoped.empty:
         raise HTTPException(400, "No bars in requested range")
+
+    # Match optimize common day-of-week bar filter when Apply sends dayofweek.
+    if dayofweek and str(dayofweek).strip():
+        from backend.engine.optimize import apply_common_filters
+
+        scoped = apply_common_filters(
+            scoped,
+            common_optimizer=True,
+            timewindow=None,
+            dayofweek=dayofweek,
+        )
+        if scoped.empty:
+            raise HTTPException(400, "No bars left after dayofweek filter")
 
     try:
         ticks = load_ticks(symbol, start=start, end=end)
@@ -324,8 +339,11 @@ def optimize(
     common_optimizer: bool = False,
     time_optimizer: bool = False,
     time_step_minutes: int = 30,
-    timewindow: str = "09:30-21:00",
-    dayofweek: str = "mon,tue,wed,thu,fri",
+    # Empty = no bar-level clock filter (session After/Before/Flat still apply in-engine).
+    # Do NOT default to 09:30-21:00 — an omitted/empty timewindow used to silently
+    # shrink bars vs Apply→Backtest and caused thr/PnL mismatches (e.g. 7 vs 9 trades).
+    timewindow: str = "",
+    dayofweek: str = "mon,tue,wed,thu,fri,sat,sun",
     entry_after: int = 330,
     entry_before: int = 1260,
     exit_time: int = 1260,

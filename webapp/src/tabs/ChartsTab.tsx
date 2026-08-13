@@ -211,12 +211,15 @@ export function ChartsTab({ data, visible = true, proMode = false }: Props) {
         vertLines: { color: '#21262d' },
         horzLines: { color: '#21262d' },
       },
-      rightPriceScale: { borderColor: '#30363d' },
       timeScale: {
         borderColor: '#30363d',
         timeVisible: true,
         timeZone: 'Asia/Kolkata',
         locale: 'en-IN',
+      },
+      rightPriceScale: {
+        borderColor: '#30363d',
+        scaleMargins: { top: 0.06, bottom: 0.08 },
       },
       crosshair: { mode: CrosshairMode.Normal },
       handleScroll: {
@@ -595,15 +598,25 @@ export function ChartsTab({ data, visible = true, proMode = false }: Props) {
     }
     chart.timeScale().subscribeVisibleLogicalRangeChange(onRange)
 
+    const padRightLogical = (extra = 14) => {
+      const r = chart.timeScale().getVisibleLogicalRange()
+      if (!r) return
+      chart.timeScale().setVisibleLogicalRange({ from: r.from, to: r.to + extra })
+    }
     const saved = loadChartRange()
     if (saved) {
       try {
-        chart.timeScale().setVisibleLogicalRange(saved)
+        chart.timeScale().setVisibleLogicalRange({
+          from: saved.from,
+          to: saved.to + 14,
+        })
       } catch {
         chart.timeScale().fitContent()
+        padRightLogical(14)
       }
     } else {
       chart.timeScale().fitContent()
+      padRightLogical(14)
     }
 
     const onResize = () => {
@@ -702,9 +715,14 @@ export function ChartsTab({ data, visible = true, proMode = false }: Props) {
   }
 
   const reset = () => {
-    chartRef.current?.timeScale().fitContent()
-    const r = chartRef.current?.timeScale().getVisibleLogicalRange()
-    if (r) saveChartRange({ from: r.from, to: r.to })
+    const ts = chartRef.current?.timeScale()
+    ts?.fitContent()
+    const r = ts?.getVisibleLogicalRange()
+    if (r) {
+      ts?.setVisibleLogicalRange({ from: r.from, to: r.to + 14 })
+      const padded = ts?.getVisibleLogicalRange()
+      if (padded) saveChartRange({ from: padded.from, to: padded.to })
+    }
   }
   const resetY = () => {
     const chart = chartRef.current

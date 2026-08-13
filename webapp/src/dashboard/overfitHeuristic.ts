@@ -29,6 +29,7 @@ export function comboKey(r: {
   threshold: number
   rr: number
   wait_and_trade?: boolean
+  pro_mode?: number | boolean
   break_even?: number
   break_even_pct?: number
   slippage_pct?: number
@@ -37,16 +38,21 @@ export function comboKey(r: {
   entry_before?: number
   exit_time?: number
 }): string {
+  const n = (v: unknown) => {
+    const x = Number(v ?? 0)
+    return Number.isFinite(x) ? String(x) : '0'
+  }
   return [
-    r.threshold,
-    r.rr,
+    n(r.threshold),
+    n(r.rr),
     r.wait_and_trade ? 1 : 0,
-    r.break_even ?? 0,
-    r.break_even_pct ?? 0,
-    r.slippage_pct ?? 0,
-    r.fee_pct ?? 0,
-    r.entry_after ?? 0,
-    r.entry_before ?? 0,
-    r.exit_time ?? 0,
+    r.pro_mode ? 1 : 0,
+    n(r.break_even),
+    n(r.break_even_pct),
+    n(r.slippage_pct),
+    n(r.fee_pct),
+    n(r.entry_after),
+    n(r.entry_before),
+    n(r.exit_time),
   ].join('|')
 }

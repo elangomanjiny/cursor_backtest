@@ -115,18 +115,23 @@ export function MetricRow({
   )
 }
 
+/** Visualize max consecutive streak lengths (not trade counts). */
 export function StreakBars({ wins, losses }: { wins: number; losses: number }) {
   const max = Math.max(wins, losses, 1)
   return (
     <div className="pod-streaks">
       <div className="pod-streak">
-        <span>Wins ×{wins}</span>
+        <span title="Longest consecutive winning streak (not number of winning trades)">
+          Max win streak {wins}
+        </span>
         <div className="pod-streak-track">
           <div className="pod-streak-fill win" style={{ width: `${(100 * wins) / max}%` }} />
         </div>
       </div>
       <div className="pod-streak">
-        <span>Losses ×{losses}</span>
+        <span title="Longest consecutive losing streak (not number of losing trades)">
+          Max loss streak {losses}
+        </span>
         <div className="pod-streak-track">
           <div className="pod-streak-fill loss" style={{ width: `${(100 * losses) / max}%` }} />
         </div>

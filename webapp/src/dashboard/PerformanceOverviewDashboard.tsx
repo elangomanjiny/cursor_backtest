@@ -223,8 +223,20 @@ export function PerformanceOverviewDashboard({ data, visible = true }: Props) {
           <h3 className="pod-section-h">TRADE PnL</h3>
           <div className="pod-hero">
             <div className="pod-hero-lab">Total Net Profit ({sideFilter.toUpperCase()})</div>
-            <div className={`pod-hero-val ${filteredBucket.netPnl >= 0 ? 'pos' : 'neg'}`}>
-              {safeNum(filteredBucket.netPnl)}
+            <div
+              className={`pod-hero-val ${
+                (sideFilter === 'all'
+                  ? Number(data.stats?.net_pnl ?? filteredBucket.netPnl)
+                  : filteredBucket.netPnl) >= 0
+                  ? 'pos'
+                  : 'neg'
+              }`}
+            >
+              {safeNum(
+                sideFilter === 'all'
+                  ? Number(data.stats?.net_pnl ?? filteredBucket.netPnl)
+                  : filteredBucket.netPnl,
+              )}
             </div>
           </div>
           <table className="pod-side-table">
@@ -239,7 +251,10 @@ export function PerformanceOverviewDashboard({ data, visible = true }: Props) {
             <tbody>
               <tr>
                 <td>Net Profit</td>
-                <SideCell value={safeNum(all.netPnl)} tone={sideTone(all.netPnl)} />
+                <SideCell
+                  value={safeNum(Number(data.stats?.net_pnl ?? all.netPnl))}
+                  tone={sideTone(Number(data.stats?.net_pnl ?? all.netPnl))}
+                />
                 <SideCell
                   value={long.trades ? safeNum(long.netPnl) : '—'}
                   tone={sideTone(long.netPnl)}
@@ -288,12 +303,36 @@ export function PerformanceOverviewDashboard({ data, visible = true }: Props) {
                 <SideCell value={long.trades ? safeNum(long.profitFactor) : '—'} tone="long" />
                 <SideCell value={short.trades ? safeNum(short.profitFactor) : '—'} tone="short" />
               </tr>
+              <tr>
+                <td>Avg MFE</td>
+                <SideCell value={safeNum(all.avgMfe)} />
+                <SideCell value={long.trades ? safeNum(long.avgMfe) : '—'} tone="long" />
+                <SideCell value={short.trades ? safeNum(short.avgMfe) : '—'} tone="short" />
+              </tr>
+              <tr>
+                <td>Avg MAE</td>
+                <SideCell value={safeNum(all.avgMae)} />
+                <SideCell value={long.trades ? safeNum(long.avgMae) : '—'} tone="long" />
+                <SideCell value={short.trades ? safeNum(short.avgMae) : '—'} tone="short" />
+              </tr>
+              <tr>
+                <td>E-ratio</td>
+                <SideCell value={safeNum(all.eRatio)} />
+                <SideCell value={long.trades ? safeNum(long.eRatio) : '—'} tone="long" />
+                <SideCell value={short.trades ? safeNum(short.eRatio) : '—'} tone="short" />
+              </tr>
+              <tr>
+                <td>SQN</td>
+                <SideCell value={safeNum(all.sqn)} />
+                <SideCell value={long.trades ? safeNum(long.sqn) : '—'} tone="long" />
+                <SideCell value={short.trades ? safeNum(short.sqn) : '—'} tone="short" />
+              </tr>
             </tbody>
           </table>
         </section>
 
         <section className="glass-panel pod-stat-card">
-          <h3 className="pod-section-h">TRADE DURATION</h3>
+          <h3 className="pod-section-h">CONSECUTIVE WINS / LOSSES</h3>
           <table className="pod-side-table">
             <thead>
               <tr>
@@ -305,45 +344,45 @@ export function PerformanceOverviewDashboard({ data, visible = true }: Props) {
             </thead>
             <tbody>
               <tr>
-                <td>Avg Duration</td>
-                <SideCell value={fmtDur(all.avgDurationHours)} />
-                <SideCell value={long.trades ? fmtDur(long.avgDurationHours) : '—'} tone="long" />
+                <td>Max Consec Wins</td>
+                <SideCell value={String(all.maxConsecWins)} />
                 <SideCell
-                  value={short.trades ? fmtDur(short.avgDurationHours) : '—'}
+                  value={long.trades ? String(long.maxConsecWins) : '—'}
+                  tone="long"
+                />
+                <SideCell
+                  value={short.trades ? String(short.maxConsecWins) : '—'}
                   tone="short"
                 />
               </tr>
               <tr>
-                <td>Avg Win Duration</td>
-                <SideCell value={fmtDur(all.avgWinDurationHours)} />
+                <td>Max Consec Losses</td>
+                <SideCell value={String(all.maxConsecLosses)} />
                 <SideCell
-                  value={long.trades ? fmtDur(long.avgWinDurationHours) : '—'}
+                  value={long.trades ? String(long.maxConsecLosses) : '—'}
                   tone="long"
                 />
                 <SideCell
-                  value={short.trades ? fmtDur(short.avgWinDurationHours) : '—'}
-                  tone="short"
-                />
-              </tr>
-              <tr>
-                <td>Avg Loss Duration</td>
-                <SideCell value={fmtDur(all.avgLossDurationHours)} />
-                <SideCell
-                  value={long.trades ? fmtDur(long.avgLossDurationHours) : '—'}
-                  tone="long"
-                />
-                <SideCell
-                  value={short.trades ? fmtDur(short.avgLossDurationHours) : '—'}
+                  value={short.trades ? String(short.maxConsecLosses) : '—'}
                   tone="short"
                 />
               </tr>
             </tbody>
           </table>
+          <StreakBars wins={filteredBucket.maxConsecWins} losses={filteredBucket.maxConsecLosses} />
+          <p className="pod-card-note">
+            Streaks = longest run of wins/losses in sequence — not Win× / Loss× trade counts
+            (see Extreme Stats). ALL short: {short.winCount}W + {short.lossCount}L ={' '}
+            {short.trades} trades.
+          </p>
         </section>
 
         <section className="glass-panel pod-stat-card">
           <h3 className="pod-section-h">EXTREME STATS</h3>
-          <StreakBars wins={m.maxConsecWins} losses={m.maxConsecLosses} />
+          <MetricRow icon="✓" label="Long Win ×" value={String(long.winCount)} />
+          <MetricRow icon="✗" label="Long Loss ×" value={String(long.lossCount)} />
+          <MetricRow icon="✓" label="Short Win ×" value={String(short.winCount)} />
+          <MetricRow icon="✗" label="Short Loss ×" value={String(short.lossCount)} />
           <MetricRow
             icon="★"
             label="Largest Long Win"

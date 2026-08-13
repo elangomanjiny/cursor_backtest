@@ -1,11 +1,22 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { BacktestStats, OptimizePoint, OptimizeResult, SystemResources } from '../api'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from 'react'
+import type { OptimizePoint, OptimizeResult, SystemResources } from '../api'
 import { fetchSystemResources } from '../api'
 import { fmt2, fmtPct } from '../format'
-import { downloadOptimizeCsv } from '../metricsCatalog'
-import { MetricsPanel } from '../components/MetricsPanel'
+import {
+  downloadComboDetailCsv,
+  matchColumnFilter,
+  OPTIMIZE_REPORT_COLUMNS,
+} from '../metricsCatalog'
 import { SortTh, useSortable } from '../useSortable'
 import { OptimizeHeatmap } from '../dashboard/OptimizeHeatmap'
+import { MiniEquityChart } from '../dashboard/MiniEquityChart'
 import { comboKey, flagOverfitRisk } from '../dashboard/overfitHeuristic'
 
 export type OptimizeGrid = {
@@ -57,6 +68,8 @@ type Props = {
   onApplyBest: () => void
   onLoadCombo?: (point: OptimizePoint) => void
 }
+
+type SubTab = 'config' | 'heatmap' | 'leaderboard'
 
 const RANK_OPTIONS = [
   ['sharpe', 'Sharpe'],
@@ -134,6 +147,21 @@ function summarizeTrades(trades: BestTradeLite[]) {
   }
 }
 
+function robustnessScore(r: Record<string, unknown>, overfit: boolean): number {
+  const sharpe = Number(r.sharpe ?? 0)
+  const n = Number(r.trades ?? 0)
+  const dd = Math.abs(Number(r.max_drawdown ?? 0))
+  const pf = Number(r.profit_factor ?? 0)
+  let s = 50
+  s += Math.max(-20, Math.min(25, sharpe * 8))
+  s += Math.max(0, Math.min(15, Math.log10(Math.max(n, 1)) * 8))
+  s -= Math.min(25, dd > 100 ? dd / 50 : dd)
+  s += Math.max(-10, Math.min(10, (pf - 1) * 5))
+  if (overfit) s -= 25
+  if (Number(r.net_pnl ?? 0) <= 0) s -= 10
+  return Math.max(0, Math.min(100, Math.round(s)))
+}
+
 export function OptimizeTab({
   result,
   busy,
@@ -150,6 +178,7 @@ export function OptimizeTab({
   onApplyBest,
   onLoadCombo,
 }: Props) {
+  const [subTab, setSubTab] = useState<SubTab>('config')
   const [tf, setTf] = useState(defaultTf)
   const [thresholds, setThresholds] = useState('40,50,60')
   const [rrs, setRrs] = useState('0.5,1,1.5,2')
@@ -169,19 +198,24 @@ export function OptimizeTab({
     defaultSlip > 0 ? `0,${defaultSlip}` : '0,0.01',
   )
   const [feePcts, setFeePcts] = useState(defaultFee > 0 ? `0,${defaultFee}` : '0,0.01')
-  const [minTrades, setMinTrades] = useState(3)
   const [beOff, setBeOff] = useState(true)
   const [beOn, setBeOn] = useState(true)
   const [bePcts, setBePcts] = useState('50')
   const [workers, setWorkers] = useState(0)
   const [resources, setResources] = useState<SystemResources | null>(null)
   const [selectedComboKey, setSelectedComboKey] = useState<string | null>(null)
+  /** Direct object so Heatmap overview tracks the clicked cell, not only rank #1 */
+  const [selectedCombo, setSelectedCombo] = useState<OptimizePoint | null>(null)
 
   const lastGrid = useRef<OptimizeGrid | null>(null)
+  const lastRunRef = useRef(false)
   const [filterDays, setFilterDays] = useState<Set<string>>(
     () => new Set(['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']),
   )
   const [filterHours, setFilterHours] = useState<Set<number> | null>(null)
+
+  const [colFilters, setColFilters] = useState<Record<string, string>>({})
+  const [hourMode, setHourMode] = useState<'trades' | 'pnl' | 'cost'>('pnl')
 
   const breakEvenFlags = useMemo(() => {
     const parts: string[] = []
@@ -226,16 +260,22 @@ export function OptimizeTab({
     exit_time_to: exitTime,
     slippage_pcts: slipPcts,
     fee_pcts: feePcts,
-    min_trades: Math.max(0, minTrades),
+    min_trades: 0,
     time_stop_minutes: 0,
     pro_vwap_sigma: proSigma,
     workers: Math.max(0, Math.floor(workers)),
   })
 
   useEffect(() => {
-    if (!result) return
+    if (!result) {
+      setSelectedCombo(null)
+      setSelectedComboKey(null)
+      return
+    }
     setFilterDays(new Set(['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']))
     setFilterHours(null)
+    setSelectedCombo(null)
+    setSelectedComboKey(null)
   }, [result])
 
   useEffect(() => {
@@ -262,6 +302,13 @@ export function OptimizeTab({
     }
   }, [busy])
 
+  useEffect(() => {
+    if (!busy && result && lastRunRef.current) {
+      lastRunRef.current = false
+      setSubTab('heatmap')
+    }
+  }, [busy, result])
+
   const filteredBest = useMemo(() => {
     const raw = result?.best_trades
     if (!raw?.length) return null
@@ -275,10 +322,61 @@ export function OptimizeTab({
   }, [result?.best_trades, filterDays, filterHours])
 
   const heatmap =
-    filteredBest?.entry_hours || result?.entry_hour_heatmap || result?.best?.entry_hours || null
-  const heatMax = heatmap
-    ? Math.max(1, ...Object.values(heatmap).map((n) => Number(n) || 0))
-    : 1
+    (selectedCombo?.entry_hours as Record<string, number> | undefined) ||
+    filteredBest?.entry_hours ||
+    result?.entry_hour_heatmap ||
+    result?.best?.entry_hours ||
+    null
+
+  const hourBuckets = useMemo(() => {
+    type B = { trades: number; pnl: number; cost: number }
+    const out: Record<number, B> = {}
+    for (let h = 0; h < 24; h++) out[h] = { trades: 0, pnl: 0, cost: 0 }
+
+    const lite = selectedCombo?.trades_lite
+    const fromLite = lite?.length
+      ? lite
+      : !selectedCombo && result?.best_trades?.length
+        ? result.best_trades.map((t) => ({
+            entry_time: t.entry_time,
+            pnl: t.pnl,
+            slippage: 0,
+            fee: 0,
+          }))
+        : null
+
+    if (fromLite) {
+      for (const t of fromLite) {
+        const et = String(t.entry_time || '')
+        if (!et) continue
+        if (!filterDays.has(istDow(et))) continue
+        const h = istHour(et)
+        if (filterHours && !filterHours.has(h)) continue
+        out[h].trades += 1
+        out[h].pnl += Number(t.pnl) || 0
+        out[h].cost +=
+          Number((t as { slippage?: number }).slippage || 0) +
+          Number((t as { fee?: number }).fee || 0)
+      }
+      return out
+    }
+
+    for (let h = 0; h < 24; h++) {
+      out[h].trades = Number(heatmap?.[String(h)] || 0)
+    }
+    return out
+  }, [selectedCombo, result?.best_trades, filterDays, filterHours, heatmap])
+
+  const hourMax = useMemo(() => {
+    let m = 1e-9
+    for (let h = 0; h < 24; h++) {
+      const b = hourBuckets[h]
+      const v =
+        hourMode === 'trades' ? b.trades : hourMode === 'pnl' ? Math.abs(b.pnl) : b.cost
+      if (v > m) m = v
+    }
+    return m
+  }, [hourBuckets, hourMode])
 
   const optRows = useMemo(
     () =>
@@ -292,6 +390,7 @@ export function OptimizeTab({
             ? -1
             : Number(r.break_even_pct ?? 50),
         _key: comboKey(r),
+        _robust: 0,
       })),
     [result?.results],
   )
@@ -301,14 +400,54 @@ export function OptimizeTab({
     [result?.results],
   )
 
-  const optGet = useCallback((row: (typeof optRows)[number], key: string): unknown => {
+  const optRowsScored = useMemo(
+    () =>
+      optRows.map((r) => ({
+        ...r,
+        _robust: robustnessScore(r as unknown as Record<string, unknown>, overfitKeys.has(r._key)),
+      })),
+    [optRows, overfitKeys],
+  )
+
+  const filterCellValue = useCallback(
+    (r: (typeof optRowsScored)[number], key: string): unknown => {
+      if (key === '_strategy' || key === 'strategy') return r._strategy
+      if (key === '_be' || key === 'be') return r._be
+      if (key === '_bePct' || key === 'break_even_pct') return r._bePct < 0 ? '' : r._bePct
+      if (key === '_robust' || key === 'robustness') return r._robust
+      if (key === 'after' || key === 'entry_after') return minsToTime(Number(r.entry_after ?? 0))
+      if (key === 'before' || key === 'entry_before') return minsToTime(Number(r.entry_before ?? 0))
+      if (key === 'flat' || key === 'exit_time') return minsToTime(Number(r.exit_time ?? 0))
+      return (r as unknown as Record<string, unknown>)[key]
+    },
+    [],
+  )
+
+  const lbRows = useMemo(() => {
+    const active = Object.entries(colFilters).filter(([, v]) => v.trim())
+    if (!active.length) return optRowsScored
+    return optRowsScored.filter((r) =>
+      active.every(([key, f]) => matchColumnFilter(filterCellValue(r, key), f)),
+    )
+  }, [optRowsScored, colFilters, filterCellValue])
+
+  const optGet = useCallback((row: (typeof optRowsScored)[number], key: string): unknown => {
     return (row as unknown as Record<string, unknown>)[key]
   }, [])
 
-  const optSort = useSortable(optRows, optGet, { key: '_rank', dir: 'asc' })
+  const optSort = useSortable(lbRows, optGet, { key: '_rank', dir: 'asc' })
 
-  const loadCombo = (point: OptimizePoint) => {
+  /** Select for Heatmap inspection (does not leave Optimize). */
+  const selectCombo = (point: OptimizePoint) => {
     setSelectedComboKey(comboKey(point))
+    setSelectedCombo(point)
+    setSubTab('heatmap')
+  }
+
+  /** Load into Backtest engine (switches to Backtest tab). */
+  const applyCombo = (point: OptimizePoint) => {
+    setSelectedComboKey(comboKey(point))
+    setSelectedCombo(point)
     onLoadCombo?.(point)
   }
 
@@ -347,560 +486,860 @@ export function OptimizeTab({
     })
   }
 
-  const onCsv = () => {
-    if (!result?.results?.length) return
+  const downloadRowCsv = (r: (typeof optRowsScored)[number], e?: ReactMouseEvent) => {
+    e?.stopPropagation()
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
-    downloadOptimizeCsv(result.results as unknown as Record<string, unknown>[], `optimize-${stamp}.csv`)
+    const thr = fmt2(r.threshold).replace('.', 'p')
+    const rr = fmt2(r.rr).replace('.', 'p')
+    downloadComboDetailCsv(
+      r as unknown as Record<string, unknown>,
+      `optimize-combo-thr${thr}-rr${rr}-${stamp}.csv`,
+    )
   }
 
   const run = () => {
     const dayStr = daysToStr(days)
     const grid = buildGrid(dayStr)
     lastGrid.current = grid
+    lastRunRef.current = true
     onRun(grid)
   }
 
   const best = result?.best
+  const showProgress = busy || Boolean(progress && progress.total > 0)
+
+  const overview = selectedCombo ?? result?.best ?? null
+  const overviewIsSelected = Boolean(selectedCombo)
+
+  /** Hour/day filters for Selected Combo — show beside raw optimize metrics. */
+  const filteredOverview = useMemo(() => {
+    const lite = overview?.trades_lite
+    if (!lite?.length) return null
+    const hourSet = filterHours
+    const trades = lite.filter((t) => {
+      if (!filterDays.has(istDow(String(t.entry_time)))) return false
+      if (hourSet && !hourSet.has(istHour(String(t.entry_time)))) return false
+      return true
+    })
+    if (trades.length === lite.length && !hourSet) return null
+    return summarizeTrades(
+      trades.map((t) => ({
+        entry_time: String(t.entry_time),
+        pnl: Number(t.pnl) || 0,
+      })),
+    )
+  }, [overview, filterDays, filterHours])
+
+  const equitySpark = useMemo(() => {
+    if (overview && Array.isArray(overview.equity_spark) && overview.equity_spark.length) {
+      return overview.equity_spark as number[]
+    }
+    if (!selectedCombo && result?.best_trades?.length) {
+      let eq = 0
+      return result.best_trades.map((t) => {
+        eq += Number(t.pnl) || 0
+        return eq
+      })
+    }
+    return [] as number[]
+  }, [overview, selectedCombo, result?.best_trades])
+
+  const sparkMin = equitySpark.length ? Math.min(...equitySpark, 0) : 0
+  const sparkMax = equitySpark.length ? Math.max(...equitySpark, 0) : 1
+  const sparkRange = Math.max(1e-9, sparkMax - sparkMin)
+
+  const vsBest = useMemo(() => {
+    if (!overview || !best) return null
+    if (comboKey(overview) === comboKey(best)) return null
+    const d = (a: number, b: number) => a - b
+    return {
+      sharpe: d(Number(overview.sharpe ?? 0), Number(best.sharpe ?? 0)),
+      net: d(Number(overview.net_pnl ?? 0), Number(best.net_pnl ?? 0)),
+      pf: d(Number(overview.profit_factor ?? 0), Number(best.profit_factor ?? 0)),
+      win: d(Number(overview.win_rate ?? 0), Number(best.win_rate ?? 0)),
+      trades: d(Number(overview.trades ?? 0), Number(best.trades ?? 0)),
+      dd: d(Number(overview.max_drawdown ?? 0), Number(best.max_drawdown ?? 0)),
+      sqn: d(Number(overview.sqn ?? 0), Number(best.sqn ?? 0)),
+    }
+  }, [overview, best])
+
+  const timeOptActive = Boolean(result?.time_optimizer)
 
   return (
     <div className="opt-shell">
-      {/* —— Top control bar (2 rows) —— */}
-      <div className="opt-topbar">
-        <div className="opt-topbar-row">
-          <div className="opt-title-block">
-            <h2>Optimize</h2>
-            {!dataReady && <span className="opt-warn">Load data first</span>}
-      </div>
-          <label title="Bar timeframe for this optimize run (independent of Backtest TF)">
-            TF
-            <select
-              value={tf}
-              disabled={busy}
-              onChange={(e) => setTf(Number(e.target.value))}
-            >
-              {TF_OPTS.map((m) => (
-                <option key={m} value={m}>
-                  {m}m
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="check opt-toggle">
-          <input
-            type="checkbox"
-            checked={commonOn}
-              onChange={(e) => {
-                const on = e.target.checked
-                setCommonOn(on)
-                if (!on) setTimeOptOn(false)
-              }}
-            />
-            Common
-          </label>
-          <label className="check opt-toggle" title="Sweep entry-start (After) across the window by Step">
-            <input
-              type="checkbox"
-              checked={timeOptOn}
-              disabled={!commonOn}
-              onChange={(e) => setTimeOptOn(e.target.checked)}
-            />
-            Time opt
-          </label>
-          <label>
-            Slip%
-            <input
-              className="num-plain"
-              disabled={!commonOn}
-              value={slipPcts}
-              onChange={(e) => setSlipPcts(e.target.value)}
-            />
-        </label>
-          <label>
-            Fee%
-            <input
-              className="num-plain"
-              disabled={!commonOn}
-              value={feePcts}
-              onChange={(e) => setFeePcts(e.target.value)}
-            />
-          </label>
-          <label>
-            Min trades
-            <input
-              className="num-plain"
-              type="number"
-              min={0}
-              disabled={!commonOn}
-              value={minTrades}
-              onChange={(e) => setMinTrades(Math.max(0, Number(e.target.value) || 0))}
-            />
-          </label>
-        <label>
-            Thr
-          <input value={thresholds} onChange={(e) => setThresholds(e.target.value)} />
-        </label>
-        <label>
-            RR
-          <input value={rrs} onChange={(e) => setRrs(e.target.value)} />
-        </label>
-        <label>
-            Strategy
-            <input
-              value={waitFlags}
-              onChange={(e) => setWaitFlags(e.target.value)}
-              placeholder="false"
-              title="false=Directional, true=Non-Directional, pro=Pro (Lo/Sh/Se/Co + VWAP±Nσ)"
-            />
-          </label>
-          <label title="Pro VWAP band used when Strategy includes pro">
-            Pro σ
-            <select
-              value={proSigma}
-              onChange={(e) => {
-                const n = Number(e.target.value)
-                setProSigma(n === 1 || n === 3 ? n : 2)
-              }}
-            >
-              <option value={1}>±1σ</option>
-              <option value={2}>±2σ</option>
-              <option value={3}>±3σ</option>
-            </select>
-          </label>
-          <label title="Directional BreakEven">
-            BE
-            <div className="be-opt-flags">
-              <label className="check">
-                <input
-                  type="checkbox"
-                  checked={beOff}
-                  onChange={(e) => {
-                    const on = e.target.checked
-                    if (!on && !beOn) return
-                    setBeOff(on)
-                  }}
-                />
-                Off
-              </label>
-              <label className="check">
-                <input
-                  type="checkbox"
-                  checked={beOn}
-                  onChange={(e) => {
-                    const on = e.target.checked
-                    if (!on && !beOff) return
-                    setBeOn(on)
-                  }}
-                />
-                On
-              </label>
-            </div>
-        </label>
-          <label>
-            BE%
-            <input
-              value={bePcts}
-              disabled={!beOn}
-              onChange={(e) => setBePcts(e.target.value)}
-              placeholder="50"
-            />
-        </label>
-        <label>
-            Rank
-          <select value={rankBy} onChange={(e) => setRankBy(e.target.value)}>
-            {RANK_OPTIONS.map(([v, lab]) => (
-              <option key={v} value={v}>
-                {lab}
-              </option>
-            ))}
-          </select>
-        </label>
-          <label>
-            Workers
-            <select value={workers} onChange={(e) => setWorkers(Number(e.target.value))}>
-              <option value={0}>Auto</option>
-              <option value={1}>1</option>
-              <option value={2}>2</option>
-              <option value={3}>3</option>
-              <option value={4}>4</option>
-              <option value={6}>6</option>
-              <option value={8}>8</option>
-            </select>
-          </label>
-          <button disabled={busy || !dataReady} onClick={run}>
-            {busy ? '…' : 'Run'}
-          </button>
-          {busy && (
-            <button type="button" className="ghost danger" onClick={() => onStop?.()}>
-              Stop
-            </button>
-          )}
-          {best && (
-            <button className="ghost" onClick={onApplyBest} disabled={busy}>
-              Apply best
+      <nav className="opt-subnav">
+        <button
+          type="button"
+          className={subTab === 'config' ? 'active' : ''}
+          onClick={() => setSubTab('config')}
+        >
+          Config &amp; Execution
         </button>
-          )}
-          <button className="ghost" disabled={!result?.results?.length} onClick={onCsv}>
-            CSV
-          </button>
-        </div>
+        <button
+          type="button"
+          className={subTab === 'heatmap' ? 'active' : ''}
+          onClick={() => setSubTab('heatmap')}
+        >
+          Heatmap &amp; Surface
+        </button>
+        <button
+          type="button"
+          className={subTab === 'leaderboard' ? 'active' : ''}
+          onClick={() => setSubTab('leaderboard')}
+        >
+          Leaderboard &amp; Robustness
+        </button>
+      </nav>
 
-        <div className="opt-topbar-row opt-time-row" style={{ opacity: commonOn ? 1 : 0.45 }}>
-          <span className="opt-lab">Hours (IST)</span>
-          <label title="Grid step for sweeping entry-start from After up to Before − Step">
-            Step
-            <select
-              disabled={!commonOn || !timeOptOn}
-              value={timeStep}
-              onChange={(e) => setTimeStep(Number(e.target.value) === 60 ? 60 : 30)}
-            >
-              <option value={30}>30m</option>
-              <option value={60}>1h</option>
-            </select>
-          </label>
-          <label title="Entry window start (IST). With Time opt: first start time in the sweep">
-            After
-            <input
-              type="time"
-              disabled={!commonOn}
-              value={minsToTime(entryAfter)}
-              onChange={(e) => setEntryAfter(timeToMins(e.target.value))}
+      {showProgress && (
+        <div
+          className={`opt-progress compact ${
+            resources?.warn_level === 'red'
+              ? 'warn-red'
+              : resources?.warn_level === 'amber'
+                ? 'warn-amber'
+                : ''
+          }`}
+        >
+          <div className="opt-progress-meta">
+            <span>
+              {busy ? `${progress?.done ?? 0} / ${progress?.total || '…'}` : 'Done'}
+            </span>
+            <span>
+              {progress && progress.total > 0
+                ? `${Math.round((100 * progress.done) / progress.total)}%`
+                : '—'}
+            </span>
+            {resources?.ram_percent != null && (
+              <span>
+                RAM {fmt2(resources.ram_percent)}%
+                {resources.warn_level === 'red'
+                  ? ' · Critical'
+                  : resources.warn_level === 'amber'
+                    ? ' · High'
+                    : ''}
+              </span>
+            )}
+            <span>w={progress?.workers ?? (workers || 'Auto')}</span>
+          </div>
+          <div className="opt-progress-track">
+            <div
+              className="opt-progress-fill"
+              style={{
+                width:
+                  progress && progress.total > 0
+                    ? `${Math.min(100, (100 * progress.done) / progress.total)}%`
+                    : busy
+                      ? '8%'
+                      : '0%',
+              }}
             />
-          </label>
-          <label title="Entry window end (IST). New entries only while After ≤ clock < Before">
-            Before
-            <input
-              type="time"
-              disabled={!commonOn}
-              value={minsToTime(entryBefore)}
-              onChange={(e) => setEntryBefore(timeToMins(e.target.value))}
-            />
-          </label>
-          <label title="Force-flat / square-off (IST). Open positions close here; must be ≥ Before">
-            Flat
-            <input
-              type="time"
-              disabled={!commonOn}
-              value={minsToTime(exitTime)}
-              onChange={(e) => setExitTime(timeToMins(e.target.value))}
-            />
-          </label>
-          <span className="opt-est">
-            {timeOptOn
-              ? `~${estSessions} starts · ${minsToTime(entryAfter)}→${minsToTime(entryAfterTo)} / before ${minsToTime(entryBefore)} · flat ${minsToTime(exitTime)}`
-              : `${minsToTime(entryAfter)}–${minsToTime(entryBefore)} · flat ${minsToTime(exitTime)}`}
-          </span>
+          </div>
         </div>
+      )}
 
-        {(busy || (progress && progress.total > 0)) && (
-          <div
-            className={`opt-progress compact ${
-              resources?.warn_level === 'red'
-                ? 'warn-red'
-                : resources?.warn_level === 'amber'
-                  ? 'warn-amber'
-                  : ''
-            }`}
-          >
-            <div className="opt-progress-meta">
-              <span>
-                {busy
-                  ? `${progress?.done ?? 0} / ${progress?.total || '…'}`
-                  : 'Done'}
+      <div className="opt-subview">
+        {subTab === 'config' && (
+          <div className="opt-config-grid">
+            <section className="opt-cfg-card">
+              <h3>Parameter Grid Ranges</h3>
+              <label>
+                Thr
+                <input value={thresholds} onChange={(e) => setThresholds(e.target.value)} />
+              </label>
+              <label>
+                RR
+                <input value={rrs} onChange={(e) => setRrs(e.target.value)} />
+              </label>
+              <label>
+                Strategy
+                <input
+                  value={waitFlags}
+                  onChange={(e) => setWaitFlags(e.target.value)}
+                  placeholder="false"
+                  title="false=Directional, true=Non-Directional, pro=Pro (Lo/Sh/Se/Co + VWAP±Nσ)"
+                />
+              </label>
+              <label title="Pro VWAP band used when Strategy includes pro">
+                Pro σ
+                <select
+                  value={proSigma}
+                  onChange={(e) => {
+                    const n = Number(e.target.value)
+                    setProSigma(n === 1 || n === 3 ? n : 2)
+                  }}
+                >
+                  <option value={1}>±1σ</option>
+                  <option value={2}>±2σ</option>
+                  <option value={3}>±3σ</option>
+                </select>
+              </label>
+              <label title="Directional BreakEven">
+                BE
+                <div className="be-opt-flags">
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={beOff}
+                      onChange={(e) => {
+                        const on = e.target.checked
+                        if (!on && !beOn) return
+                        setBeOff(on)
+                      }}
+                    />
+                    Off
+                  </label>
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={beOn}
+                      onChange={(e) => {
+                        const on = e.target.checked
+                        if (!on && !beOff) return
+                        setBeOn(on)
+                      }}
+                    />
+                    On
+                  </label>
+                </div>
+              </label>
+              <label>
+                BE%
+                <input
+                  value={bePcts}
+                  disabled={!beOn}
+                  onChange={(e) => setBePcts(e.target.value)}
+                  placeholder="50"
+                />
+              </label>
+              <label>
+                Slip%
+                <input
+                  className="num-plain"
+                  disabled={!commonOn}
+                  value={slipPcts}
+                  onChange={(e) => setSlipPcts(e.target.value)}
+                />
+              </label>
+              <label>
+                Fee%
+                <input
+                  className="num-plain"
+                  disabled={!commonOn}
+                  value={feePcts}
+                  onChange={(e) => setFeePcts(e.target.value)}
+                />
+              </label>
+            </section>
+
+            <section className="opt-cfg-card">
+              <h3>Time &amp; Session</h3>
+              {!dataReady && <span className="opt-warn">Load data first</span>}
+              <label title="Bar timeframe for this optimize run (independent of Backtest TF)">
+                TF
+                <select
+                  value={tf}
+                  disabled={busy}
+                  onChange={(e) => setTf(Number(e.target.value))}
+                >
+                  {TF_OPTS.map((m) => (
+                    <option key={m} value={m}>
+                      {m}m
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="check opt-toggle">
+                <input
+                  type="checkbox"
+                  checked={commonOn}
+                  onChange={(e) => {
+                    const on = e.target.checked
+                    setCommonOn(on)
+                    if (!on) setTimeOptOn(false)
+                  }}
+                />
+                Common
+              </label>
+              <label className="check opt-toggle" title="Sweep entry-start (After) across the window by Step">
+                <input
+                  type="checkbox"
+                  checked={timeOptOn}
+                  disabled={!commonOn}
+                  onChange={(e) => setTimeOptOn(e.target.checked)}
+                />
+                Time opt
+              </label>
+              <label title="Grid step for sweeping entry-start from After up to Before − Step">
+                Step
+                <select
+                  disabled={!commonOn || !timeOptOn}
+                  value={timeStep}
+                  onChange={(e) => setTimeStep(Number(e.target.value) === 60 ? 60 : 30)}
+                >
+                  <option value={30}>30m</option>
+                  <option value={60}>1h</option>
+                </select>
+              </label>
+              <div style={{ opacity: commonOn ? 1 : 0.45 }}>
+                <label title="Entry window start (IST). With Time opt: first start time in the sweep">
+                  After
+                  <input
+                    type="time"
+                    disabled={!commonOn}
+                    value={minsToTime(entryAfter)}
+                    onChange={(e) => setEntryAfter(timeToMins(e.target.value))}
+                  />
+                </label>
+                <label title="Entry window end (IST). New entries only while After ≤ clock < Before">
+                  Before
+                  <input
+                    type="time"
+                    disabled={!commonOn}
+                    value={minsToTime(entryBefore)}
+                    onChange={(e) => setEntryBefore(timeToMins(e.target.value))}
+                  />
+                </label>
+                <label title="Force-flat / square-off (IST). Open positions close here; must be ≥ Before">
+                  Flat
+                  <input
+                    type="time"
+                    disabled={!commonOn}
+                    value={minsToTime(exitTime)}
+                    onChange={(e) => setExitTime(timeToMins(e.target.value))}
+                  />
+                </label>
+              </div>
+              <div className="dow-chips compact">
+                {DOW.map(([key, lab]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    className={`dow-chip ${days.has(key) ? 'on' : ''}`}
+                    disabled={!commonOn || busy}
+                    onClick={() => toggleDay(key)}
+                    title="Bars filter (re-run to apply)"
+                  >
+                    {lab}
+                  </button>
+                ))}
+              </div>
+              <span className="opt-est">
+                {timeOptOn
+                  ? `~${estSessions} starts · ${minsToTime(entryAfter)}→${minsToTime(entryAfterTo)} / before ${minsToTime(entryBefore)} · flat ${minsToTime(exitTime)}`
+                  : `${minsToTime(entryAfter)}–${minsToTime(entryBefore)} · flat ${minsToTime(exitTime)}`}
               </span>
-              <span>
-                {progress && progress.total > 0
-                  ? `${Math.round((100 * progress.done) / progress.total)}%`
-                  : '—'}
-              </span>
-              {resources?.ram_percent != null && (
-                <span>
-                  RAM {fmt2(resources.ram_percent)}%
-                  {resources.warn_level === 'red'
-                    ? ' · Critical'
-                    : resources.warn_level === 'amber'
-                      ? ' · High'
-                      : ''}
-                </span>
+            </section>
+
+            <section className="opt-cfg-card">
+              <h3>Execution &amp; Ranking</h3>
+              <label>
+                Rank
+                <select value={rankBy} onChange={(e) => setRankBy(e.target.value)}>
+                  {RANK_OPTIONS.map(([v, lab]) => (
+                    <option key={v} value={v}>
+                      {lab}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Workers
+                <select value={workers} onChange={(e) => setWorkers(Number(e.target.value))}>
+                  <option value={0}>Auto</option>
+                  <option value={1}>1</option>
+                  <option value={2}>2</option>
+                  <option value={3}>3</option>
+                  <option value={4}>4</option>
+                  <option value={6}>6</option>
+                  <option value={8}>8</option>
+                </select>
+              </label>
+              <button
+                type="button"
+                className="opt-run-btn"
+                disabled={busy || !dataReady}
+                onClick={run}
+              >
+                {busy ? '…' : 'RUN GRID SEARCH'}
+              </button>
+              {busy && (
+                <button type="button" className="ghost danger" onClick={() => onStop?.()}>
+                  Stop
+                </button>
               )}
-              <span>w={progress?.workers ?? (workers || 'Auto')}</span>
+              {best && (
+                <button type="button" className="ghost" onClick={onApplyBest} disabled={busy}>
+                  Apply best
+                </button>
+              )}
+            </section>
+          </div>
+        )}
+
+        {subTab === 'heatmap' && (
+          <div className="opt-heat-layout">
+            <div className="opt-heat-top">
+              {result && result.results.length > 0 ? (
+                <OptimizeHeatmap
+                  results={result.results}
+                  selectedKey={selectedComboKey}
+                  onSelect={selectCombo}
+                  preferTimeSurface={timeOptActive}
+                />
+              ) : (
+                <p className="opt-empty">Run optimize to see the parameter heatmap.</p>
+              )}
             </div>
-            <div className="opt-progress-track">
-              <div
-                className="opt-progress-fill"
-                style={{
-                  width:
-                    progress && progress.total > 0
-                      ? `${Math.min(100, (100 * progress.done) / progress.total)}%`
-                      : busy
-                        ? '8%'
-                        : '0%',
-                }}
-              />
+            {vsBest && overview && best && (
+              <div className="opt-vs-best">
+                <span className="opt-vs-best-lab">SELECTED vs BEST</span>
+                <span className={vsBest.sharpe >= 0 ? 'pos' : 'neg'} title="Δ Sharpe">
+                  Sharpe {vsBest.sharpe >= 0 ? '+' : ''}
+                  {fmt2(vsBest.sharpe)}
+                </span>
+                <span className={vsBest.net >= 0 ? 'pos' : 'neg'} title="Δ Net PnL">
+                  Net {vsBest.net >= 0 ? '+' : ''}
+                  {fmt2(vsBest.net)}
+                </span>
+                <span className={vsBest.pf >= 0 ? 'pos' : 'neg'} title="Δ Profit Factor">
+                  PF {vsBest.pf >= 0 ? '+' : ''}
+                  {fmt2(vsBest.pf)}
+                </span>
+                <span className={vsBest.win >= 0 ? 'pos' : 'neg'} title="Δ Win %">
+                  Win% {vsBest.win >= 0 ? '+' : ''}
+                  {fmt2(vsBest.win)}
+                </span>
+                <span className={vsBest.trades >= 0 ? 'pos' : 'neg'} title="Δ Trades">
+                  Trades {vsBest.trades >= 0 ? '+' : ''}
+                  {vsBest.trades}
+                </span>
+                <span
+                  className={vsBest.dd <= 0 ? 'pos' : 'neg'}
+                  title="Δ Max DD (lower is better)"
+                >
+                  MaxDD {vsBest.dd >= 0 ? '+' : ''}
+                  {fmt2(vsBest.dd)}
+                </span>
+                <span className={vsBest.sqn >= 0 ? 'pos' : 'neg'} title="Δ SQN">
+                  SQN {vsBest.sqn >= 0 ? '+' : ''}
+                  {fmt2(vsBest.sqn)}
+                </span>
+                <span className="opt-vs-best-meta">
+                  vs thr {fmt2(best.threshold)} / RR {fmt2(best.rr)} /{' '}
+                  {minsToTime(Number(best.entry_after ?? 0))}
+                </span>
+              </div>
+            )}
+            <div className="opt-heat-bottom">
+              <section className="opt-heat-hour">
+                <div className="opt-card-h row">
+                  <span>ENTRY HOUR DISTRIBUTION (IST)</span>
+                  <div className="opt-hour-modes">
+                    {(
+                      [
+                        ['pnl', 'Net PnL'],
+                        ['trades', 'Trades'],
+                        ['cost', 'Slip+Fee'],
+                      ] as const
+                    ).map(([id, lab]) => (
+                      <button
+                        key={id}
+                        type="button"
+                        className={`ghost${hourMode === id ? ' on' : ''}`}
+                        onClick={() => setHourMode(id)}
+                      >
+                        {lab}
+                      </button>
+                    ))}
+                    {filterHours && (
+                      <button type="button" className="ghost" onClick={() => setFilterHours(null)}>
+                        Reset
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <p className="opt-best-meta">
+                  Bars = selected combo (or best). Color by Net PnL (green/red), trade count, or
+                  Slip+Fee cost (amber). Click an hour to filter.
+                </p>
+                {result && (
+                  <div className="dow-chips compact" style={{ marginBottom: 8 }}>
+                    {DOW.map(([key, lab]) => (
+                      <button
+                        key={`f-${key}`}
+                        type="button"
+                        className={`dow-chip ${filterDays.has(key) ? 'on' : ''}`}
+                        disabled={busy}
+                        onClick={() => toggleFilterDay(key)}
+                      >
+                        {lab}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div className="hour-heat compact">
+                  <div className="hour-heat-grid">
+                    {Array.from({ length: 24 }, (_, h) => {
+                      const b = hourBuckets[h]
+                      const selected = filterHours === null || filterHours.has(h)
+                      const mag =
+                        hourMode === 'trades'
+                          ? b.trades
+                          : hourMode === 'pnl'
+                            ? Math.abs(b.pnl)
+                            : b.cost
+                      const intensity = mag / hourMax
+                      const empty = mag <= 0
+                      let bg = '#27272a'
+                      if (!empty) {
+                        if (hourMode === 'pnl') {
+                          bg =
+                            b.pnl >= 0
+                              ? `rgba(34, 197, 94, ${0.25 + intensity * 0.75})`
+                              : `rgba(239, 68, 68, ${0.25 + intensity * 0.75})`
+                        } else if (hourMode === 'cost') {
+                          bg = `rgba(245, 158, 11, ${0.2 + intensity * 0.75})`
+                        } else {
+                          bg = selected
+                            ? `rgba(34, 197, 94, ${0.25 + intensity * 0.75})`
+                            : `rgba(113, 113, 122, ${0.2 + intensity * 0.35})`
+                        }
+                        if (!selected) bg = bg.replace(/[\d.]+\)$/, '0.25)')
+                      }
+                      const tip =
+                        hourMode === 'pnl'
+                          ? `${h}:00 → net ${fmt2(b.pnl)} · ${b.trades} trades`
+                          : hourMode === 'cost'
+                            ? `${h}:00 → slip+fee ${fmt2(b.cost)} · ${b.trades} trades`
+                            : `${h}:00 → ${b.trades} trades`
+                      return (
+                        <button
+                          key={h}
+                          type="button"
+                          className={`hour-heat-cell ${selected ? 'on' : 'off'}`}
+                          title={tip}
+                          disabled={!result}
+                          onClick={() => toggleFilterHour(h)}
+                        >
+                          <div
+                            className="hour-heat-bar"
+                            style={{
+                              height: `${Math.max(4, Math.round(intensity * 36))}px`,
+                              background: bg,
+                            }}
+                          />
+                          <span className="hour-heat-lab">{String(h).padStart(2, '0')}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              </section>
+
+              <section className="opt-heat-best">
+                <div className="opt-card-h">
+                  {overviewIsSelected ? 'SELECTED COMBO → BACKTEST' : 'TOP COMBO OVERVIEW'}
+                </div>
+                {overview ? (
+                  <>
+                    <p className="opt-best-meta">
+                      {overviewIsSelected
+                        ? 'Showing the combo selected from Leaderboard / heatmap. Apply loads it into Backtest.'
+                        : 'Showing rank #1. Click a heatmap cell or Leaderboard row to inspect that combo here.'}
+                    </p>
+                    <div className="opt-best-main">
+                      <span>
+                        thr <b>{fmt2(overview.threshold)}</b>
+                      </span>
+                      <span>
+                        RR <b>{fmt2(overview.rr)}</b>
+                      </span>
+                      <span>
+                        {overview.pro_mode ? 'Pro' : overview.wait_and_trade ? 'Non-Dir' : 'Dir'}
+                      </span>
+                      <span>
+                        BE{' '}
+                        <b>
+                          {overview.wait_and_trade && !overview.pro_mode
+                            ? '—'
+                            : Number(overview.break_even)
+                              ? `On ${fmt2(Number(overview.break_even_pct ?? 0))}%`
+                              : 'Off'}
+                        </b>
+                      </span>
+                      <span className={Number(overview.net_pnl) >= 0 ? 'pos' : 'neg'}>
+                        net <b>{fmt2(overview.net_pnl)}</b>
+                      </span>
+                      <span>
+                        sharpe <b>{fmt2(overview.sharpe)}</b>
+                      </span>
+                      <span>
+                        SQN <b>{fmt2(Number(overview.sqn ?? 0))}</b>
+                      </span>
+                      <span>
+                        E-ratio <b>{fmt2(Number(overview.e_ratio ?? 0))}</b>
+                      </span>
+                      <span>
+                        win% <b>{fmtPct(overview.win_rate)}%</b>
+                      </span>
+                      <span>
+                        trades <b>{overview.trades}</b>
+                      </span>
+                      <span>
+                        PF <b>{fmt2(overview.profit_factor)}</b>
+                      </span>
+                      <span className="neg">
+                        maxDD <b>{fmt2(overview.max_drawdown)}</b>
+                      </span>
+                      <span>
+                        {minsToTime(Number(overview.entry_after ?? 0))}–
+                        {minsToTime(Number(overview.entry_before ?? 0))} flat{' '}
+                        {minsToTime(Number(overview.exit_time ?? 0))}
+                      </span>
+                    </div>
+                    {equitySpark.length > 1 && (
+                      <svg
+                        className="opt-equity-spark"
+                        viewBox={`0 0 ${equitySpark.length - 1} 56`}
+                        preserveAspectRatio="none"
+                        aria-label="Equity curve preview"
+                      >
+                        <polyline
+                          fill="none"
+                          stroke={Number(overview.net_pnl) >= 0 ? '#22c55e' : '#ef4444'}
+                          strokeWidth="1.5"
+                          vectorEffect="non-scaling-stroke"
+                          points={equitySpark
+                            .map((y, i) => `${i},${56 - ((y - sparkMin) / sparkRange) * 52 - 2}`)
+                            .join(' ')}
+                        />
+                      </svg>
+                    )}
+                    {filteredOverview && (
+                      <div className="opt-best-meta">
+                        View filter: {filteredOverview.trades} trades / net{' '}
+                        {fmt2(filteredOverview.net_pnl)} (optimize cell is still{' '}
+                        {overview?.trades} / {fmt2(Number(overview?.net_pnl))} — Apply uses
+                        the cell)
+                      </div>
+                    )}
+                    {filteredBest && !overviewIsSelected && !filteredOverview && (
+                      <div className="opt-best-meta">
+                        filtered {filteredBest.trades} / net {fmt2(filteredBest.net_pnl)}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      className="opt-run-btn"
+                      disabled={busy}
+                      onClick={() => {
+                        if (onLoadCombo && overview) applyCombo(overview)
+                        else onApplyBest()
+                      }}
+                    >
+                      Apply to Backtest
+                    </button>
+                  </>
+                ) : (
+                  <p className="opt-empty">
+                    Run optimize, then select a Leaderboard row or heatmap cell to study a combo
+                    here before applying to Backtest.
+                  </p>
+                )}
+              </section>
             </div>
           </div>
         )}
-      </div>
 
-      {/* —— Body: 2-column split —— */}
-      <div className="opt-body">
-        <aside className="opt-left">
-          <section className="opt-card">
-            <div className="opt-card-h">DAY OF WEEK</div>
-            <div className="dow-chips compact">
-              {DOW.map(([key, lab]) => (
-                <button
-                  key={key}
-                  type="button"
-                  className={`dow-chip ${days.has(key) ? 'on' : ''}`}
-                  disabled={!commonOn || busy}
-                  onClick={() => toggleDay(key)}
-                  title="Bars filter (re-run to apply)"
-                >
-                  {lab}
-                </button>
-              ))}
+        {subTab === 'leaderboard' && (
+          <div className="opt-lb-layout">
+            <div className="opt-lb-hint">
+              Column filters support text match or numeric ops: <code>&gt;1</code>, <code>&lt;5</code>,{' '}
+              <code>10-20</code>. Row CSV = full params + metrics + equity + trades. Click a row to
+              inspect on Heatmap (Selected vs Best); use Apply to Backtest there.
             </div>
-            {result && (
-              <>
-                <div className="opt-card-h" style={{ marginTop: 8 }}>
-                  RESULTS FILTER
-                </div>
-                <div className="dow-chips compact">
-                  {DOW.map(([key, lab]) => (
-                    <button
-                      key={`f-${key}`}
-                      type="button"
-                      className={`dow-chip ${filterDays.has(key) ? 'on' : ''}`}
-                      disabled={busy}
-                      onClick={() => toggleFilterDay(key)}
-                    >
-                      {lab}
-                    </button>
-            ))}
-          </div>
-        </>
-      )}
-          </section>
-
-          <section className="opt-card opt-best-tile">
-            <div className="opt-card-h">TOP COMBO</div>
-            {best ? (
-              <>
-                <div className="opt-best-main">
-                  <span>
-                    TF <b>{result?.tf_minutes ?? tf}m</b>
-                  </span>
-                  <span>
-                    thr <b>{fmt2(best.threshold)}</b>
-                  </span>
-                  <span>
-                    RR <b>{fmt2(best.rr)}</b>
-                  </span>
-                  <span>
-                    {best.pro_mode ? 'Pro' : best.wait_and_trade ? 'Non-Dir' : 'Dir'}
-                  </span>
-                </div>
-                <div className="opt-best-metrics">
-                  <div>
-                    <em>Net</em>
-                    <b className={Number(best.net_pnl) >= 0 ? 'pos' : 'neg'}>
-                      {fmt2(best.net_pnl)}
-                    </b>
-                  </div>
-                  <div>
-                    <em>Sharpe</em>
-                    <b>{fmt2(best.sharpe)}</b>
-                  </div>
-                  <div>
-                    <em>Win%</em>
-                    <b>{fmtPct(best.win_rate)}%</b>
-                  </div>
-                  <div>
-                    <em>Trades</em>
-                    <b>{best.trades}</b>
-                  </div>
-                  <div>
-                    <em>PF</em>
-                    <b>{fmt2(best.profit_factor)}</b>
-                  </div>
-                  <div>
-                    <em>MaxDD</em>
-                    <b className="neg">{fmt2(best.max_drawdown)}</b>
-                  </div>
-                </div>
-                <div className="opt-best-meta">
-                  {minsToTime(Number(best.entry_after ?? 0))}–
-                  {minsToTime(Number(best.entry_before ?? 0))} flat{' '}
-                  {minsToTime(Number(best.exit_time ?? 0))}
-                  {filteredBest
-                    ? ` · filtered ${filteredBest.trades} / net ${fmt2(filteredBest.net_pnl)}`
-                    : ''}
-                </div>
-              </>
-            ) : (
-              <p className="opt-empty">Run optimize to see the best combo.</p>
-            )}
-          </section>
-
-          <section className="opt-card opt-metrics-tile">
-            <div className="opt-card-h">KEY METRICS</div>
-            {best ? (
-              <MetricsPanel stats={best as unknown as BacktestStats} />
-            ) : (
-              <p className="opt-empty">—</p>
-            )}
-          </section>
-        </aside>
-
-        <div className="opt-right">
-          <section className="opt-card opt-hour-card">
-            <div className="opt-card-h row">
-              <span>ENTRY HOUR (IST)</span>
-              {filterHours && (
-                <button type="button" className="ghost" onClick={() => setFilterHours(null)}>
-                  Reset
-                </button>
-              )}
-            </div>
-            <div className="hour-heat compact">
-              <div className="hour-heat-grid">
-                {Array.from({ length: 24 }, (_, h) => {
-                  const n = Number(heatmap?.[String(h)] || 0)
-                  const intensity = n / heatMax
-                  const selected = filterHours === null || filterHours.has(h)
-                  return (
-                    <button
-                      key={h}
-                      type="button"
-                      className={`hour-heat-cell ${selected ? 'on' : 'off'}`}
-                      title={`${h}:00 → ${n}`}
-                      disabled={!result}
-                      onClick={() => toggleFilterHour(h)}
-                    >
-                      <div
-                        className="hour-heat-bar"
-                        style={{
-                          height: `${Math.max(4, Math.round(intensity * 36))}px`,
-                          background:
-                            n === 0
-                              ? '#27272a'
-                              : selected
-                                ? `rgba(34, 197, 94, ${0.25 + intensity * 0.75})`
-                                : `rgba(113, 113, 122, ${0.2 + intensity * 0.35})`,
-                        }}
-                      />
-                      <span className="hour-heat-lab">{String(h).padStart(2, '0')}</span>
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-          </section>
-
-          <section className="opt-card opt-param-heat">
-            {result && result.results.length > 0 ? (
-              <OptimizeHeatmap
-                results={result.results}
-                selectedKey={selectedComboKey}
-                onSelect={loadCombo}
-              />
-            ) : (
-              <>
-                <div className="opt-card-h">PARAM HEATMAP — Thr × RR</div>
-                <p className="opt-empty">Heatmap appears after a run.</p>
-              </>
-            )}
-          </section>
-
-          <section className="opt-card opt-table-card">
-            <div className="opt-card-h">RESULTS</div>
-            <div className="opt-table-scroll">
+            <div className="opt-lb-table-wrap">
               {result ? (
-                <table className="opt-table-inner">
-            <thead>
-              <tr>
-                      <th title="Overfit risk">⚠</th>
-                      <SortTh col="threshold" sort={optSort.sort} onSort={optSort.toggle}>
-                        Thr
-                      </SortTh>
-                      <SortTh col="rr" sort={optSort.sort} onSort={optSort.toggle}>
-                        RR
-                      </SortTh>
-                      <SortTh col="_strategy" sort={optSort.sort} onSort={optSort.toggle}>
-                        Strat
-                      </SortTh>
-                      <SortTh col="_be" sort={optSort.sort} onSort={optSort.toggle}>
-                        BE
-                      </SortTh>
-                      <SortTh col="entry_after" sort={optSort.sort} onSort={optSort.toggle}>
-                        After
-                      </SortTh>
-                      <SortTh col="entry_before" sort={optSort.sort} onSort={optSort.toggle}>
-                        Before
-                      </SortTh>
-                      <SortTh col="exit_time" sort={optSort.sort} onSort={optSort.toggle}>
-                        Flat
-                      </SortTh>
-                      <SortTh col="trades" sort={optSort.sort} onSort={optSort.toggle}>
-                        N
-                      </SortTh>
-                      <SortTh col="net_pnl" sort={optSort.sort} onSort={optSort.toggle}>
-                        Net
-                      </SortTh>
-                      <SortTh col="sharpe" sort={optSort.sort} onSort={optSort.toggle}>
-                        Sharpe
-                      </SortTh>
-                      <SortTh col="sortino" sort={optSort.sort} onSort={optSort.toggle}>
-                        Sortino
-                      </SortTh>
-                      <SortTh col="profit_factor" sort={optSort.sort} onSort={optSort.toggle}>
-                        PF
-                      </SortTh>
-                      <SortTh col="win_rate" sort={optSort.sort} onSort={optSort.toggle}>
-                        Win%
-                      </SortTh>
-                      <SortTh col="max_drawdown" sort={optSort.sort} onSort={optSort.toggle}>
-                        DD
-                      </SortTh>
-              </tr>
-            </thead>
-            <tbody>
-                    {optSort.sorted.map((r) => {
+                <table className="opt-table-inner opt-report-table">
+                  <thead>
+                    <tr>
+                      <th className="opt-col-param" title="Rank">
+                        #
+                      </th>
+                      <th className="opt-col-param" title="Download combo detail CSV">
+                        CSV
+                      </th>
+                      {OPTIMIZE_REPORT_COLUMNS.map((c) => {
+                        const sk = c.sortKey ?? c.key
+                        const cls =
+                          c.section === 'param'
+                            ? 'opt-col-param'
+                            : c.section === 'equity'
+                              ? 'opt-col-equity'
+                              : 'opt-col-metric'
+                        if (c.format === 'spark') {
+                          return (
+                            <th key={c.key} className={cls} title="Mini equity chart">
+                              {c.label}
+                            </th>
+                          )
+                        }
+                        return (
+                          <SortTh
+                            key={c.key}
+                            col={sk}
+                            sort={optSort.sort}
+                            onSort={optSort.toggle}
+                            className={cls}
+                          >
+                            {c.label}
+                          </SortTh>
+                        )
+                      })}
+                    </tr>
+                    <tr className="opt-filter-row">
+                      <th className="opt-col-param" />
+                      <th className="opt-col-param" />
+                      {OPTIMIZE_REPORT_COLUMNS.map((c) => {
+                        const fk = c.sortKey ?? c.key
+                        const cls =
+                          c.section === 'param'
+                            ? 'opt-col-param'
+                            : c.section === 'equity'
+                              ? 'opt-col-equity'
+                              : 'opt-col-metric'
+                        if (c.format === 'spark') {
+                          return <th key={`f-${c.key}`} className={cls} />
+                        }
+                        return (
+                          <th key={`f-${c.key}`} className={cls}>
+                            <input
+                              className="opt-col-filter"
+                              value={colFilters[fk] ?? ''}
+                              placeholder="filter"
+                              title={`${c.label}: text or >1 <5 10-20`}
+                              onChange={(e) =>
+                                setColFilters((prev) => ({ ...prev, [fk]: e.target.value }))
+                              }
+                              onClick={(e) => e.stopPropagation()}
+                            />
+                          </th>
+                        )
+                      })}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {optSort.sorted.map((r, idx) => {
                       const risk = overfitKeys.has(r._key)
                       const sel = selectedComboKey === r._key
+                      const spark = Array.isArray(r.equity_spark) ? r.equity_spark : null
+                      const rec = r as unknown as Record<string, unknown>
                       return (
                         <tr
                           key={r._rank}
                           className={`${r._rank === 0 ? 'best' : ''}${risk ? ' overfit-row' : ''}${sel ? ' selected-row' : ''}`}
-                          onClick={() => loadCombo(r as unknown as OptimizePoint)}
-                          style={{ cursor: onLoadCombo ? 'pointer' : undefined }}
+                          onClick={() => selectCombo(r as unknown as OptimizePoint)}
+                          style={{ cursor: 'pointer' }}
                         >
-                          <td>{risk ? '⚠' : ''}</td>
-                  <td>{fmt2(r.threshold)}</td>
-                  <td>{fmt2(r.rr)}</td>
-                          <td>{r._strategy}</td>
-                          <td>{r._be}</td>
-                          <td>{minsToTime(Number(r.entry_after ?? 0))}</td>
-                          <td>{minsToTime(Number(r.entry_before ?? 0))}</td>
-                          <td>{minsToTime(Number(r.exit_time ?? 0))}</td>
-                  <td>{r.trades}</td>
-                  <td className={r.net_pnl >= 0 ? 'pos' : 'neg'}>{fmt2(r.net_pnl)}</td>
-                  <td>{fmt2(r.sharpe)}</td>
-                          <td>{fmt2(Number(r.sortino ?? 0))}</td>
-                  <td>{fmt2(r.profit_factor)}</td>
-                  <td>{fmt2(r.win_rate)}</td>
-                  <td>{fmt2(r.max_drawdown)}</td>
-                </tr>
+                          <td className="opt-col-param">{idx + 1}</td>
+                          <td className="opt-col-param opt-csv-cell">
+                            <button
+                              type="button"
+                              className="opt-row-csv"
+                              title="Download this combo’s full optimize result CSV"
+                              onClick={(e) => downloadRowCsv(r, e)}
+                            >
+                              ⬇
+                            </button>
+                          </td>
+                          {OPTIMIZE_REPORT_COLUMNS.map((c) => {
+                            const cls =
+                              c.section === 'param'
+                                ? 'opt-col-param'
+                                : c.section === 'equity'
+                                  ? 'opt-col-equity'
+                                  : 'opt-col-metric'
+                            if (c.format === 'spark') {
+                              return (
+                                <td key={c.key} className={`opt-mini-cell ${cls}`}>
+                                  <MiniEquityChart spark={spark} />
+                                </td>
+                              )
+                            }
+                            if (c.format === 'robust') {
+                              return (
+                                <td key={c.key} className={cls}>
+                                  {r._robust}
+                                </td>
+                              )
+                            }
+                            if (c.format === 'time') {
+                              const mins =
+                                c.key === 'after'
+                                  ? Number(r.entry_after ?? 0)
+                                  : c.key === 'before'
+                                    ? Number(r.entry_before ?? 0)
+                                    : Number(r.exit_time ?? 0)
+                              return (
+                                <td key={c.key} className={cls}>
+                                  {minsToTime(mins)}
+                                </td>
+                              )
+                            }
+                            if (c.key === 'strategy') {
+                              return (
+                                <td key={c.key} className={cls}>
+                                  {r._strategy}
+                                </td>
+                              )
+                            }
+                            if (c.key === 'be') {
+                              return (
+                                <td key={c.key} className={cls}>
+                                  {r._be}
+                                </td>
+                              )
+                            }
+                            if (c.key === 'break_even_pct') {
+                              return (
+                                <td key={c.key} className={cls}>
+                                  {r._be === '—' || r._be === 'Off' ? '—' : fmt2(Number(r._bePct))}
+                                </td>
+                              )
+                            }
+                            const raw = c.get ? c.get(rec) : rec[c.key]
+                            const n = Number(raw)
+                            const signed =
+                              c.key === 'net_pnl' || c.key === 'avg_loss' || c.key === 'gross_loss'
+                            const className =
+                              signed && Number.isFinite(n)
+                                ? `${cls} ${n >= 0 ? 'pos' : 'neg'}`
+                                : cls
+                            if (c.format === 'text') {
+                              return (
+                                <td key={c.key} className={cls}>
+                                  {String(raw ?? '—')}
+                                </td>
+                              )
+                            }
+                            return (
+                              <td key={c.key} className={className}>
+                                {raw == null || raw === '' ? '—' : fmt2(n)}
+                              </td>
+                            )
+                          })}
+                        </tr>
                       )
                     })}
-            </tbody>
-          </table>
+                  </tbody>
+                </table>
               ) : (
                 <p className="opt-empty">No results yet.</p>
               )}
             </div>
-          </section>
-        </div>
+          </div>
+        )}
       </div>
     </div>
   )

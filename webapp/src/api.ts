@@ -30,6 +30,8 @@ export type StrategyParams = {
   break_even_pct: number
   start: string
   end: string
+  /** Optional IST weekday filter for parity with optimize common filters. */
+  dayofweek?: string
 }
 
 export type DataAvailability = {
@@ -191,6 +193,27 @@ export type OptimizeResult = {
   engine?: string
 }
 
+export type OptimizeTradeLite = {
+  side: string
+  signal_time?: string
+  entry_time: string
+  exit_time?: string
+  entry_price?: number
+  exit_price?: number
+  stop?: number
+  target?: number
+  pnl: number
+  mfe?: number
+  mae?: number
+  slippage?: number
+  fee?: number
+  entry_tag?: string
+  exit_reason?: string
+  be_moved?: boolean
+  signal_delta_pct?: number
+  range?: number
+}
+
 export type OptimizePoint = {
   threshold: number
   rr: number
@@ -231,8 +254,12 @@ export type OptimizePoint = {
   exit_time?: number
   time_stop_minutes?: number
   entry_hours?: Record<string, number>
+  /** Downsampled cumulative PnL for leaderboard mini equity charts */
+  equity_spark?: number[]
+  /** Lite trades for per-row CSV detail export */
+  trades_lite?: OptimizeTradeLite[]
   exits: Record<string, number>
-  [key: string]: number | boolean | Record<string, number> | undefined
+  [key: string]: number | boolean | number[] | Record<string, number> | OptimizeTradeLite[] | undefined
 }
 
 const qs = (params: Record<string, string | number | boolean | undefined>) =>

@@ -53,6 +53,10 @@ export type DashboardMetrics = {
   largestLoss: number
   maxConsecWins: number
   maxConsecLosses: number
+  avgMfe: number
+  avgMae: number
+  eRatio: number
+  sqn: number
   // Exposure
   timeInMarketPct: number
   avgPositionSize: number
@@ -99,6 +103,14 @@ export type SideBucketStats = {
   avgLossDurationHours: number
   largestWin: number
   largestLoss: number
+  winCount: number
+  lossCount: number
+  avgMfe: number
+  avgMae: number
+  eRatio: number
+  sqn: number
+  maxConsecWins: number
+  maxConsecLosses: number
 }
 
 export type DashboardModel = {
@@ -136,7 +148,26 @@ function emptySideStats(): SideBucketStats {
     avgLossDurationHours: 0,
     largestWin: 0,
     largestLoss: 0,
+    winCount: 0,
+    lossCount: 0,
+    avgMfe: 0,
+    avgMae: 0,
+    eRatio: 0,
+    sqn: 0,
+    maxConsecWins: 0,
+    maxConsecLosses: 0,
   }
+}
+
+function sqnFromPnls(pnls: number[]): number {
+  const n = pnls.length
+  if (n < 2) return 0
+  const mean = pnls.reduce((a, b) => a + b, 0) / n
+  let varSum = 0
+  for (const p of pnls) varSum += (p - mean) ** 2
+  const std = Math.sqrt(varSum / (n - 1))
+  if (std < 1e-12) return mean > 0 ? 999 : 0
+  return Math.sqrt(n) * (mean / std)
 }
 
 function isLongSide(side: string): boolean {
@@ -170,6 +201,11 @@ function computeSideBucket(trades: TradeRow[], volume: number, notionalFallback:
   }
   const avgNotional = notionalSum / trades.length
   const avgPnl = net / trades.length
+  const mfes = trades.map((t) => Number(t.mfe ?? 0))
+  const maes = trades.map((t) => Number(t.mae ?? 0))
+  const avgMfe = mfes.reduce((a, b) => a + b, 0) / trades.length
+  const avgMae = maes.reduce((a, b) => a + b, 0) / trades.length
+  const { maxW, maxL } = streaks(pnls)
   return {
     trades: trades.length,
     netPnl: net,
@@ -183,6 +219,14 @@ function computeSideBucket(trades: TradeRow[], volume: number, notionalFallback:
     avgLossDurationHours: lossDurs.length ? lossDurs.reduce((a, b) => a + b, 0) / lossDurs.length : 0,
     largestWin: wins.length ? Math.max(...wins) : 0,
     largestLoss: losses.length ? Math.min(...losses) : 0,
+    winCount: wins.length,
+    lossCount: losses.length,
+    avgMfe,
+    avgMae,
+    eRatio: avgMae > 1e-12 ? avgMfe / avgMae : avgMfe > 0 ? 999 : 0,
+    sqn: sqnFromPnls(pnls),
+    maxConsecWins: maxW,
+    maxConsecLosses: maxL,
   }
 }
 
@@ -602,6 +646,10 @@ export function computeDashboard(data: BacktestResult): DashboardModel {
     largestLoss: losses.length ? Math.min(...losses) : 0,
     maxConsecWins: Number(stats.max_consec_wins ?? maxW),
     maxConsecLosses: Number(stats.max_consec_losses ?? maxL),
+    avgMfe: Number(stats.avg_mfe ?? 0),
+    avgMae: Number(stats.avg_mae ?? 0),
+    eRatio: Number(stats.e_ratio ?? 0),
+    sqn: Number(stats.sqn ?? 0),
     timeInMarketPct,
     avgPositionSize,
     turnover,

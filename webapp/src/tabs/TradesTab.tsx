@@ -87,7 +87,9 @@ type Props = {
 
 export function TradesTab({ data, onOpenOnChart }: Props) {
   const study = useChartStudy()
-  const [panelMax, setPanelMax] = useState(false)
+  /** Default: trades maximized, aggressive minimized */
+  const [tradesMax, setTradesMax] = useState(true)
+  const [aggrMax, setAggrMax] = useState(false)
 
   const tradeRows = useMemo(() => {
     if (!data) return [] as TradeView[]
@@ -185,49 +187,26 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
   }
 
   return (
-    <div className={`panel trades-panel${panelMax ? ' panel-maximized' : ''}`}>
+    <div className="panel trades-panel">
       <div className="panel-head">
         <p className="hint">
           Click a trade row to jump to it on the Visualization chart. Click column headers to sort.
         </p>
-        <button
-          type="button"
-          className="ghost panel-max-btn"
-          title={panelMax ? 'Restore panel' : 'Maximize panel'}
-          onClick={() => setPanelMax((v) => !v)}
-        >
-          {panelMax ? '❐' : '⛶'}
-        </button>
-      </div>
-
-      <div className="stats-grid compact-stats">
-        <div className="stat-card">
-          <div className="k">Trades</div>
-          <div className="v">{Number(data.stats.trades)}</div>
-        </div>
-        <div className="stat-card">
-          <div className="k">Aggressive</div>
-          <div className="v">{Number(data.stats.aggressive)}</div>
-        </div>
-        <div className="stat-card">
-          <div className="k">Net PnL</div>
-          <div className={`v ${Number(data.stats.net_pnl) >= 0 ? 'pos' : 'neg'}`}>
-            {fmt2(Number(data.stats.net_pnl))}
-          </div>
-        </div>
-        <div className="stat-card">
-          <div className="k">Σ Slippage</div>
-          <div className="v">{fmt2(Number(data.stats.total_slippage ?? 0))}</div>
-        </div>
-        <div className="stat-card">
-          <div className="k">Σ Fees</div>
-          <div className="v">{fmt2(Number(data.stats.total_fees ?? 0))}</div>
-        </div>
       </div>
 
       <div className="trades-split">
-        <div className="trades-pane">
-          <div className="pane-head">Trades</div>
+        <div className={`trades-pane ${tradesMax ? 'pane-max' : 'pane-min'}`}>
+          <div className="pane-head">
+            <span>Trades</span>
+            <button
+              type="button"
+              className="ghost pane-toggle-btn"
+              title={tradesMax ? 'Minimize trades table' : 'Maximize trades table'}
+              onClick={() => setTradesMax((v) => !v)}
+            >
+              {tradesMax ? '▬' : '⛶'}
+            </button>
+          </div>
           <div className="table-scroll">
             <table>
               <thead>
@@ -348,8 +327,18 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
           </div>
         </div>
 
-        <div className="trades-pane">
-          <div className="pane-head">Aggressive candles</div>
+        <div className={`trades-pane ${aggrMax ? 'pane-max' : 'pane-min'}`}>
+          <div className="pane-head">
+            <span>Aggressive candles</span>
+            <button
+              type="button"
+              className="ghost pane-toggle-btn"
+              title={aggrMax ? 'Minimize aggressive table' : 'Maximize aggressive table'}
+              onClick={() => setAggrMax((v) => !v)}
+            >
+              {aggrMax ? '▬' : '⛶'}
+            </button>
+          </div>
           <div className="table-scroll">
             <table>
               <thead>

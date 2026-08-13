@@ -64,6 +64,7 @@ export default function App() {
   } | null>(null)
   const reqId = useRef(0)
   const optAbortRef = useRef<AbortController | null>(null)
+  const skipAutoBacktestRef = useRef(false)
 
   const dataReady = Boolean(availability?.ready)
 
@@ -111,15 +112,17 @@ export default function App() {
     setErr(null)
     try {
       const bt = await fetchBacktest(p)
-      if (id !== reqId.current) return
+      if (id !== reqId.current) return undefined
       clearChartRange()
       resetChartStudy()
       setData(bt)
       if (bt.availability) setAvailability(bt.availability)
       setSessionStarted(true)
+      return bt
     } catch (e) {
-      if (id !== reqId.current) return
+      if (id !== reqId.current) return undefined
       setErr(String(e))
+      throw e
     } finally {
       if (id === reqId.current) setBusy(false)
     }
@@ -127,6 +130,14 @@ export default function App() {
 
   useEffect(() => {
     if (!sessionStarted || step !== 2) return
+    // Keep skip armed across React Strict Mode's effect double-invoke so Apply
+    // does not get overwritten by a second auto-run with a stale race.
+    if (skipAutoBacktestRef.current) {
+      const clear = window.setTimeout(() => {
+        skipAutoBacktestRef.current = false
+      }, 0)
+      return () => window.clearTimeout(clear)
+    }
     const t = window.setTimeout(() => {
       void runBacktest(params)
     }, 350)
@@ -181,34 +192,73 @@ export default function App() {
     applyCombo(opt.best)
   }
 
+  const [applyNote, setApplyNote] = useState<string | null>(null)
+
   const applyCombo = (b: OptimizePoint) => {
-    setParams((p) => ({
-      ...p,
-      tf: Number(opt?.tf_minutes ?? p.tf),
-      threshold: b.threshold,
-      rr: b.rr,
-      wait_and_trade: b.wait_and_trade,
+    // Build the exact next params and run immediately — do not rely on the
+    // params-effect alone (it can race with a stale closure and re-run the
+    // previous combo, which looked like “thr 30 didn’t apply”).
+    const dow =
+      typeof opt?.dayofweek === 'string' && opt.dayofweek.trim()
+        ? opt.dayofweek.trim()
+        : undefined
+    const next: StrategyParams = {
+      ...params,
+      tf: Number(opt?.tf_minutes ?? params.tf),
+      threshold: Number(b.threshold),
+      rr: Number(b.rr),
+      wait_and_trade: Boolean(b.wait_and_trade),
       pro_mode: Boolean((b as { pro_mode?: boolean | number }).pro_mode),
       pro_vwap_sigma: (() => {
         const n = Number(
-          (b as { pro_vwap_sigma?: number }).pro_vwap_sigma ?? p.pro_vwap_sigma ?? 2,
+          (b as { pro_vwap_sigma?: number }).pro_vwap_sigma ?? params.pro_vwap_sigma ?? 2,
         )
         return n === 1 || n === 3 ? n : 2
       })(),
       re_entry: 0,
       stop_to_be: 0,
       break_even: b.wait_and_trade ? 0 : Number(b.break_even ?? 0) ? 1 : 0,
-      break_even_pct: Number(b.break_even_pct ?? p.break_even_pct ?? 50),
-      slippage_pct: Number(b.slippage_pct ?? p.slippage_pct),
-      fee_pct: Number(b.fee_pct ?? p.fee_pct),
-      entry_after: Number(b.entry_after ?? opt?.entry_after ?? p.entry_after),
-      entry_before: Number(b.entry_before ?? opt?.entry_before ?? p.entry_before),
-      exit_time: Number(b.exit_time ?? opt?.exit_time ?? p.exit_time),
+      break_even_pct: Number(b.break_even_pct ?? params.break_even_pct ?? 50),
+      slippage_pct: Number(b.slippage_pct ?? params.slippage_pct ?? 0),
+      fee_pct: Number(b.fee_pct ?? params.fee_pct ?? 0),
+      entry_after: Number(b.entry_after ?? opt?.entry_after ?? params.entry_after),
+      entry_before: Number(b.entry_before ?? opt?.entry_before ?? params.entry_before),
+      exit_time: Number(b.exit_time ?? opt?.exit_time ?? params.exit_time),
       time_stop_minutes: 0,
-    }))
+      trade_mode: Number(params.trade_mode ?? 2),
+      volume: Number(params.volume),
+      // Keep dayofweek on params only when optimize used common filters.
+      dayofweek: opt?.common_optimizer ? dow : undefined,
+    }
+    const beLab = next.break_even ? `BE On ${next.break_even_pct}%` : 'BE Off'
+    const expectTrades = Number(b.trades ?? 0)
+    const expectNet = Number(b.net_pnl ?? 0)
+    setApplyNote(
+      `Applied thr=${next.threshold} RR=${next.rr} ${beLab} · optimize cell trades=${expectTrades} net=${expectNet.toFixed(2)} → running backtest…`,
+    )
+    skipAutoBacktestRef.current = true
+    setParams(next)
     setView('performance')
     setStep(2)
     setSessionStarted(true)
+    void runBacktest(next)
+      .then((bt) => {
+        const gotTrades = Number(bt?.stats?.trades ?? 0)
+        const gotNet = Number(bt?.stats?.net_pnl ?? 0)
+        const mismatch =
+          expectTrades > 0 &&
+          (gotTrades !== expectTrades || Math.abs(gotNet - expectNet) > 0.02)
+        setApplyNote(
+          mismatch
+            ? `Applied thr=${next.threshold} RR=${next.rr} ${beLab} · backtest trades=${gotTrades} net=${gotNet.toFixed(2)} (optimize cell was ${expectTrades} / ${expectNet.toFixed(2)}). Re-run Optimize after this update for full parity.`
+            : `Applied thr=${next.threshold} RR=${next.rr} ${beLab} · backtest ready — trades=${gotTrades} net=${gotNet.toFixed(2)} (matches optimize cell).`,
+        )
+        window.setTimeout(() => setApplyNote(null), 8000)
+      })
+      .catch(() => {
+        setApplyNote(`Apply failed for thr=${next.threshold} RR=${next.rr}.`)
+        window.setTimeout(() => setApplyNote(null), 6000)
+      })
   }
 
   return (
@@ -261,6 +311,7 @@ export default function App() {
       </nav>
 
       {err && <div className="error">{err}</div>}
+      {applyNote && <div className="apply-note">{applyNote}</div>}
 
       <div className="step-body">
         {step === 1 && (

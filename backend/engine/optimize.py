@@ -288,6 +288,30 @@ def apply_common_filters(
     return df
 
 
+def _equity_spark_from_trades(
+    trades_lite: list[dict[str, Any]] | None,
+    *,
+    max_points: int = 40,
+) -> list[float]:
+    """Compact cumulative-PnL series for mini equity charts in the optimize table."""
+    if not trades_lite:
+        return []
+    eq = 0.0
+    series: list[float] = []
+    for t in trades_lite:
+        eq += float(t.get("pnl") or 0.0)
+        series.append(eq)
+    n = len(series)
+    if n <= max_points:
+        return series
+    out: list[float] = []
+    last = max_points - 1
+    for i in range(max_points):
+        idx = int(round(i * (n - 1) / last))
+        out.append(series[idx])
+    return out
+
+
 def _finalize(
     results: list[dict[str, Any]],
     *,
@@ -329,9 +353,12 @@ def _finalize(
     heatmap = (best or {}).get("entry_hours") if best else None
     best_trades = None
     if best is not None:
-        best_trades = best.pop("_trades_lite", None)
+        best_trades = best.get("_trades_lite")
     for r in ranked:
-        r.pop("_trades_lite", None)
+        lite = r.pop("_trades_lite", None) or []
+        r["equity_spark"] = _equity_spark_from_trades(lite)
+        # Keep lite trades for per-row CSV detail exports (small grids)
+        r["trades_lite"] = lite
     return {
         "symbol": symbol,
         "tf_minutes": tf_minutes,
@@ -438,10 +465,24 @@ def _worker_eval(job: dict[str, Any]) -> dict[str, Any]:
         "entry_tags": dict(result.stats.get("entry_tags") or {}),
         "_trades_lite": [
             {
-                "entry_time": t.entry_time.isoformat(),
-                "pnl": float(t.pnl),
                 "side": t.side,
+                "signal_time": t.signal_time.isoformat(),
+                "entry_time": t.entry_time.isoformat(),
+                "exit_time": t.exit_time.isoformat(),
+                "entry_price": float(t.entry_price),
+                "exit_price": float(t.exit_price),
+                "stop": float(t.stop),
+                "target": float(t.target),
+                "pnl": float(t.pnl),
+                "mfe": float(t.mfe),
+                "mae": float(t.mae),
+                "slippage": float(t.slippage),
+                "fee": float(t.fee),
+                "entry_tag": t.entry_tag,
                 "exit_reason": t.exit_reason,
+                "be_moved": bool(t.be_moved),
+                "signal_delta_pct": float(t.signal_delta_pct),
+                "range": float(t.range),
             }
             for t in result.trades
         ],
@@ -494,8 +535,8 @@ def _iter_grid(
     common_optimizer: bool = False,
     time_optimizer: bool = False,
     time_step_minutes: int = 30,
-    timewindow: str | None = "09:30-21:00",
-    dayofweek: str | None = "mon,tue,wed,thu,fri",
+    timewindow: str | None = "",
+    dayofweek: str | None = "mon,tue,wed,thu,fri,sat,sun",
     entry_after: int = 330,
     entry_before: int = 1260,
     exit_time: int = 1260,
