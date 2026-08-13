@@ -1,8 +1,11 @@
 import { useMemo, useState } from 'react'
 import type { BacktestResult } from '../api'
-import { computeDashboard, sharpeWithRiskFree } from './computeDashboard'
-import { SyncedDepthCharts } from './SyncedDepthCharts'
-import { MetricRow, Sparkline, StreakBars, WinRateGauge } from './widgets'
+import {
+  computeDashboard,
+  sharpeWithRiskFree,
+  type SideBucketStats,
+} from './computeDashboard'
+import { MetricRow, StreakBars, WinRateGauge } from './widgets'
 import { FT } from './theme'
 import { fmt2, fmtPct } from '../format'
 
@@ -10,6 +13,8 @@ type Props = {
   data: BacktestResult
   visible?: boolean
 }
+
+type SideFilter = 'all' | 'long' | 'short'
 
 function fmtDur(hours: number): string {
   if (!Number.isFinite(hours) || hours <= 0) return '—'
@@ -30,10 +35,38 @@ function fmtIsoShort(iso: string): string {
   })
 }
 
+function safeNum(n: number, digits = true): string {
+  if (!Number.isFinite(n)) return '—'
+  return digits ? fmt2(n) : String(n)
+}
+
+function SideCell({
+  value,
+  tone,
+}: {
+  value: string
+  tone?: 'pos' | 'neg' | 'long' | 'short' | ''
+}) {
+  const cls =
+    tone === 'pos' || tone === 'long'
+      ? 'pos'
+      : tone === 'neg' || tone === 'short'
+        ? 'neg'
+        : ''
+  return <td className={cls}>{value}</td>
+}
+
+function sideTone(n: number): 'pos' | 'neg' | '' {
+  if (!Number.isFinite(n) || n === 0) return ''
+  return n > 0 ? 'pos' : 'neg'
+}
+
 export function PerformanceOverviewDashboard({ data, visible = true }: Props) {
   const model = useMemo(() => computeDashboard(data), [data])
   const m = model.metrics
+  const { all, long, short } = model.bySide
   const [rf, setRf] = useState(0)
+  const [sideFilter, setSideFilter] = useState<SideFilter>('all')
   const [tradeSort, setTradeSort] = useState<'idx' | 'pnl' | 'duration'>('idx')
 
   const adjSharpe = useMemo(
@@ -41,184 +74,354 @@ export function PerformanceOverviewDashboard({ data, visible = true }: Props) {
     [model.stepReturns, model.stepsPerYear, rf],
   )
 
+  const filteredBucket: SideBucketStats =
+    sideFilter === 'long' ? long : sideFilter === 'short' ? short : all
+
   const recentSorted = useMemo(() => {
-    const rows = [...model.recentTrades]
+    let rows = [...model.allTradeRows]
+    if (sideFilter === 'long') {
+      rows = rows.filter((t) => t.type.toLowerCase().includes('long'))
+    } else if (sideFilter === 'short') {
+      rows = rows.filter((t) => t.type.toLowerCase().includes('short'))
+    }
     if (tradeSort === 'pnl') rows.sort((a, b) => b.pnl - a.pnl)
     else if (tradeSort === 'duration') rows.sort((a, b) => b.durationHours - a.durationHours)
     else rows.sort((a, b) => b.idx - a.idx)
-    return rows
-  }, [model.recentTrades, tradeSort])
+    return rows.slice(0, 40)
+  }, [model.allTradeRows, tradeSort, sideFilter])
 
   const cagrDisplay = Number.isFinite(m.cagrPct) ? `${fmtPct(m.cagrPct)}%` : 'N/A'
+  const mode = data.wait_and_trade
+    ? 'Non-Directional'
+    : data.pro_mode
+      ? `Pro ±${Number((data.stats as { pro_vwap_sigma?: number })?.pro_vwap_sigma ?? data.params?.pro_vwap_sigma ?? 2)}σ`
+      : 'Directional'
+
+  if (!visible) {
+    return <div className="pod pod-perf" style={{ display: 'none' }} />
+  }
 
   return (
-    <div className="pod pod-v15" data-version="1.16.0">
-      <header className="pod-header compact glass-panel">
-        <h2 className="pod-title">PERFORMANCE OVERVIEW DASHBOARD</h2>
-        <p className="pod-sub">
-          {data.symbol} · {data.tf_minutes}m · thr {fmt2(data.threshold)} · RR {fmt2(data.rr)} ·{' '}
-          {data.wait_and_trade
-            ? 'Non-Directional'
-            : data.pro_mode
-              ? `Pro ±${Number((data.stats as { pro_vwap_sigma?: number })?.pro_vwap_sigma ?? data.params?.pro_vwap_sigma ?? 2)}σ`
-              : 'Directional'}{' '}
-          · v1.17.2
-        </p>
+    <div className="pod pod-perf">
+      <header className="pod-header compact glass-panel pod-perf-header">
+        <div className="pod-perf-titleblock">
+          <h2 className="pod-title">PERFORMANCE</h2>
+          <p className="pod-sub">
+            {data.symbol} · {data.tf_minutes}m · thr {fmt2(data.threshold)} · RR {fmt2(data.rr)} ·{' '}
+            {mode}
+          </p>
+        </div>
+        <div className="pod-side-toggle" role="group" aria-label="Trade side filter">
+          {(
+            [
+              ['all', 'ALL'],
+              ['long', 'LONG'],
+              ['short', 'SHORT'],
+            ] as const
+          ).map(([id, lab]) => (
+            <button
+              key={id}
+              type="button"
+              className={sideFilter === id ? 'active' : ''}
+              onClick={() => setSideFilter(id)}
+            >
+              {lab}
+            </button>
+          ))}
+        </div>
       </header>
 
-      {/* Row 1 — Chart 65% | Ratios + Trades 35% */}
-      <div className="pod-row1">
-        <section className="pod-charts glass-panel">
-          <div className="pod-section-h">
-            <h3>CUMULATIVE PnL & UNDERWATER DRAWDOWN</h3>
-          </div>
-          <SyncedDepthCharts model={model} visible={visible} />
+      <div className="pod-perf-grid">
+        <section className="glass-panel pod-stat-card pod-card-ratios">
+          <h3 className="pod-section-h">RISK &amp; RETURN RATIOS</h3>
+          <p className="pod-card-note">Portfolio equity (not side-filtered)</p>
+          <label className="pod-rf">
+            Risk-free %
+            <input
+              type="number"
+              step="0.25"
+              value={rf}
+              onChange={(e) => setRf(Number(e.target.value) || 0)}
+              title="Annual risk-free rate for Sharpe"
+            />
+          </label>
+          <MetricRow icon="↗" label="CAGR %" value={cagrDisplay} spark={m.equitySpark} />
+          <MetricRow
+            icon="σ"
+            label={`Sharpe (rf ${fmt2(rf)}%)`}
+            value={fmt2(adjSharpe)}
+            spark={m.equitySpark}
+            sparkStroke={FT.azure}
+          />
+          <MetricRow
+            icon="▼"
+            label="Max Drawdown %"
+            value={`${fmtPct(m.maxDrawdownPct)}%`}
+            spark={m.ddRawSpark}
+            sparkStroke={FT.crimson}
+          />
+          <MetricRow icon="↓" label="Max DD $" value={fmt2(m.maxDrawdownAbs)} />
+          <MetricRow
+            icon="⏱"
+            label="DD Duration"
+            value={`${fmt2(m.maxDdDurationDays)}d · ${m.maxDdDurationBars} bars`}
+          />
+          <MetricRow icon="◇" label="Sortino" value={fmt2(m.sortino)} />
+          <MetricRow icon="▣" label="Calmar" value={fmt2(m.calmar)} />
+          <MetricRow icon="↺" label="Recovery" value={fmt2(m.recoveryFactor)} />
+          <MetricRow icon="∿" label="Vol (ann.)" value={`${fmtPct(m.volatilityAnnPct)}%`} />
         </section>
 
-        <aside className="pod-side">
-          <section className="glass-panel pod-metric-panel pod-side-ratios">
-            <h3 className="pod-section-h">RISK &amp; RETURN RATIOS</h3>
-            <label className="pod-rf">
-              Risk-free %
-              <input
-                type="number"
-                step="0.25"
-                value={rf}
-                onChange={(e) => setRf(Number(e.target.value) || 0)}
-                title="Annual risk-free rate for Sharpe"
-              />
-            </label>
-            <MetricRow icon="↗" label="CAGR %" value={cagrDisplay} spark={m.equitySpark} />
-            <MetricRow
-              icon="σ"
-              label={`Sharpe (rf ${fmt2(rf)}%)`}
-              value={fmt2(adjSharpe)}
-              spark={m.equitySpark}
-              sparkStroke={FT.azure}
-            />
-            <MetricRow
-              icon="▼"
-              label="Max Drawdown %"
-              value={`${fmtPct(m.maxDrawdownPct)}%`}
-              spark={m.ddRawSpark}
-              sparkStroke={FT.crimson}
-            />
-            <MetricRow icon="↓" label="Max DD $" value={fmt2(m.maxDrawdownAbs)} />
-            <MetricRow
-              icon="⏱"
-              label="DD Duration"
-              value={`${fmt2(m.maxDdDurationDays)}d · ${m.maxDdDurationBars} bars`}
-            />
-            <MetricRow icon="◇" label="Sortino" value={fmt2(m.sortino)} />
-            <MetricRow icon="▣" label="Calmar" value={fmt2(m.calmar)} />
-            <MetricRow icon="↺" label="Recovery" value={fmt2(m.recoveryFactor)} />
-            <MetricRow icon="∿" label="Vol (ann.)" value={`${fmtPct(m.volatilityAnnPct)}%`} />
-          </section>
-
-          <section className="glass-panel pod-trades-preview pod-side-trades">
-            <div className="pod-section-h row">
-              <h3>TRADE LIST SUMMARY</h3>
-              <select
-                value={tradeSort}
-                onChange={(e) => setTradeSort(e.target.value as typeof tradeSort)}
-                aria-label="Sort trades"
-              >
-                <option value="idx">Recent</option>
-                <option value="pnl">PnL</option>
-                <option value="duration">Duration</option>
-              </select>
-            </div>
-            <div className="pod-mini-table-wrap">
-              <table className="pod-mini-table">
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>Date</th>
-                    <th>Type</th>
-                    <th>PnL (%)</th>
-                    <th>Dur</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {recentSorted.length === 0 && (
-                    <tr>
-                      <td colSpan={5} className="pod-muted">
-                        No trades
-                      </td>
-                    </tr>
-                  )}
-                  {recentSorted.map((t) => (
-                    <tr key={t.idx}>
-                      <td>{t.idx}</td>
-                      <td>{fmtIsoShort(t.date)}</td>
-                      <td>{t.type}</td>
-                      <td className={t.pnl >= 0 ? 'pos' : 'neg'}>
-                        {fmt2(t.pnl)} ({fmtPct(t.pnlPct)}%)
-                      </td>
-                      <td>{fmtDur(t.durationHours)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        </aside>
-      </div>
-
-      {/* Row 2 — 4 equal performance cards */}
-      <div className="pod-row2">
         <section className="glass-panel pod-stat-card">
           <h3 className="pod-section-h">TRADE CONSISTENCY</h3>
           <div className="pod-hero">
-            <div className="pod-hero-lab">Win Rate</div>
-            <div className="pod-hero-val">{fmtPct(m.winRate)}%</div>
-            <WinRateGauge pct={m.winRate} />
+            <div className="pod-hero-lab">
+              Win Rate {sideFilter !== 'all' ? `(${sideFilter})` : ''}
+            </div>
+            <div className="pod-hero-val">{fmtPct(filteredBucket.winRate)}%</div>
+            <WinRateGauge pct={filteredBucket.winRate} />
           </div>
-          <MetricRow icon="Σ" label="Profit Factor" value={fmt2(m.profitFactor)} />
-          <MetricRow icon="$" label="Expectancy" value={fmt2(m.expectancy)} />
+          <table className="pod-side-table">
+            <thead>
+              <tr>
+                <th>Metric</th>
+                <th>ALL</th>
+                <th className="long">LONG</th>
+                <th className="short">SHORT</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Win Rate %</td>
+                <SideCell value={`${fmtPct(all.winRate)}%`} />
+                <SideCell
+                  value={long.trades ? `${fmtPct(long.winRate)}%` : '—'}
+                  tone="long"
+                />
+                <SideCell
+                  value={short.trades ? `${fmtPct(short.winRate)}%` : '—'}
+                  tone="short"
+                />
+              </tr>
+              <tr>
+                <td>Expectancy</td>
+                <SideCell value={safeNum(all.expectancy)} tone={sideTone(all.expectancy)} />
+                <SideCell
+                  value={long.trades ? safeNum(long.expectancy) : '—'}
+                  tone={sideTone(long.expectancy)}
+                />
+                <SideCell
+                  value={short.trades ? safeNum(short.expectancy) : '—'}
+                  tone={sideTone(short.expectancy)}
+                />
+              </tr>
+            </tbody>
+          </table>
         </section>
 
-        <section className="glass-panel pod-stat-card">
+        <section className="glass-panel pod-stat-card pod-card-pnl">
           <h3 className="pod-section-h">TRADE PnL</h3>
           <div className="pod-hero">
-            <div className="pod-hero-lab">Total Net Profit</div>
-            <div className={`pod-hero-val ${m.cumulativePnl >= 0 ? 'pos' : 'neg'}`}>
-              {fmt2(m.cumulativePnl)}
+            <div className="pod-hero-lab">Total Net Profit ({sideFilter.toUpperCase()})</div>
+            <div className={`pod-hero-val ${filteredBucket.netPnl >= 0 ? 'pos' : 'neg'}`}>
+              {safeNum(filteredBucket.netPnl)}
             </div>
-            <div className="pod-hero-sub">{fmtPct(m.totalReturnPct)}%</div>
-            <Sparkline
-              values={m.equityRawSpark}
-              stroke={FT.neon}
-              fill={FT.greenSoft}
-              width={100}
-              height={24}
-            />
           </div>
-          <MetricRow
-            icon="#"
-            label="Total Trades"
-            value={`${m.totalTrades} (L ${m.longTrades} / S ${m.shortTrades})`}
-          />
-          <MetricRow
-            icon="μ"
-            label="Avg Trade PnL"
-            value={`${fmt2(m.avgTradePnl)} · ${fmtPct(m.avgTradePnlPct)}%`}
-          />
-          <MetricRow icon="∶" label="Avg Win-to-Loss" value={fmt2(m.avgWinLossRatio)} />
+          <table className="pod-side-table">
+            <thead>
+              <tr>
+                <th>Metric</th>
+                <th>ALL</th>
+                <th className="long">LONG</th>
+                <th className="short">SHORT</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Net Profit</td>
+                <SideCell value={safeNum(all.netPnl)} tone={sideTone(all.netPnl)} />
+                <SideCell
+                  value={long.trades ? safeNum(long.netPnl) : '—'}
+                  tone={sideTone(long.netPnl)}
+                />
+                <SideCell
+                  value={short.trades ? safeNum(short.netPnl) : '—'}
+                  tone={sideTone(short.netPnl)}
+                />
+              </tr>
+              <tr>
+                <td>Total Trades</td>
+                <SideCell value={String(all.trades)} />
+                <SideCell value={String(long.trades)} tone="long" />
+                <SideCell value={String(short.trades)} tone="short" />
+              </tr>
+              <tr>
+                <td>Avg PnL $</td>
+                <SideCell value={safeNum(all.avgPnl)} tone={sideTone(all.avgPnl)} />
+                <SideCell
+                  value={long.trades ? safeNum(long.avgPnl) : '—'}
+                  tone={sideTone(long.avgPnl)}
+                />
+                <SideCell
+                  value={short.trades ? safeNum(short.avgPnl) : '—'}
+                  tone={sideTone(short.avgPnl)}
+                />
+              </tr>
+              <tr>
+                <td>Avg PnL %</td>
+                <SideCell
+                  value={all.trades ? `${fmtPct(all.avgPnlPct)}%` : '—'}
+                  tone={sideTone(all.avgPnlPct)}
+                />
+                <SideCell
+                  value={long.trades ? `${fmtPct(long.avgPnlPct)}%` : '—'}
+                  tone={sideTone(long.avgPnlPct)}
+                />
+                <SideCell
+                  value={short.trades ? `${fmtPct(short.avgPnlPct)}%` : '—'}
+                  tone={sideTone(short.avgPnlPct)}
+                />
+              </tr>
+              <tr>
+                <td>Profit Factor</td>
+                <SideCell value={safeNum(all.profitFactor)} />
+                <SideCell value={long.trades ? safeNum(long.profitFactor) : '—'} tone="long" />
+                <SideCell value={short.trades ? safeNum(short.profitFactor) : '—'} tone="short" />
+              </tr>
+            </tbody>
+          </table>
         </section>
 
         <section className="glass-panel pod-stat-card">
           <h3 className="pod-section-h">TRADE DURATION</h3>
-          <MetricRow icon="⏱" label="Avg Duration" value={fmtDur(m.avgTradeDurationHours)} />
-          <MetricRow icon="▲" label="Avg Win Duration" value={fmtDur(m.avgWinDurationHours)} />
-          <MetricRow icon="▼" label="Avg Loss Duration" value={fmtDur(m.avgLossDurationHours)} />
+          <table className="pod-side-table">
+            <thead>
+              <tr>
+                <th>Metric</th>
+                <th>ALL</th>
+                <th className="long">LONG</th>
+                <th className="short">SHORT</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Avg Duration</td>
+                <SideCell value={fmtDur(all.avgDurationHours)} />
+                <SideCell value={long.trades ? fmtDur(long.avgDurationHours) : '—'} tone="long" />
+                <SideCell
+                  value={short.trades ? fmtDur(short.avgDurationHours) : '—'}
+                  tone="short"
+                />
+              </tr>
+              <tr>
+                <td>Avg Win Duration</td>
+                <SideCell value={fmtDur(all.avgWinDurationHours)} />
+                <SideCell
+                  value={long.trades ? fmtDur(long.avgWinDurationHours) : '—'}
+                  tone="long"
+                />
+                <SideCell
+                  value={short.trades ? fmtDur(short.avgWinDurationHours) : '—'}
+                  tone="short"
+                />
+              </tr>
+              <tr>
+                <td>Avg Loss Duration</td>
+                <SideCell value={fmtDur(all.avgLossDurationHours)} />
+                <SideCell
+                  value={long.trades ? fmtDur(long.avgLossDurationHours) : '—'}
+                  tone="long"
+                />
+                <SideCell
+                  value={short.trades ? fmtDur(short.avgLossDurationHours) : '—'}
+                  tone="short"
+                />
+              </tr>
+            </tbody>
+          </table>
         </section>
 
         <section className="glass-panel pod-stat-card">
           <h3 className="pod-section-h">EXTREME STATS</h3>
           <StreakBars wins={m.maxConsecWins} losses={m.maxConsecLosses} />
-          <MetricRow icon="★" label="Largest Win" value={fmt2(m.largestWin)} />
-          <MetricRow icon="☠" label="Largest Loss" value={fmt2(m.largestLoss)} />
+          <MetricRow
+            icon="★"
+            label="Largest Long Win"
+            value={long.trades ? safeNum(long.largestWin) : '—'}
+          />
+          <MetricRow
+            icon="☠"
+            label="Largest Long Loss"
+            value={long.trades ? safeNum(long.largestLoss) : '—'}
+          />
+          <MetricRow
+            icon="★"
+            label="Largest Short Win"
+            value={short.trades ? safeNum(short.largestWin) : '—'}
+          />
+          <MetricRow
+            icon="☠"
+            label="Largest Short Loss"
+            value={short.trades ? safeNum(short.largestLoss) : '—'}
+          />
+        </section>
+
+        <section className="glass-panel pod-stat-card pod-card-trades">
+          <div className="pod-section-h row">
+            <h3>TRADE LIST SUMMARY</h3>
+            <select
+              value={tradeSort}
+              onChange={(e) => setTradeSort(e.target.value as typeof tradeSort)}
+              aria-label="Sort trades"
+            >
+              <option value="idx">Recent</option>
+              <option value="pnl">PnL</option>
+              <option value="duration">Duration</option>
+            </select>
+          </div>
+          <div className="pod-mini-table-wrap pod-trades-scroll">
+            <table className="pod-mini-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Date</th>
+                  <th>Type</th>
+                  <th>PnL (%)</th>
+                  <th>Dur</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recentSorted.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="pod-muted">
+                      No trades{sideFilter !== 'all' ? ` (${sideFilter})` : ''}
+                    </td>
+                  </tr>
+                )}
+                {recentSorted.map((t) => (
+                  <tr key={t.idx}>
+                    <td>{t.idx}</td>
+                    <td>{fmtIsoShort(t.date)}</td>
+                    <td
+                      className={
+                        t.type.toLowerCase().includes('long')
+                          ? 'pos'
+                          : t.type.toLowerCase().includes('short')
+                            ? 'neg'
+                            : ''
+                      }
+                    >
+                      {t.type}
+                    </td>
+                    <td className={t.pnl >= 0 ? 'pos' : 'neg'}>
+                      {fmt2(t.pnl)} ({fmtPct(t.pnlPct)}%)
+                    </td>
+                    <td>{fmtDur(t.durationHours)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </section>
       </div>
     </div>

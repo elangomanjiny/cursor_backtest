@@ -2,6 +2,7 @@ import type { Dispatch, SetStateAction } from 'react'
 import type { BacktestResult, StrategyParams } from '../api'
 import { ChartsTab } from '../tabs/ChartsTab'
 import { EquityTab } from '../tabs/EquityTab'
+import { PerformanceTab } from '../tabs/PerformanceTab'
 import { TradesTab } from '../tabs/TradesTab'
 import { MetricsPanel } from '../components/MetricsPanel'
 import { fmt2 } from '../format'
@@ -14,8 +15,8 @@ type Props = {
   sessionStarted: boolean
   onRun: () => void
   onGoOptimize: () => void
-  view: 'charts' | 'trades' | 'equity'
-  onView: (v: 'charts' | 'trades' | 'equity') => void
+  view: 'charts' | 'trades' | 'equity' | 'performance'
+  onView: (v: 'charts' | 'trades' | 'equity' | 'performance') => void
 }
 
 function minsToTime(m: number): string {
@@ -288,7 +289,8 @@ export function BacktestStep({
             [
               ['charts', 'Visualization'],
               ['trades', 'Trades'],
-              ['equity', 'Performance'],
+              ['equity', 'Equity Curve'],
+              ['performance', 'Performance'],
             ] as const
           ).map(([id, label]) => (
             <button
@@ -317,10 +319,11 @@ export function BacktestStep({
           <ChartsTab data={data} visible={view === 'charts'} proMode={Boolean(params.pro_mode)} />
           {view === 'trades' && <TradesTab data={data} onOpenOnChart={() => onView('charts')} />}
           <EquityTab data={data} visible={view === 'equity'} />
+          <PerformanceTab data={data} visible={view === 'performance'} />
         </div>
       </div>
 
-      {view !== 'equity' && <MetricsPanel stats={data?.stats || null} />}
+      {view !== 'equity' && view !== 'performance' && <MetricsPanel stats={data?.stats || null} />}
     </div>
   )
 }

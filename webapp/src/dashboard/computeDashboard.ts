@@ -86,6 +86,21 @@ export type RecentTradeRow = {
   durationHours: number
 }
 
+export type SideBucketStats = {
+  trades: number
+  netPnl: number
+  winRate: number
+  expectancy: number
+  profitFactor: number
+  avgPnl: number
+  avgPnlPct: number
+  avgDurationHours: number
+  avgWinDurationHours: number
+  avgLossDurationHours: number
+  largestWin: number
+  largestLoss: number
+}
+
 export type DashboardModel = {
   equity: EquityPoint[]
   buyHold: { time: number; value: number }[]
@@ -98,6 +113,77 @@ export type DashboardModel = {
   stepReturns: number[]
   stepsPerYear: number
   symbol: string
+  bySide: {
+    all: SideBucketStats
+    long: SideBucketStats
+    short: SideBucketStats
+  }
+  /** Full trade rows for Performance list (not capped at 5) */
+  allTradeRows: RecentTradeRow[]
+}
+
+function emptySideStats(): SideBucketStats {
+  return {
+    trades: 0,
+    netPnl: 0,
+    winRate: 0,
+    expectancy: 0,
+    profitFactor: 0,
+    avgPnl: 0,
+    avgPnlPct: 0,
+    avgDurationHours: 0,
+    avgWinDurationHours: 0,
+    avgLossDurationHours: 0,
+    largestWin: 0,
+    largestLoss: 0,
+  }
+}
+
+function isLongSide(side: string): boolean {
+  return String(side).toLowerCase().includes('long')
+}
+
+function isShortSide(side: string): boolean {
+  return String(side).toLowerCase().includes('short')
+}
+
+function computeSideBucket(trades: TradeRow[], volume: number, notionalFallback: number): SideBucketStats {
+  if (!trades.length) return emptySideStats()
+  const pnls = trades.map((t) => Number(t.pnl) || 0)
+  const wins = pnls.filter((p) => p > 0)
+  const losses = pnls.filter((p) => p < 0)
+  const net = pnls.reduce((a, b) => a + b, 0)
+  const grossWin = wins.reduce((a, b) => a + b, 0)
+  const grossLossAbs = Math.abs(losses.reduce((a, b) => a + b, 0))
+  const durs = trades.map((t) => Math.max(0, toUnix(t.exit_time) - toUnix(t.entry_time)) / 3600)
+  const winDurs: number[] = []
+  const lossDurs: number[] = []
+  trades.forEach((_, i) => {
+    const p = pnls[i]
+    if (p > 0) winDurs.push(durs[i])
+    else if (p < 0) lossDurs.push(durs[i])
+  })
+  let notionalSum = 0
+  for (const t of trades) {
+    const px = Number(t.entry_price || 0)
+    notionalSum += px > 0 ? volume * px : notionalFallback
+  }
+  const avgNotional = notionalSum / trades.length
+  const avgPnl = net / trades.length
+  return {
+    trades: trades.length,
+    netPnl: net,
+    winRate: (100 * wins.length) / trades.length,
+    expectancy: avgPnl,
+    profitFactor: grossLossAbs > 1e-12 ? grossWin / grossLossAbs : grossWin > 0 ? 999 : 0,
+    avgPnl,
+    avgPnlPct: avgNotional > 1e-9 ? (avgPnl / avgNotional) * 100 : 0,
+    avgDurationHours: durs.reduce((a, b) => a + b, 0) / durs.length,
+    avgWinDurationHours: winDurs.length ? winDurs.reduce((a, b) => a + b, 0) / winDurs.length : 0,
+    avgLossDurationHours: lossDurs.length ? lossDurs.reduce((a, b) => a + b, 0) / lossDurs.length : 0,
+    largestWin: wins.length ? Math.max(...wins) : 0,
+    largestLoss: losses.length ? Math.min(...losses) : 0,
+  }
 }
 
 function toUnix(iso: string): number {
@@ -456,6 +542,30 @@ export function computeDashboard(data: BacktestResult): DashboardModel {
     }
   })
 
+  const allTradeRows: RecentTradeRow[] = trades.map((t, i) => {
+    const durH = Math.max(0, toUnix(t.exit_time) - toUnix(t.entry_time)) / 3600
+    const entryPx = Number(t.entry_price || 0)
+    const notionalT = entryPx > 0 ? volume * entryPx : avgNotional
+    const pnl = Number(t.pnl)
+    return {
+      idx: i + 1,
+      date: t.exit_time,
+      symbol: String(data.symbol || '—'),
+      type: String(t.side || '—'),
+      pnl,
+      pnlPct: notionalT > 1e-9 ? (pnl / notionalT) * 100 : 0,
+      durationHours: durH,
+    }
+  })
+
+  const longList = trades.filter((t) => isLongSide(t.side))
+  const shortList = trades.filter((t) => isShortSide(t.side))
+  const bySide = {
+    all: computeSideBucket(trades, volume, avgNotional),
+    long: computeSideBucket(longList, volume, avgNotional),
+    short: computeSideBucket(shortList, volume, avgNotional),
+  }
+
   const equityRawSpark = downsample(equity.map((e) => e.equity))
   const ddRawSpark = downsample(equity.map((e) => e.drawdownPct))
 
@@ -512,6 +622,8 @@ export function computeDashboard(data: BacktestResult): DashboardModel {
     startEquity: startEq,
     monthlyReturns,
     recentTrades,
+    allTradeRows,
+    bySide,
     stepReturns: rets,
     stepsPerYear,
     symbol: String(data.symbol || ''),

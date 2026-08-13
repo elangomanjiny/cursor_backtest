@@ -2211,7 +2211,222 @@ th.sorted-desc .sort-ind {
   padding: 0;
 }
 
-/* ========== v1.14 Optimize single-window shell ========== */
+/* ========== Equity Curve full-bleed tab ========== */
+.equity-curve-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  height: calc(100vh - 120px);
+  max-height: calc(100vh - 120px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px 10px;
+  background: #0b1220;
+  border: none;
+  border-radius: 0;
+  overflow: hidden;
+}
+.equity-curve-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.equity-curve-header h2 {
+  margin: 0;
+  font-size: 1rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #e2e8f0;
+}
+.equity-curve-header p {
+  margin: 4px 0 0;
+  font-size: 0.78rem;
+  color: #94a3b8;
+}
+.equity-curve-legend {
+  display: flex;
+  gap: 14px;
+  font-size: 0.72rem;
+  color: #94a3b8;
+}
+.equity-curve-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.equity-curve-legend i {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+}
+.equity-curve-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  position: relative;
+  border: 1px solid rgba(100, 130, 160, 0.22);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #0f172a;
+}
+.equity-curve-body .pod-depth-charts {
+  height: 100% !important;
+  width: 100% !important;
+  min-height: 0;
+}
+.equity-curve-body .pod-depth-host {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+}
+
+/* ========== Performance metrics grid ========== */
+.performance-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  height: calc(100vh - 120px);
+  max-height: calc(100vh - 120px);
+  overflow: hidden;
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+.pod-perf {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+  padding: 8px 10px 10px;
+  overflow: hidden;
+  background: #0b1220;
+}
+.pod-perf-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  flex: 0 0 auto;
+  padding: 10px 14px !important;
+}
+.pod-perf-titleblock {
+  min-width: 0;
+}
+.pod-side-toggle {
+  display: inline-flex;
+  border: 1px solid rgba(100, 130, 160, 0.35);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #0f172a;
+}
+.pod-side-toggle button {
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  padding: 6px 14px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+.pod-side-toggle button.active {
+  background: rgba(34, 197, 94, 0.16);
+  color: #e2e8f0;
+}
+.pod-side-toggle button:nth-child(2).active {
+  background: rgba(34, 197, 94, 0.22);
+  color: #22c55e;
+}
+.pod-side-toggle button:nth-child(3).active {
+  background: rgba(239, 68, 68, 0.2);
+  color: #ef4444;
+}
+.pod-perf-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  overflow: hidden;
+}
+.pod-perf-grid .pod-stat-card {
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pod-card-note {
+  margin: -4px 0 4px;
+  font-size: 0.65rem;
+  color: #64748b;
+}
+.pod-side-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+.pod-side-table th,
+.pod-side-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid rgba(80, 100, 130, 0.18);
+  text-align: right;
+}
+.pod-side-table th:first-child,
+.pod-side-table td:first-child {
+  text-align: left;
+  color: #94a3b8;
+}
+.pod-side-table th.long,
+.pod-side-table td.pos {
+  color: #22c55e;
+}
+.pod-side-table th.short,
+.pod-side-table td.neg {
+  color: #ef4444;
+}
+.pod-side-table th.long {
+  color: #22c55e;
+}
+.pod-side-table th.short {
+  color: #ef4444;
+}
+.pod-card-trades {
+  overflow: hidden;
+}
+.pod-trades-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+@media (max-width: 1100px) {
+  .pod-perf-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: auto;
+    overflow: auto;
+  }
+}
+@media (max-width: 720px) {
+  .pod-perf-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.chart-fill:has(.equity-curve-panel),
+.chart-fill:has(.performance-panel) {
+  overflow: hidden;
+  padding: 0;
+}
 .step-body > .opt-shell {
   flex: 1;
   min-height: 0;

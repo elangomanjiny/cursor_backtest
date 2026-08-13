@@ -56,7 +56,7 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [sessionStarted, setSessionStarted] = useState(false)
-  const [view, setView] = useState<'charts' | 'trades' | 'equity'>('charts')
+  const [view, setView] = useState<'charts' | 'trades' | 'equity' | 'performance'>('charts')
   const [optProgress, setOptProgress] = useState<{
     done: number
     total: number
@@ -206,7 +206,7 @@ export default function App() {
       exit_time: Number(b.exit_time ?? opt?.exit_time ?? p.exit_time),
       time_stop_minutes: 0,
     }))
-    setView('equity')
+    setView('performance')
     setStep(2)
     setSessionStarted(true)
   }
