@@ -41,6 +41,8 @@ type Props = {
   data: BacktestResult | null
   /** When false, keep chart mounted but hidden (preserves zoom). */
   visible?: boolean
+  /** Show Lo/Sh/Se/Co AGGR tags only in Pro strategy mode. */
+  proMode?: boolean
 }
 
 type Tip = {
@@ -98,7 +100,7 @@ function snapToBarTime(tsSec: number, barTimes: number[], tfSec: number): number
   return best
 }
 
-export function ChartsTab({ data, visible = true }: Props) {
+export function ChartsTab({ data, visible = true, proMode = false }: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
   const navRef = useRef<HTMLDivElement>(null)
@@ -194,6 +196,7 @@ export function ChartsTab({ data, visible = true }: Props) {
       showSignals,
       showTrades,
       showVwap,
+      proMode,
       vwapSettings.source,
       vwapSettings.session,
       vwapSettings.bands.join(','),
@@ -371,56 +374,70 @@ export function ChartsTab({ data, visible = true }: Props) {
     const tradeLabels: MarkerLabel[] = []
 
     if (showSignals) {
-      const thr = Number(data.threshold) || 50
-      const sigmaN = Number(
-        (data.params as { pro_vwap_sigma?: number } | undefined)?.pro_vwap_sigma ??
-          (data.stats as { pro_vwap_sigma?: number } | undefined)?.pro_vwap_sigma ??
-          2,
-      )
-      const vwapPts = computeVwap(data.bars, unit, {
-        source: 'hlc3',
-        session: 'binance',
-        bands: [sigmaN],
-      })
-      const vwapMap = new Map(vwapPts.map((p) => [p.time, p]))
-      for (const a of data.aggressive) {
-        const t = snap(a.time)
-        const idx = barTimes.indexOf(t)
-        const ltp = idx > 0 ? Number(data.bars[idx - 1]?.close) : Number(a.open)
-        const backendTag = (a.pro_tag || '') as AggrTag | ''
-        const vp = vwapMap.get(t)
-        const vwapOk =
-          a.vwap_ok === true ||
-          (vp
-            ? outsideVwapNSigma(Number(a.high), Number(a.low), vp.vwap, vp.stdev, sigmaN)
-            : false)
-        const tag =
-          backendTag === 'Lo' ||
-          backendTag === 'Sh' ||
-          backendTag === 'Se' ||
-          backendTag === 'Co'
-            ? backendTag
-            : vwapOk
-              ? classifyAggrTag(Number(a.delta_pct), thr, Number(a.high), Number(a.low), ltp)
-              : null
-        const sell = a.side === 'Sell'
-        const color = tag ? AGGR_TAG_COLOR[tag] : sell ? '#f85149' : '#58a6ff'
-        const longBias = tag === 'Lo' || tag === 'Co'
-        markers.push({
-          time: t as never,
-          position: longBias || (!tag && !sell) ? 'belowBar' : 'aboveBar',
-          color,
-          shape: 'circle',
-          text: tag || undefined,
+      if (proMode) {
+        const thr = Number(data.threshold) || 50
+        const sigmaN = Number(
+          (data.params as { pro_vwap_sigma?: number } | undefined)?.pro_vwap_sigma ??
+            (data.stats as { pro_vwap_sigma?: number } | undefined)?.pro_vwap_sigma ??
+            2,
+        )
+        const vwapPts = computeVwap(data.bars, unit, {
+          source: 'hlc3',
+          session: 'binance',
+          bands: [sigmaN],
         })
-        if (tag) {
-          tradeLabels.push({
-            time: t,
-            price: sell ? Number(a.high) : Number(a.low),
-            position: longBias ? 'belowBar' : 'aboveBar',
+        const vwapMap = new Map(vwapPts.map((p) => [p.time, p]))
+        for (const a of data.aggressive) {
+          const t = snap(a.time)
+          const idx = barTimes.indexOf(t)
+          const ltp = idx > 0 ? Number(data.bars[idx - 1]?.close) : Number(a.open)
+          const backendTag = (a.pro_tag || '') as AggrTag | ''
+          const vp = vwapMap.get(t)
+          const vwapOk =
+            a.vwap_ok === true ||
+            (vp
+              ? outsideVwapNSigma(Number(a.high), Number(a.low), vp.vwap, vp.stdev, sigmaN)
+              : false)
+          const tag =
+            backendTag === 'Lo' ||
+            backendTag === 'Sh' ||
+            backendTag === 'Se' ||
+            backendTag === 'Co'
+              ? backendTag
+              : vwapOk
+                ? classifyAggrTag(Number(a.delta_pct), thr, Number(a.high), Number(a.low), ltp)
+                : null
+          const sell = a.side === 'Sell'
+          const color = tag ? AGGR_TAG_COLOR[tag] : sell ? '#f85149' : '#58a6ff'
+          const longBias = tag === 'Lo' || tag === 'Co'
+          markers.push({
+            time: t as never,
+            position: longBias || (!tag && !sell) ? 'belowBar' : 'aboveBar',
             color,
-            line1: tag,
-            line2: `Δ% ${fmt2(a.delta_pct)}`,
+            shape: 'circle',
+            text: tag || undefined,
+          })
+          if (tag) {
+            tradeLabels.push({
+              time: t,
+              price: sell ? Number(a.high) : Number(a.low),
+              position: longBias ? 'belowBar' : 'aboveBar',
+              color,
+              line1: tag,
+              line2: `Δ% ${fmt2(a.delta_pct)}`,
+            })
+          }
+        }
+      } else {
+        // Directional / Non-Directional: plain Buy/Sell AGGR markers (no Lo/Sh/Se/Co)
+        for (const a of data.aggressive) {
+          const t = snap(a.time)
+          const sell = a.side === 'Sell'
+          markers.push({
+            time: t as never,
+            position: sell ? 'aboveBar' : 'belowBar',
+            color: sell ? '#f85149' : '#58a6ff',
+            shape: 'circle',
           })
         }
       }
@@ -620,6 +637,7 @@ export function ChartsTab({ data, visible = true }: Props) {
     showSignals,
     showTrades,
     showVwap,
+    proMode,
     vwapSeries,
     vwapByTime,
     vwapSettings,
@@ -834,22 +852,32 @@ export function ChartsTab({ data, visible = true }: Props) {
               </span>
             </>
           )}
-          {showSignals && (
-            <>
-              <span className="lg" title="Long Buy — +Δ% & high ≥ LTP">
-                <i style={{ background: AGGR_TAG_COLOR.Lo, borderRadius: '50%' }} /> Lo
-              </span>
-              <span className="lg" title="Short Sell — −Δ% & low ≤ LTP">
-                <i style={{ background: AGGR_TAG_COLOR.Sh, borderRadius: '50%' }} /> Sh
-              </span>
-              <span className="lg" title="Long liquidation Sell — +Δ% & low ≤ LTP (bar below LTP)">
-                <i style={{ background: AGGR_TAG_COLOR.Se, borderRadius: '50%' }} /> Se
-              </span>
-              <span className="lg" title="Short covering Buy — −Δ% & high ≥ LTP (bar above LTP)">
-                <i style={{ background: AGGR_TAG_COLOR.Co, borderRadius: '50%' }} /> Co
-              </span>
-            </>
-          )}
+          {showSignals &&
+            (proMode ? (
+              <>
+                <span className="lg" title="Long Buy — +Δ% & high ≥ LTP">
+                  <i style={{ background: AGGR_TAG_COLOR.Lo, borderRadius: '50%' }} /> Lo
+                </span>
+                <span className="lg" title="Short Sell — −Δ% & low ≤ LTP">
+                  <i style={{ background: AGGR_TAG_COLOR.Sh, borderRadius: '50%' }} /> Sh
+                </span>
+                <span className="lg" title="Long liquidation Sell — +Δ% & low ≤ LTP (bar below LTP)">
+                  <i style={{ background: AGGR_TAG_COLOR.Se, borderRadius: '50%' }} /> Se
+                </span>
+                <span className="lg" title="Short covering Buy — −Δ% & high ≥ LTP (bar above LTP)">
+                  <i style={{ background: AGGR_TAG_COLOR.Co, borderRadius: '50%' }} /> Co
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="lg">
+                  <i style={{ background: '#58a6ff', borderRadius: '50%' }} /> Buy AGGR
+                </span>
+                <span className="lg">
+                  <i style={{ background: '#f85149', borderRadius: '50%' }} /> Sell AGGR
+                </span>
+              </>
+            ))}
           {showVwap && (
             <>
               <span className="lg">

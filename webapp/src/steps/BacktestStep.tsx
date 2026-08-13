@@ -314,7 +314,7 @@ export function BacktestStep({
           )}
         </div>
         <div className="chart-fill">
-          <ChartsTab data={data} visible={view === 'charts'} />
+          <ChartsTab data={data} visible={view === 'charts'} proMode={Boolean(params.pro_mode)} />
           {view === 'trades' && <TradesTab data={data} onOpenOnChart={() => onView('charts')} />}
           <EquityTab data={data} visible={view === 'equity'} />
         </div>
