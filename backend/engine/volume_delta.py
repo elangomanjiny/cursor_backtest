@@ -122,6 +122,10 @@ class Aggressive:
     delta_usdt: float
     delta_pct: float
     range: float
+    # Pro classifier (Lo/Sh/Se/Co); empty when not Pro or not qualified
+    pro_tag: str = ""
+    # True when AGGR is outside VWAP ±2σ (Pro qualifier)
+    vwap_ok: bool = False
 
 
 @dataclass
@@ -141,6 +145,7 @@ class BacktestResult:
     stop_to_be: int = 0
     break_even: int = 0
     break_even_pct: float = 50.0
+    pro_mode: int = 0
 
 
 def _to_ist(ts: pd.Timestamp | datetime) -> datetime:
@@ -155,6 +160,96 @@ def _in_window(ts: datetime, after_min: int, before_min: int) -> bool:
     ist = _to_ist(ts)
     tod = ist.hour * 60 + ist.minute
     return after_min <= tod < before_min
+
+
+# Binance UM daily VWAP anchors at 05:30 IST (= 00:00 UTC), not midnight IST.
+_BINANCE_VWAP_START_MIN = 5 * 60 + 30
+
+
+def _binance_session_key(ts: datetime) -> str:
+    ist = _to_ist(ts)
+    y, m, d = ist.year, ist.month, ist.day
+    mins = ist.hour * 60 + ist.minute
+    if mins < _BINANCE_VWAP_START_MIN:
+        prev = datetime(y, m, d, tzinfo=IST) - timedelta(days=1)
+        y, m, d = prev.year, prev.month, prev.day
+    return f"{y:04d}-{m:02d}-{d:02d}"
+
+
+class _BinanceVwapTracker:
+    """Running session VWAP + volume-weighted stdev (TradingView-style)."""
+
+    __slots__ = ("sum_v", "sum_pv", "sum_p2v", "sess")
+
+    def __init__(self) -> None:
+        self.sum_v = 0.0
+        self.sum_pv = 0.0
+        self.sum_p2v = 0.0
+        self.sess = ""
+
+    def update(self, ot: datetime, typical: float, vol: float) -> tuple[float, float]:
+        key = _binance_session_key(ot)
+        if key != self.sess:
+            self.sum_v = 0.0
+            self.sum_pv = 0.0
+            self.sum_p2v = 0.0
+            self.sess = key
+        if vol > 0 and np.isfinite(typical):
+            self.sum_v += vol
+            self.sum_pv += typical * vol
+            self.sum_p2v += typical * typical * vol
+        if self.sum_v <= 0:
+            return float("nan"), 0.0
+        vwap = self.sum_pv / self.sum_v
+        var = max(0.0, self.sum_p2v / self.sum_v - vwap * vwap)
+        return vwap, float(np.sqrt(var))
+
+
+def _outside_vwap_2sigma(high: float, low: float, vwap: float, stdev: float) -> bool:
+    """Pro qualifier: candle must touch above +2σ or below −2σ."""
+    if not (stdev > 0 and np.isfinite(vwap)):
+        return False
+    return high >= vwap + 2.0 * stdev or low <= vwap - 2.0 * stdev
+
+
+def _classify_pro_tag(
+    delta_pct: float,
+    threshold: float,
+    high: float,
+    low: float,
+    ltp: float,
+) -> str:
+    """
+    Lo: +Δ & high≥LTP (Long buy)
+    Sh: −Δ & low≤LTP (Short sell)
+    Se: +Δ & low≤LTP when not Lo (Long liquidation sell)
+    Co: −Δ & high≥LTP when not Sh (Short covering buy)
+    """
+    thr = abs(float(threshold))
+    if thr <= 0 or not np.isfinite(ltp):
+        return ""
+    d = float(delta_pct)
+    if d > thr:
+        if high >= ltp:
+            return "Lo"
+        if low <= ltp:
+            return "Se"
+        return ""
+    if d < -thr:
+        if low <= ltp:
+            return "Sh"
+        if high >= ltp:
+            return "Co"
+        return ""
+    return ""
+
+
+def _pro_long_bias(tag: str) -> bool:
+    return tag in ("Lo", "Co")
+
+
+def _pro_short_bias(tag: str) -> bool:
+    return tag in ("Sh", "Se")
 
 
 def _as_utc_ts(ts: datetime | pd.Timestamp) -> pd.Timestamp:
@@ -376,6 +471,7 @@ def run_backtest(
     stop_to_be: int = 0,
     break_even: int = 0,
     break_even_pct: float = 50.0,
+    pro_mode: bool = False,
     ticks: pd.DataFrame | None = None,
 ) -> BacktestResult:
     """
@@ -385,7 +481,7 @@ def run_backtest(
       Only bars inside this window can form Aggressive candles / arm setups.
       Entries also require the entry bar open to fall inside the window.
 
-    Directional (wait_and_trade=False) — Baseline:
+    Directional (wait_and_trade=False, pro_mode=False) — Baseline:
       Buy AGGR → long only; Sell AGGR → short only; next-bar open
       Fixed SL/TP; optional BreakEven (arm=1R → lock stop at BE%×R once)
       No reverse / AGGR trail / re-entry
@@ -393,7 +489,16 @@ def run_backtest(
     Non-Directional (wait_and_trade=True) — ORB + Reverse:
       Any AGGR → shared range; break high/low for LE/SE
       Fixed TP; stop may tighten on new AGGR; stop hit → LR/SR reverse
+
+    Pro (pro_mode=True; wait_and_trade ignored/forced off):
+      Classify AGGR as Lo/Sh/Se/Co vs prior close (LTP).
+      Qualifier: candle must be outside Binance VWAP ±2σ (05:30 IST session).
+      Long entries from Lo|Co; Short from Sh|Se; next-bar open (Directional-style).
+      Optional BreakEven; no reverse / ORB trail.
     """
+    pro = bool(pro_mode)
+    if pro:
+        wait_and_trade = False
     allow_long = trade_mode in (0, 2)
     allow_short = trade_mode in (1, 2)
     slip = float(slippage_pct or 0.0)
@@ -402,10 +507,10 @@ def run_backtest(
     # Pro features: forced off for now
     re_en = 0
     stobe = 0
-    allow_reverse = bool(wait_and_trade)
-    allow_trail = bool(wait_and_trade)
-    # BreakEven: Directional only; lock fraction of range (default 50%)
-    be_on = (not wait_and_trade) and (1 if int(break_even or 0) else 0)
+    allow_reverse = bool(wait_and_trade) and not pro
+    allow_trail = bool(wait_and_trade) and not pro
+    # BreakEven: Directional + Pro; lock fraction of range (default 50%)
+    be_on = (pro or not wait_and_trade) and (1 if int(break_even or 0) else 0)
     be_frac = max(0.01, min(1.0, float(break_even_pct if break_even_pct is not None else 50) / 100.0))
     tf_delta = timedelta(minutes=int(tf_minutes))
 
@@ -414,7 +519,7 @@ def run_backtest(
     book = _prepare_ticks(symbol, df, ticks)
     tick_i = 0
 
-    long_setup = None  # Wait=false directional
+    long_setup = None  # Wait=false directional / pro
     short_setup = None
     orb: dict[str, Any] | None = None  # Wait=true shared ORB range
     pending_reentry: dict[str, Any] | None = None
@@ -425,6 +530,8 @@ def run_backtest(
     realized = 0.0
     bar_rows: list[dict[str, Any]] = []
     last_eq_ts: pd.Timestamp | None = None
+    vwap_tr = _BinanceVwapTracker()
+    prev_close: float | None = None
 
     def _push_equity(ts: datetime | pd.Timestamp) -> None:
         """Append equity only in non-decreasing time order (required by chart)."""
@@ -851,13 +958,14 @@ def run_backtest(
                         else:
                             target = raw + float(long_setup["range"]) * rr
                             tick_i = book.seek(ot, tick_i)
+                            tag = str(long_setup.get("pro_tag") or "LE")
                             active = _build_active(
                                 is_long=True,
                                 raw=raw,
                                 stop=stop,
                                 target=target,
                                 entry_time=ot,
-                                tag="LE",
+                                tag=tag,
                                 signal_time=long_setup["signal_time"],
                                 signal_high=float(long_setup["signal_high"]),
                                 signal_low=float(long_setup["signal_low"]),
@@ -867,7 +975,7 @@ def run_backtest(
                             )
                             long_setup = short_setup = None
                             entered = True
-                            events.append(f"LE@{active['entry']:.2f}")
+                            events.append(f"{tag}@{active['entry']:.2f}")
 
                     if allow_short and short_setup and int(short_setup["bars"]) >= 1 and active is None:
                         raw = o
@@ -879,13 +987,14 @@ def run_backtest(
                         else:
                             target = raw - float(short_setup["range"]) * rr
                             tick_i = book.seek(ot, tick_i)
+                            tag = str(short_setup.get("pro_tag") or "SE")
                             active = _build_active(
                                 is_long=False,
                                 raw=raw,
                                 stop=stop,
                                 target=target,
                                 entry_time=ot,
-                                tag="SE",
+                                tag=tag,
                                 signal_time=short_setup["signal_time"],
                                 signal_high=float(short_setup["signal_high"]),
                                 signal_low=float(short_setup["signal_low"]),
@@ -895,7 +1004,7 @@ def run_backtest(
                             )
                             long_setup = short_setup = None
                             entered = True
-                            events.append(f"SE@{active['entry']:.2f} TP={target:.2f}")
+                            events.append(f"{tag}@{active['entry']:.2f} TP={target:.2f}")
 
         # same-bar / remainder-of-bar tick exit after entry
         if entered and active is not None:
@@ -914,9 +1023,22 @@ def run_backtest(
 
         # Aggressive candle: only inside the session window (default 05:30–21:00 IST).
         # Outside that window we neither list AGGR nor arm Directional/ORB setups.
+        # Always advance Binance VWAP (05:30 IST) so Pro ±2σ uses full session volume.
+        typical = (h + l + c) / 3.0
+        vol_for_vwap = vol_q if vol_q > 0 else vol_b
+        vwap_px, vwap_sd = vwap_tr.update(ot, typical, vol_for_vwap)
+
         if abs(dlt) >= threshold and _in_window(ot, entry_after, entry_before):
             side = "Buy" if dlt >= threshold else "Sell"
             rng = h - l
+            ltp = float(prev_close) if prev_close is not None else o
+            vwap_ok = _outside_vwap_2sigma(h, l, vwap_px, vwap_sd)
+            pro_tag = ""
+            if pro:
+                if vwap_ok:
+                    pro_tag = _classify_pro_tag(dlt, threshold, h, l, ltp)
+                else:
+                    events.append("AGGR-SKIP-VWAP2S")
             agg = Aggressive(
                 time=_to_ist(ot),
                 side=side,
@@ -928,9 +1050,14 @@ def run_backtest(
                 delta_usdt=delta_q,
                 delta_pct=dlt,
                 range=rng,
+                pro_tag=pro_tag,
+                vwap_ok=vwap_ok,
             )
             aggressive.append(agg)
-            events.append(f"AGGR-{side.upper()}")
+            if pro and pro_tag:
+                events.append(f"AGGR-{pro_tag}")
+            else:
+                events.append(f"AGGR-{side.upper()}")
 
             # Non-Directional only: tighten stop from new AGGR (TP stays fixed)
             if allow_trail and active is not None:
@@ -951,6 +1078,38 @@ def run_backtest(
                         "signal_side": side,
                     }
                     pending_reentry = None
+            elif pro:
+                # Pro: only arm when VWAP±2σ qualifier + Lo/Sh/Se/Co tag
+                if pro_tag and _pro_long_bias(pro_tag) and allow_long:
+                    long_setup = {
+                        "signal_time": ot,
+                        "high": h,
+                        "low": l,
+                        "range": rng,
+                        "bars": 0,
+                        "signal_high": h,
+                        "signal_low": l,
+                        "signal_delta_pct": dlt,
+                        "pro_tag": pro_tag,
+                    }
+                    if short_setup is not None:
+                        events.append("SE-SETUP-CANCEL")
+                        short_setup = None
+                elif pro_tag and _pro_short_bias(pro_tag) and allow_short:
+                    short_setup = {
+                        "signal_time": ot,
+                        "high": h,
+                        "low": l,
+                        "range": rng,
+                        "bars": 0,
+                        "signal_high": h,
+                        "signal_low": l,
+                        "signal_delta_pct": dlt,
+                        "pro_tag": pro_tag,
+                    }
+                    if long_setup is not None:
+                        events.append("LE-SETUP-CANCEL")
+                        long_setup = None
             else:
                 # Directional: opposite AGGR cancels a pending same-side wait
                 # (avoids entering long after later sells already invalidated the range).
@@ -982,6 +1141,8 @@ def run_backtest(
                     if long_setup is not None:
                         events.append("LE-SETUP-CANCEL")
                         long_setup = None
+
+        prev_close = c
 
         # Bar-open equity only when no intrabar exit already stamped a later time
         if not closed_this_bar:
@@ -1057,7 +1218,10 @@ def run_backtest(
         "stop_to_be": stobe,
         "break_even": int(be_on),
         "break_even_pct": round(be_frac * 100.0, 2),
-        "strategy_mode": "non_directional" if wait_and_trade else "directional",
+        "strategy_mode": (
+            "pro" if pro else ("non_directional" if wait_and_trade else "directional")
+        ),
+        "pro_mode": int(pro),
         "exits": {
             r: sum(1 for t in trades if t.exit_reason == r)
             for r in sorted({t.exit_reason for t in trades})
@@ -1084,6 +1248,7 @@ def run_backtest(
         stop_to_be=stobe,
         break_even=int(be_on),
         break_even_pct=round(be_frac * 100.0, 2),
+        pro_mode=int(pro),
     )
 
 

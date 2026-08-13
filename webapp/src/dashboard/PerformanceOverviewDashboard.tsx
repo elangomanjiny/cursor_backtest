@@ -57,7 +57,12 @@ export function PerformanceOverviewDashboard({ data, visible = true }: Props) {
         <h2 className="pod-title">PERFORMANCE OVERVIEW DASHBOARD</h2>
         <p className="pod-sub">
           {data.symbol} · {data.tf_minutes}m · thr {fmt2(data.threshold)} · RR {fmt2(data.rr)} ·{' '}
-          {data.wait_and_trade ? 'Non-Directional' : 'Directional'} · v1.16.0
+          {data.wait_and_trade
+            ? 'Non-Directional'
+            : data.pro_mode
+              ? 'Pro'
+              : 'Directional'}{' '}
+          · v1.17.2
         </p>
       </header>
 

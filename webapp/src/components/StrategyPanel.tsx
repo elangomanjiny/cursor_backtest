@@ -108,13 +108,22 @@ export function StrategyPanel({ params, onChange, busy, hideDataFields }: Props)
         />
       </label>
 
-      <label title="Directional = Baseline. Non-Directional = ORB + Reverse.">
+      <label title="Directional = baseline. Non-Directional = ORB+reverse. Pro = Lo/Sh/Se/Co + VWAP±2σ.">
         Strategy
         <select
-          value={params.wait_and_trade ? 'non_directional' : 'directional'}
+          value={
+            params.pro_mode
+              ? 'pro'
+              : params.wait_and_trade
+                ? 'non_directional'
+                : 'directional'
+          }
           onChange={(e) => {
-            const nd = e.target.value === 'non_directional'
+            const v = e.target.value
+            const nd = v === 'non_directional'
+            const pro = v === 'pro'
             set('wait_and_trade', nd)
+            set('pro_mode', pro)
             set('re_entry', 0)
             set('stop_to_be', 0)
             if (nd) set('break_even', 0)
@@ -122,6 +131,7 @@ export function StrategyPanel({ params, onChange, busy, hideDataFields }: Props)
         >
           <option value="directional">Directional</option>
           <option value="non_directional">Non-Directional</option>
+          <option value="pro">Pro</option>
         </select>
       </label>
 

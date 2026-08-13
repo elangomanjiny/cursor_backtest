@@ -3,6 +3,8 @@ export type StrategyParams = {
   symbol: string
   tf: number
   wait_and_trade: boolean
+  /** Pro: Lo/Sh/Se/Co + VWAP±2σ qualifier (Directional-style entries). */
+  pro_mode: boolean
   rr: number
   volume: number
   threshold: number
@@ -20,7 +22,7 @@ export type StrategyParams = {
   re_entry: number
   /** 1 = move stop to new AGGR extreme only if past entry (BE+); 0 = always tighten. */
   stop_to_be: number
-  /** Directional only: 1 = arm at 1R → lock stop at BE% of R once; 0 = off. */
+  /** Directional / Pro: 1 = arm at 1R → lock stop at BE% of R once; 0 = off. */
   break_even: number
   /** BreakEven lock as % of range (default 50 → 0.5×R from entry). */
   break_even_pct: number
@@ -76,6 +78,7 @@ export type BacktestResult = {
   symbol: string
   tf_minutes: number
   wait_and_trade: boolean
+  pro_mode?: number | boolean
   rr: number
   volume: number
   threshold: number
@@ -134,6 +137,8 @@ export type AggressiveRow = {
   delta_usdt?: number
   delta_pct: number
   range: number
+  pro_tag?: string
+  vwap_ok?: boolean
 }
 
 export type BarRow = {
@@ -188,6 +193,7 @@ export type OptimizePoint = {
   threshold: number
   rr: number
   wait_and_trade: boolean
+  pro_mode?: number | boolean
   re_entry?: number
   stop_to_be?: number
   break_even?: number

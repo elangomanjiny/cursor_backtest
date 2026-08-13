@@ -168,3 +168,12 @@ export function classifyAggrTag(
   }
   return null
 }
+export function outsideVwap2Sigma(
+  high: number,
+  low: number,
+  vwap: number,
+  stdev: number,
+): boolean {
+  if (!(stdev > 0) || !Number.isFinite(vwap)) return false
+  return high >= vwap + 2 * stdev || low <= vwap - 2 * stdev
+}

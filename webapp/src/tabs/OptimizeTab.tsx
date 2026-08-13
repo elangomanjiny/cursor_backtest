@@ -283,10 +283,12 @@ export function OptimizeTab({
       (result?.results ?? []).map((r, i) => ({
         ...r,
         _rank: i,
-        _strategy: r.wait_and_trade ? 'Non-Dir' : 'Dir',
-        _be: r.wait_and_trade ? '—' : Number(r.break_even) ? 'On' : 'Off',
+        _strategy: r.pro_mode ? 'Pro' : r.wait_and_trade ? 'Non-Dir' : 'Dir',
+        _be: r.wait_and_trade && !r.pro_mode ? '—' : Number(r.break_even) ? 'On' : 'Off',
         _bePct:
-          r.wait_and_trade || !Number(r.break_even) ? -1 : Number(r.break_even_pct ?? 50),
+          (r.wait_and_trade && !r.pro_mode) || !Number(r.break_even)
+            ? -1
+            : Number(r.break_even_pct ?? 50),
         _key: comboKey(r),
       })),
     [result?.results],
@@ -457,7 +459,7 @@ export function OptimizeTab({
               value={waitFlags}
               onChange={(e) => setWaitFlags(e.target.value)}
               placeholder="false"
-              title="false=Directional, true=Non-Directional"
+              title="false=Directional, true=Non-Directional, pro=Pro (Lo/Sh/Se/Co + VWAP±2σ)"
             />
           </label>
           <label title="Directional BreakEven">
@@ -690,7 +692,9 @@ export function OptimizeTab({
                   <span>
                     RR <b>{fmt2(best.rr)}</b>
                   </span>
-                  <span>{best.wait_and_trade ? 'Non-Dir' : 'Dir'}</span>
+                  <span>
+                    {best.pro_mode ? 'Pro' : best.wait_and_trade ? 'Non-Dir' : 'Dir'}
+                  </span>
                 </div>
                 <div className="opt-best-metrics">
                   <div>

@@ -206,6 +206,7 @@ def backtest(
     stop_to_be: int = 0,
     break_even: int = 0,
     break_even_pct: float = 50.0,
+    pro_mode: bool = False,
     start: str | None = "2026-08-01",
     end: str | None = "2026-08-03",
     exchange: str = "BINANCE_UM",
@@ -244,6 +245,7 @@ def backtest(
             stop_to_be=1 if int(stop_to_be or 0) else 0,
             break_even=1 if int(break_even or 0) else 0,
             break_even_pct=float(break_even_pct if break_even_pct is not None else 50),
+            pro_mode=bool(pro_mode),
             ticks=ticks,
         )
     except FileNotFoundError as e:
@@ -253,6 +255,7 @@ def backtest(
         tf == 15
         and start == "2026-08-01"
         and not wait_and_trade
+        and not pro_mode
         and abs(rr - 1.0) < 1e-9
         and abs(threshold - 50.0) < 1e-9
         and trade_mode == 2
@@ -274,6 +277,7 @@ def backtest(
             "symbol": symbol,
             "tf": tf,
             "wait_and_trade": wait_and_trade,
+            "pro_mode": bool(pro_mode),
             "rr": rr,
             "volume": volume,
             "threshold": threshold,

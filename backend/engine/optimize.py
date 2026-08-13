@@ -90,6 +90,25 @@ def _parse_bools(raw: str | Iterable[bool]) -> list[bool]:
     return [bool(x) for x in raw]
 
 
+def _parse_strategy_flags(raw: str | Iterable[Any]) -> list[tuple[bool, bool]]:
+    """
+    Parse strategy grid into (wait_and_trade, pro_mode) pairs.
+    Accepts: false/true/pro (and aliases).
+    """
+    if not isinstance(raw, str):
+        return [(bool(x), False) for x in raw]
+    out: list[tuple[bool, bool]] = []
+    for p in raw.split(","):
+        p = p.strip().lower()
+        if p in ("pro", "p"):
+            out.append((False, True))
+        elif p in ("1", "true", "t", "yes", "y", "non_directional", "nd"):
+            out.append((True, False))
+        elif p in ("0", "false", "f", "no", "n", "directional", "dir"):
+            out.append((False, False))
+    return out
+
+
 def _parse_re_entry_flags(raw: str | Iterable[int] | None) -> list[int]:
     """Parse re-entry grid: 0 and/or 1."""
     if raw is None or (isinstance(raw, str) and not str(raw).strip()):
@@ -365,7 +384,10 @@ def _worker_eval(job: dict[str, Any]) -> dict[str, Any]:
     assert _W_BARS is not None and _W_TICKS is not None and _W_COMMON is not None
     c = _W_COMMON
     wt = bool(job["wait_and_trade"])
-    be = int(job["break_even"]) if not wt else 0
+    pro = bool(job.get("pro_mode"))
+    be = int(job["break_even"]) if (not wt or pro) else 0
+    if wt:
+        be = 0
     result = run_backtest(
         _W_BARS,
         symbol=str(c["symbol"]),
@@ -385,6 +407,7 @@ def _worker_eval(job: dict[str, Any]) -> dict[str, Any]:
         stop_to_be=int(job["stop_to_be"]),
         break_even=be,
         break_even_pct=float(job["break_even_pct"]),
+        pro_mode=pro,
         ticks=_W_TICKS,
     )
     m = compute_trade_metrics(
@@ -397,10 +420,11 @@ def _worker_eval(job: dict[str, Any]) -> dict[str, Any]:
         "threshold": float(job["threshold"]),
         "rr": float(job["rr"]),
         "wait_and_trade": wt,
+        "pro_mode": int(pro),
         "re_entry": int(job["re_entry"]) if wt else 0,
         "stop_to_be": int(job["stop_to_be"]),
         "break_even": be,
-        "break_even_pct": float(job["break_even_pct"]) if (not wt and be) else 0.0,
+        "break_even_pct": float(job["break_even_pct"]) if ((not wt or pro) and be) else 0.0,
         "entry_after": int(job["entry_after"]),
         "entry_before": int(job["entry_before"]),
         "exit_time": int(job["exit_time"]),
@@ -491,7 +515,7 @@ def _iter_grid(
 ) -> Iterator[dict[str, Any]]:
     th_list = _parse_floats(thresholds)
     rr_list = _parse_floats(rrs)
-    wt_list = _parse_bools(wait_flags)
+    strat_list = _parse_strategy_flags(wait_flags)
     re_list = _parse_re_entry_flags(re_entry_flags)
     stobe_list = _parse_re_entry_flags(stop_to_be_flags)
     be_list = _parse_re_entry_flags(break_even_flags)
@@ -499,7 +523,7 @@ def _iter_grid(
     be_pct_list = [max(1.0, min(100.0, float(p))) for p in (be_pct_raw or [50.0])]
     slip_list = _parse_cost_pcts(slippage_pcts, slippage_pct)
     fee_list = _parse_cost_pcts(fee_pcts, fee_pct)
-    if not th_list or not rr_list or not wt_list:
+    if not th_list or not rr_list or not strat_list:
         raise ValueError("thresholds, rrs, and wait_flags must be non-empty")
     if time_optimizer and common_optimizer and int(time_step_minutes) not in ALLOWED_TIME_STEPS:
         raise ValueError("time_step_minutes must be 30 or 60")
@@ -539,19 +563,19 @@ def _iter_grid(
             end = (ot.iloc[-1] + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
         ticks = load_ticks(symbol, start=start, end=end)
 
-    # re_entry only when WaitAndTrade=true (ORB); Wait=false forces 0
-    # break_even only when Directional (Wait=false); Non-Dir forces 0
+    # re_entry only when WaitAndTrade=true (ORB); Wait=false / Pro forces 0
+    # break_even only when Directional or Pro; Non-Dir forces 0
     # BE% only multiplies the grid when BreakEven is on
     combos: list[tuple] = []
-    for th, rr, wt, slip, fee, sess in product(
-        th_list, rr_list, wt_list, slip_list, fee_list, sessions
+    for th, rr, (wt, pro), slip, fee, sess in product(
+        th_list, rr_list, strat_list, slip_list, fee_list, sessions
     ):
         for re in re_list if wt else (0,):
             for stobe in stobe_list:
                 for be in be_list if not wt else (0,):
                     pct_iter = be_pct_list if be else (be_pct_list[0],)
                     for be_pct in pct_iter:
-                        combos.append((th, rr, wt, slip, fee, sess, re, stobe, be, be_pct))
+                        combos.append((th, rr, wt, pro, slip, fee, sess, re, stobe, be, be_pct))
     truncated = len(combos) > max_runs
     if truncated:
         combos = combos[:max_runs]
@@ -561,13 +585,14 @@ def _iter_grid(
 
     tstop = float(time_stop_minutes or 0.0)
     jobs: list[dict[str, Any]] = []
-    for th, rr, wt, slip, fee, sess, re, stobe, be, be_pct in combos:
+    for th, rr, wt, pro, slip, fee, sess, re, stobe, be, be_pct in combos:
         ea, eb, et = sess
         jobs.append(
             {
                 "threshold": float(th),
                 "rr": float(rr),
                 "wait_and_trade": bool(wt),
+                "pro_mode": bool(pro),
                 "slippage_pct": float(slip),
                 "fee_pct": float(fee),
                 "entry_after": int(ea),

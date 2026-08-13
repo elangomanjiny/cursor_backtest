@@ -20,6 +20,7 @@ import { selectTrade, useChartStudy } from '../chartStudyStore'
 import {
   classifyAggrTag,
   computeVwap,
+  outsideVwap2Sigma,
   parseBandMultipliers,
   type AggrTag,
   type VwapSession,
@@ -371,11 +372,30 @@ export function ChartsTab({ data, visible = true }: Props) {
 
     if (showSignals) {
       const thr = Number(data.threshold) || 50
+      const vwapPts = computeVwap(data.bars, unit, {
+        source: 'hlc3',
+        session: 'binance',
+        bands: [2],
+      })
+      const vwapMap = new Map(vwapPts.map((p) => [p.time, p]))
       for (const a of data.aggressive) {
         const t = snap(a.time)
         const idx = barTimes.indexOf(t)
         const ltp = idx > 0 ? Number(data.bars[idx - 1]?.close) : Number(a.open)
-        const tag = classifyAggrTag(Number(a.delta_pct), thr, Number(a.high), Number(a.low), ltp)
+        const backendTag = (a.pro_tag || '') as AggrTag | ''
+        const vp = vwapMap.get(t)
+        const vwapOk =
+          a.vwap_ok === true ||
+          (vp ? outsideVwap2Sigma(Number(a.high), Number(a.low), vp.vwap, vp.stdev) : false)
+        const tag =
+          backendTag === 'Lo' ||
+          backendTag === 'Sh' ||
+          backendTag === 'Se' ||
+          backendTag === 'Co'
+            ? backendTag
+            : vwapOk
+              ? classifyAggrTag(Number(a.delta_pct), thr, Number(a.high), Number(a.low), ltp)
+              : null
         const sell = a.side === 'Sell'
         const color = tag ? AGGR_TAG_COLOR[tag] : sell ? '#f85149' : '#58a6ff'
         const longBias = tag === 'Lo' || tag === 'Co'
