@@ -18,12 +18,21 @@ import { attachCandlePricePan, resetPriceOnly } from '../chartPricePan'
 import { attachMarkerLabels, type MarkerLabel } from '../chartMarkerLabels'
 import { selectTrade, useChartStudy } from '../chartStudyStore'
 import {
+  classifyAggrTag,
   computeVwap,
   parseBandMultipliers,
+  type AggrTag,
   type VwapSession,
   type VwapSettings,
   type VwapSource,
 } from '../computeVwap'
+
+const AGGR_TAG_COLOR: Record<AggrTag, string> = {
+  Lo: '#3fb950',
+  Sh: '#f85149',
+  Se: '#ff7b72',
+  Co: '#58a6ff',
+}
 
 type Unit = 'quote' | 'base'
 
@@ -100,7 +109,7 @@ export function ChartsTab({ data, visible = true }: Props) {
   const [showTrades, setShowTrades] = useState(true)
   const [showVwap, setShowVwap] = useState(false)
   const [vwapSource, setVwapSource] = useState<VwapSource>('hlc3')
-  const [vwapSession, setVwapSession] = useState<VwapSession>('day')
+  const [vwapSession, setVwapSession] = useState<VwapSession>('binance')
   const [vwapBandsRaw, setVwapBandsRaw] = useState('1,2')
   const [showVwapSettings, setShowVwapSettings] = useState(false)
   const [paneLayouts, setPaneLayouts] = useState<PaneLayout[]>([])
@@ -361,15 +370,32 @@ export function ChartsTab({ data, visible = true }: Props) {
     const tradeLabels: MarkerLabel[] = []
 
     if (showSignals) {
+      const thr = Number(data.threshold) || 50
       for (const a of data.aggressive) {
         const t = snap(a.time)
+        const idx = barTimes.indexOf(t)
+        const ltp = idx > 0 ? Number(data.bars[idx - 1]?.close) : Number(a.open)
+        const tag = classifyAggrTag(Number(a.delta_pct), thr, Number(a.high), Number(a.low), ltp)
         const sell = a.side === 'Sell'
+        const color = tag ? AGGR_TAG_COLOR[tag] : sell ? '#f85149' : '#58a6ff'
+        const longBias = tag === 'Lo' || tag === 'Co'
         markers.push({
           time: t as never,
-          position: sell ? 'aboveBar' : 'belowBar',
-          color: sell ? '#f85149' : '#58a6ff',
+          position: longBias || (!tag && !sell) ? 'belowBar' : 'aboveBar',
+          color,
           shape: 'circle',
+          text: tag || undefined,
         })
+        if (tag) {
+          tradeLabels.push({
+            time: t,
+            price: sell ? Number(a.high) : Number(a.low),
+            position: longBias ? 'belowBar' : 'aboveBar',
+            color,
+            line1: tag,
+            line2: `Δ% ${fmt2(a.delta_pct)}`,
+          })
+        }
       }
     }
 
@@ -783,11 +809,17 @@ export function ChartsTab({ data, visible = true }: Props) {
           )}
           {showSignals && (
             <>
-              <span className="lg">
-                <i style={{ background: '#58a6ff', borderRadius: '50%' }} /> Buy AGGR
+              <span className="lg" title="Long Buy — +Δ% & high ≥ LTP">
+                <i style={{ background: AGGR_TAG_COLOR.Lo, borderRadius: '50%' }} /> Lo
               </span>
-              <span className="lg">
-                <i style={{ background: '#f85149', borderRadius: '50%' }} /> Sell AGGR
+              <span className="lg" title="Short Sell — −Δ% & low ≤ LTP">
+                <i style={{ background: AGGR_TAG_COLOR.Sh, borderRadius: '50%' }} /> Sh
+              </span>
+              <span className="lg" title="Long liquidation Sell — +Δ% & low ≤ LTP (bar below LTP)">
+                <i style={{ background: AGGR_TAG_COLOR.Se, borderRadius: '50%' }} /> Se
+              </span>
+              <span className="lg" title="Short covering Buy — −Δ% & high ≥ LTP (bar above LTP)">
+                <i style={{ background: AGGR_TAG_COLOR.Co, borderRadius: '50%' }} /> Co
               </span>
             </>
           )}
@@ -834,13 +866,13 @@ export function ChartsTab({ data, visible = true }: Props) {
               <option value="close">Close</option>
             </select>
           </label>
-          <label>
+          <label title="Binance UM session VWAP resets at 05:30 IST (00:00 UTC), not midnight IST">
             Session
             <select
               value={vwapSession}
               onChange={(e) => setVwapSession(e.target.value as VwapSession)}
             >
-              <option value="day">Daily (IST)</option>
+              <option value="binance">Binance 05:30 IST</option>
               <option value="range">Entire range</option>
             </select>
           </label>

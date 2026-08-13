@@ -1,7 +1,8 @@
 import type { BarRow } from './api'
 
 export type VwapSource = 'hlc3' | 'ohlc4' | 'hl2' | 'close'
-export type VwapSession = 'day' | 'range'
+/** binance = reset daily at 05:30 IST (00:00 UTC); range = no reset */
+export type VwapSession = 'binance' | 'range'
 
 export type VwapSettings = {
   source: VwapSource
@@ -16,6 +17,8 @@ export type VwapPoint = {
   stdev: number
   bands: Record<string, number>
 }
+
+const BINANCE_SESSION_START_MIN = 5 * 60 + 30 // 05:30 IST
 
 function priceOf(b: BarRow, source: VwapSource): number {
   const o = Number(b.open)
@@ -40,14 +43,44 @@ function volOf(b: BarRow, unit: 'quote' | 'base'): number {
   return Math.max(0, Number(b.volume_quote ?? b.volume ?? 0))
 }
 
-/** IST calendar day key YYYY-MM-DD for session reset. */
-function istDayKey(timeSec: number): string {
-  return new Intl.DateTimeFormat('en-CA', {
+function istParts(timeSec: number) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
     timeZone: 'Asia/Kolkata',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
-  }).format(new Date(timeSec * 1000))
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date(timeSec * 1000))
+  const get = (t: string) => parts.find((p) => p.type === t)?.value || '0'
+  return {
+    y: Number(get('year')),
+    m: Number(get('month')),
+    d: Number(get('day')),
+    hh: Number(get('hour')),
+    mm: Number(get('minute')),
+  }
+}
+
+/**
+ * Binance UM daily VWAP session key: anchors at 05:30 IST (= 00:00 UTC),
+ * not midnight IST. Bars before 05:30 belong to the prior session.
+ */
+export function binanceSessionKey(timeSec: number): string {
+  const p = istParts(timeSec)
+  let y = p.y
+  let m = p.m
+  let d = p.d
+  const mins = p.hh * 60 + p.mm
+  if (mins < BINANCE_SESSION_START_MIN) {
+    const dt = new Date(Date.UTC(y, m - 1, d))
+    dt.setUTCDate(dt.getUTCDate() - 1)
+    y = dt.getUTCFullYear()
+    m = dt.getUTCMonth() + 1
+    d = dt.getUTCDate()
+  }
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`
 }
 
 /**
@@ -64,16 +97,16 @@ export function computeVwap(
   let sumV = 0
   let sumPV = 0
   let sumP2V = 0
-  let prevDay = ''
+  let prevSession = ''
 
   for (const b of bars) {
-    if (settings.session === 'day') {
-      const day = istDayKey(b.time)
-      if (day !== prevDay) {
+    if (settings.session === 'binance') {
+      const sess = binanceSessionKey(b.time)
+      if (sess !== prevSession) {
         sumV = 0
         sumPV = 0
         sumP2V = 0
-        prevDay = day
+        prevSession = sess
       }
     }
 
@@ -94,9 +127,9 @@ export function computeVwap(
     const variance = Math.max(0, sumP2V / sumV - vwap * vwap)
     const stdev = Math.sqrt(variance)
     const bandMap: Record<string, number> = {}
-    for (const m of bands) {
-      bandMap[`up${m}`] = vwap + m * stdev
-      bandMap[`dn${m}`] = vwap - m * stdev
+    for (const mult of bands) {
+      bandMap[`up${mult}`] = vwap + mult * stdev
+      bandMap[`dn${mult}`] = vwap - mult * stdev
     }
     out.push({ time: b.time, vwap, stdev, bands: bandMap })
   }
@@ -109,4 +142,29 @@ export function parseBandMultipliers(raw: string): number[] {
     .map((s) => Number(s.trim()))
     .filter((n) => Number.isFinite(n) && n > 0)
   return [...new Set(parts.map((n) => Math.round(n * 100) / 100))].sort((a, b) => a - b)
+}
+
+/** Pro AGGR tags relative to LTP (prior bar close). */
+export type AggrTag = 'Lo' | 'Sh' | 'Se' | 'Co'
+
+export function classifyAggrTag(
+  deltaPct: number,
+  threshold: number,
+  high: number,
+  low: number,
+  ltp: number,
+): AggrTag | null {
+  const thr = Math.abs(threshold)
+  if (!(thr > 0) || !Number.isFinite(ltp)) return null
+  if (deltaPct > thr) {
+    if (high >= ltp) return 'Lo'
+    if (low <= ltp) return 'Se'
+    return null
+  }
+  if (deltaPct < -thr) {
+    if (low <= ltp) return 'Sh'
+    if (high >= ltp) return 'Co'
+    return null
+  }
+  return null
 }
