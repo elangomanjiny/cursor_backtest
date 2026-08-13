@@ -1,0 +1,46 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend build
+webapp/node_modules/
+webapp/dist/
+web/node_modules/
+web/dist/
+*.tsbuildinfo
+
+# Local market data (large — copy separately if needed)
+data/
+*.parquet
+
+# Bundled QuestDB runtime (reinstall on new machine)
+tools/questdb/
+
+# Logs / temp / OS
+logs/
+*.log
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+credentials.json
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+
+# Optimize / export dumps
+*.csv
+!**/fixtures/**/*.csv
+opt_*.json

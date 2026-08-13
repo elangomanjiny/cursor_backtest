@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>cursor_backtest — volume_delta MVP</title>
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #161b22;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #3fb950;
+      --bad: #f85149;
+      --line: #30363d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+    }
+    header h1 { font-size: 1rem; margin: 0; font-weight: 600; letter-spacing: 0.02em; }
+    .badge {
+      font-size: 0.75rem;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: #21262d;
+      color: var(--muted);
+    }
+    .badge.ok { background: #0d3b1e; color: var(--accent); }
+    .badge.fail { background: #3d1215; color: var(--bad); }
+    button {
+      background: #238636;
+      color: #fff;
+      border: 0;
+      padding: 8px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    button:disabled { opacity: 0.5; cursor: wait; }
+    main { display: grid; grid-template-columns: 1fr 340px; gap: 0; height: calc(100vh - 56px); }
+    @media (max-width: 900px) { main { grid-template-columns: 1fr; height: auto; } }
+    #charts { display: flex; flex-direction: column; min-height: 0; }
+    .pane { flex: 1; min-height: 120px; border-bottom: 1px solid var(--line); }
+    .pane.price { flex: 2.2; }
+    aside {
+      border-left: 1px solid var(--line);
+      background: var(--panel);
+      overflow: auto;
+      padding: 12px;
+    }
+    aside h2 { font-size: 0.8rem; text-transform: uppercase; color: var(--muted); margin: 12px 0 8px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+    th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); }
+    .stat { display: flex; justify-content: space-between; padding: 4px 0; font-size: 0.85rem; }
+    .stat span:last-child { font-variant-numeric: tabular-nums; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>volume_delta MVP</h1>
+    <span class="badge" id="parity">parity…</span>
+    <span class="badge" id="meta">ETHUSDT 15m</span>
+    <button id="run">Run backtest</button>
+  </header>
+  <main>
+    <section id="charts">
+      <div class="pane price" id="price"></div>
+      <div class="pane" id="volume"></div>
+      <div class="pane" id="delta"></div>
+      <div class="pane" id="deltaPct"></div>
+    </section>
+    <aside>
+      <h2>Statistics</h2>
+      <div id="stats"></div>
+      <h2>Equity</h2>
+      <div id="equity" style="height:140px"></div>
+      <h2>Trades</h2>
+      <div id="trades"></div>
+    </aside>
+  </main>
+  <script>
+    const API = (location.port === "5173" || location.port === "5500")
+      ? "http://127.0.0.1:8000" : "";
+
+    function mkChart(el, h) {
+      return LightweightCharts.createChart(el, {
+        layout: { background: { color: "#0f1419" }, textColor: "#8b949e" },
+        grid: { vertLines: { color: "#21262d" }, horzLines: { color: "#21262d" } },
+        rightPriceScale: { borderColor: "#30363d" },
+        timeScale: { borderColor: "#30363d", timeVisible: true, secondsVisible: false },
+        height: h || el.clientHeight || 160,
+      });
+    }
+
+    let charts = {};
+
+    function syncTime(master, others) {
+      master.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+        if (!range) return;
+        others.forEach((c) => {
+          try { c.timeScale().setVisibleLogicalRange(range); } catch (_) {}
+        });
+      });
+    }
+
+    function render(data) {
+      document.getElementById("parity").textContent = data.parity_ok ? "PARITY OK" : "PARITY FAIL";
+      document.getElementById("parity").className = "badge " + (data.parity_ok ? "ok" : "fail");
+      document.getElementById("meta").textContent =
+        `${data.symbol} ${data.tf_minutes}m | Wait=${data.wait_and_trade} RR=${data.rr}`;
+
+      const s = data.stats || {};
+      document.getElementById("stats").innerHTML = [
+        ["Net PnL", (s.net_pnl ?? 0).toFixed(4) + " USDT"],
+        ["Trades", s.trades ?? 0],
+        ["Win rate", (s.win_rate ?? 0) + "%"],
+        ["Aggressive", s.aggressive ?? 0],
+        ["Exits", JSON.stringify(s.exits || {})],
+      ].map(([k, v]) => `<div class="stat"><span>${k}</span><span>${v}</span></div>`).join("");
+
+      document.getElementById("trades").innerHTML =
+        "<table><thead><tr><th>Side</th><th>Entry</th><th>Exit</th><th>PnL</th></tr></thead><tbody>" +
+        (data.trades || []).map((t) =>
+          `<tr>
+            <td>${t.side} ${t.exit_reason}</td>
+            <td>${t.entry_time.slice(11, 16)} @ ${t.entry_price}</td>
+            <td>${t.exit_time.slice(11, 16)} @ ${t.exit_price}</td>
+            <td>${t.pnl.toFixed(4)}</td>
+          </tr>`
+        ).join("") + "</tbody></table>";
+
+      // clear
+      ["price", "volume", "delta", "deltaPct", "equity"].forEach((id) => {
+        document.getElementById(id).innerHTML = "";
+      });
+
+      const priceEl = document.getElementById("price");
+      const volEl = document.getElementById("volume");
+      const dEl = document.getElementById("delta");
+      const dpEl = document.getElementById("deltaPct");
+      const eqEl = document.getElementById("equity");
+
+      const priceChart = mkChart(priceEl, priceEl.clientHeight);
+      const volChart = mkChart(volEl, volEl.clientHeight);
+      const dChart = mkChart(dEl, dEl.clientHeight);
+      const dpChart = mkChart(dpEl, dpEl.clientHeight);
+      const eqChart = mkChart(eqEl, 140);
+
+      const candles = priceChart.addCandlestickSeries({
+        upColor: "#3fb950", downColor: "#f85149", borderVisible: false,
+        wickUpColor: "#3fb950", wickDownColor: "#f85149",
+      });
+      const markers = [];
+      (data.aggressive || []).forEach((a) => {
+        const t = Math.floor(new Date(a.time).getTime() / 1000);
+        markers.push({
+          time: t,
+          position: a.side === "Sell" ? "aboveBar" : "belowBar",
+          color: a.side === "Sell" ? "#f0b429" : "#58a6ff",
+          shape: a.side === "Sell" ? "arrowDown" : "arrowUp",
+          text: "AGGR",
+        });
+      });
+      (data.trades || []).forEach((tr) => {
+        markers.push({
+          time: Math.floor(new Date(tr.entry_time).getTime() / 1000),
+          position: tr.side === "Short" ? "aboveBar" : "belowBar",
+          color: tr.side === "Short" ? "#f85149" : "#3fb950",
+          shape: tr.side === "Short" ? "arrowDown" : "arrowUp",
+          text: tr.side === "Short" ? "SE" : "LE",
+        });
+        markers.push({
+          time: Math.floor(new Date(tr.exit_time).getTime() / 1000),
+          position: "belowBar",
+          color: "#a371f7",
+          shape: "circle",
+          text: tr.exit_reason,
+        });
+      });
+      markers.sort((a, b) => a.time - b.time);
+
+      const candleData = (data.bars || []).map((b) => ({
+        time: b.time,
+        open: b.open,
+        high: b.high,
+        low: b.low,
+        close: b.close,
+      }));
+      candles.setData(candleData);
+      candles.setMarkers(markers);
+
+      const vol = volChart.addHistogramSeries({ color: "#8b949e" });
+      vol.setData((data.bars || []).map((b) => ({ time: b.time, value: b.volume, color: "#484f58" })));
+
+      const delta = dChart.addHistogramSeries({ color: "#3fb950" });
+      delta.setData((data.bars || []).map((b) => ({
+        time: b.time,
+        value: b.delta,
+        color: b.delta >= 0 ? "#3fb950" : "#f85149",
+      })));
+
+      const dp = dpChart.addHistogramSeries({ color: "#58a6ff" });
+      dp.setData((data.bars || []).map((b) => ({
+        time: b.time,
+        value: b.delta_pct,
+        color: b.delta_pct >= 0 ? "#3fb950" : "#f85149",
+      })));
+      const up = dpChart.addLineSeries({ color: "#f0b429", lineWidth: 1 });
+      const dn = dpChart.addLineSeries({ color: "#f0b429", lineWidth: 1 });
+      const thr = data.threshold || 50;
+      up.setData((data.bars || []).map((b) => ({ time: b.time, value: thr })));
+      dn.setData((data.bars || []).map((b) => ({ time: b.time, value: -thr })));
+
+      const eq = eqChart.addAreaSeries({
+        lineColor: "#58a6ff", topColor: "rgba(88,166,255,0.35)", bottomColor: "rgba(88,166,255,0.0)",
+      });
+      const eqData = [];
+      const seen = new Set();
+      (data.equity || []).forEach((e) => {
+        const t = Math.floor(new Date(e.time).getTime() / 1000);
+        if (seen.has(t)) return;
+        seen.add(t);
+        eqData.push({ time: t, value: e.equity });
+      });
+      eq.setData(eqData);
+
+      syncTime(priceChart, [volChart, dChart, dpChart]);
+      priceChart.timeScale().fitContent();
+    }
+
+    async function run() {
+      const btn = document.getElementById("run");
+      btn.disabled = true;
+      try {
+        const res = await fetch(`${API}/api/backtest?symbol=ETHUSDT&tf=15&wait_and_trade=false&rr=1&volume=0.01&threshold=50`);
+        if (!res.ok) throw new Error(await res.text());
+        render(await res.json());
+      } catch (e) {
+        document.getElementById("parity").textContent = "ERROR";
+        document.getElementById("parity").className = "badge fail";
+        document.getElementById("stats").textContent = String(e);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    document.getElementById("run").onclick = run;
+    run();
+  </script>
+</body>
+</html>
