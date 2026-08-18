@@ -103,6 +103,10 @@ const DEFAULTS: StrategyParams = {
   pro_mode: false,
   pro_vwap_sigma: 2,
   rr: 1,
+  sl_tp_unit: 'range',
+  stop_loss: 50,
+  take_profit: 100,
+  trail_stop: 0,
   volume: 0.01,
   threshold: 50,
   entry_after: 330,
@@ -307,6 +311,18 @@ export default function App() {
       time_stop_minutes: 0,
       trade_mode: Number(params.trade_mode ?? 2),
       volume: Number(params.volume),
+      sl_tp_unit: (['range', 'tick', 'points', 'pct'].includes(
+        String((b as { sl_tp_unit?: string }).sl_tp_unit || params.sl_tp_unit),
+      )
+        ? String((b as { sl_tp_unit?: string }).sl_tp_unit || params.sl_tp_unit)
+        : params.sl_tp_unit) as StrategyParams['sl_tp_unit'],
+      stop_loss: Number(
+        (b as { stop_loss?: number }).stop_loss ?? params.stop_loss ?? 50,
+      ),
+      take_profit: Number(
+        (b as { take_profit?: number }).take_profit ?? params.take_profit ?? 100,
+      ),
+      trail_stop: Number((b as { trail_stop?: number }).trail_stop ?? 0) ? 1 : 0,
       // Engine session = optimize common DOW only (not view hour mask — that is post-filter).
       dayofweek: opt?.common_optimizer ? dowFromOpt : undefined,
       allowed_entry_hours: undefined,

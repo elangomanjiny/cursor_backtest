@@ -92,6 +92,10 @@ function minsCsv(m: unknown): string {
 export const OPTIMIZE_REPORT_COLUMNS: OptReportCol[] = [
   { key: 'threshold', header: 'threshold', label: 'Thr', section: 'param', format: 'num' },
   { key: 'rr', header: 'rr', label: 'RR', section: 'param', format: 'num' },
+  { key: 'sl_tp_unit', header: 'sl_tp_unit', label: 'SL/TP unit', section: 'param', format: 'text' },
+  { key: 'stop_loss', header: 'stop_loss', label: 'SL', section: 'param', format: 'num' },
+  { key: 'take_profit', header: 'take_profit', label: 'TP', section: 'param', format: 'num' },
+  { key: 'trail_stop', header: 'trail_stop', label: 'Trail', section: 'param', format: 'num' },
   {
     key: 'strategy',
     header: 'strategy',

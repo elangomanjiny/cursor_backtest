@@ -65,6 +65,80 @@ def _apply_slip(px: float, *, is_long: bool, is_entry: bool, slip_pct: float) ->
     return px * (1.0 - f) if is_long else px * (1.0 + f)
 
 
+SL_TP_UNITS = frozenset({"range", "tick", "points", "pct"})
+
+
+def symbol_tick_size(symbol: str) -> float:
+    """Binance UM price tick (ETH/BNB/SOL ≈ 0.01; BTC ≈ 0.1)."""
+    s = (symbol or "").upper()
+    if s.startswith("BTC"):
+        return 0.1
+    return 0.01
+
+
+def _normalize_sl_tp_unit(raw: str | None) -> str:
+    u = str(raw or "range").strip().lower()
+    if u in ("percent", "percentage", "%"):
+        return "pct"
+    if u in ("point", "pts", "price"):
+        return "points"
+    if u in ("ticks",):
+        return "tick"
+    return u if u in SL_TP_UNITS else "range"
+
+
+def _offset_from_entry(entry: float, value: float, unit: str, tick_size: float) -> float:
+    """Absolute price distance for SL/TP magnitude."""
+    v = abs(float(value))
+    ts = max(float(tick_size), 1e-12)
+    if unit == "tick":
+        return v * ts
+    if unit == "points":
+        return v
+    if unit == "pct":
+        return abs(float(entry)) * (v / 100.0)
+    return 0.0
+
+
+def resolve_stop_target(
+    *,
+    raw_entry: float,
+    is_long: bool,
+    unit: str,
+    stop_loss: float,
+    take_profit: float,
+    rr: float,
+    range_: float,
+    range_stop: float | None,
+    tick_size: float,
+) -> tuple[float, float, float]:
+    """
+    Return (stop, target, trail_offset) in price units.
+    unit=range → AGGR/ORB stop + range×RR target (legacy).
+    unit=tick|points|pct → fixed distance from entry.
+    """
+    u = _normalize_sl_tp_unit(unit)
+    entry = float(raw_entry)
+    if u == "range":
+        if range_stop is None:
+            raise ValueError("range SL/TP requires range_stop")
+        stop = float(range_stop)
+        rng = abs(float(range_))
+        target = entry + rng * float(rr) if is_long else entry - rng * float(rr)
+        trail_off = abs(entry - stop)
+        return stop, target, trail_off
+
+    sl_off = _offset_from_entry(entry, stop_loss, u, tick_size)
+    tp_off = _offset_from_entry(entry, take_profit, u, tick_size)
+    if sl_off <= 0:
+        sl_off = float(tick_size)
+    if tp_off <= 0:
+        tp_off = sl_off * max(float(rr), 0.01)
+    if is_long:
+        return entry - sl_off, entry + tp_off, sl_off
+    return entry + sl_off, entry - tp_off, sl_off
+
+
 def _make_trade(
     active: dict[str, Any],
     ot: datetime,
@@ -449,17 +523,29 @@ class _TickIndex:
         allow_short: bool,
         start: int = 0,
     ) -> tuple[int, pd.Timestamp, bool] | None:
-        """First tick in [t0, t1) that breaks ORB high (long) or low (short)."""
+        """
+        First tick in [t0, t1) that *crosses* ORB high (long) or low (short).
+
+        Strict crossover (not mere touch while already beyond the level):
+          long:  prev < high and px >= high
+          short: prev > low  and px <= low
+        """
         i = self.seek(t0, start)
         end = self.seek(t1, i)
+        if i >= end:
+            return None
+        # Prior tick (may be before t0) establishes which side we came from
+        prev: float | None = float(self.px[i - 1]) if i > 0 else None
         while i < end:
             px = float(self.px[i])
-            hit_long = allow_long and px >= high
-            hit_short = allow_short and px <= low
-            if hit_long or hit_short:
-                # Same tick both sides (degenerate range): prefer long
-                is_long = bool(hit_long)
-                return i, pd.Timestamp(self.ts[i], tz="UTC"), is_long
+            if prev is not None:
+                hit_long = allow_long and prev < high and px >= high
+                hit_short = allow_short and prev > low and px <= low
+                if hit_long or hit_short:
+                    # Same tick both sides (degenerate range): prefer long
+                    is_long = bool(hit_long)
+                    return i, pd.Timestamp(self.ts[i], tz="UTC"), is_long
+            prev = px
             i += 1
         return None
 
@@ -544,6 +630,20 @@ def _scan_ticks_until(
             if held_min >= tstop:
                 return i + 1, ts, px, "TTS"
 
+        # Optional trailing stop: ratchet stop by trail_offset as price moves favorably
+        if active.get("trail_stop") and float(active.get("trail_offset") or 0) > 0:
+            off = float(active["trail_offset"])
+            if is_long:
+                trailed = px - off
+                if trailed > stop:
+                    active["stop"] = trailed
+                    stop = trailed
+            else:
+                trailed = px + off
+                if trailed < stop:
+                    active["stop"] = trailed
+                    stop = trailed
+
         # Directional BE: arm at +1R / -1R, lock stop at BE%×R (once)
         if active.get("be_enabled") and not active.get("be_moved"):
             arm = float(active["be_arm"])
@@ -604,6 +704,10 @@ def run_backtest(
     pro_vwap_sigma: float = 2.0,
     ticks: pd.DataFrame | None = None,
     allowed_entry_hours: str | None = None,
+    sl_tp_unit: str = "range",
+    stop_loss: float = 50.0,
+    take_profit: float = 100.0,
+    trail_stop: int = 0,
 ) -> BacktestResult:
     """
     Hybrid engine: bar AGGR/entry levels + tick SL/TP/session fills.
@@ -619,12 +723,15 @@ def run_backtest(
 
     Directional (wait_and_trade=False, pro_mode=False) — Baseline:
       Buy AGGR → long only; Sell AGGR → short only; next-bar open
-      Fixed SL/TP; optional BreakEven (arm=1R → lock stop at BE%×R once)
+      SL/TP: Range×RR (legacy) or fixed Tick / Points / % from entry
+      Optional trailing stop; optional BreakEven (range mode)
       No reverse / AGGR trail / re-entry
 
     Non-Directional (wait_and_trade=True) — ORB + Reverse:
-      Any AGGR → shared range; break high/low for LE/SE
-      Fixed TP; stop may tighten on new AGGR; stop hit → LR/SR reverse
+      Any AGGR → shared range; strict crossover of high/low for LE/SE
+      (prev below high then px≥high, or prev above low then px≤low).
+      SL/TP same units as Directional; optional trail; stop hit → LR/SR reverse
+      (AGGR stop-tighten only in range mode when trail is off)
 
     Pro (pro_mode=True; wait_and_trade ignored/forced off):
       Classify AGGR as Lo/Sh/Se/Co vs prior close (LTP).
@@ -648,8 +755,14 @@ def run_backtest(
     re_en = 0
     stobe = 0
     allow_reverse = bool(wait_and_trade) and not pro
-    allow_trail = bool(wait_and_trade) and not pro
-    # BreakEven: Directional + Pro; lock fraction of range (default 50%)
+    sl_unit = _normalize_sl_tp_unit(sl_tp_unit)
+    tick_sz = symbol_tick_size(symbol)
+    trail_on = 1 if int(trail_stop or 0) else 0
+    sl_val = float(stop_loss if stop_loss is not None else 50.0)
+    tp_val = float(take_profit if take_profit is not None else 100.0)
+    # AGGR trail only for Non-Di range mode without optional trail-stop
+    allow_trail = bool(wait_and_trade) and not pro and sl_unit == "range" and not trail_on
+    # BreakEven: Directional + Pro; meaningful for range (1R) or fixed (1×SL)
     be_on = (pro or not wait_and_trade) and (1 if int(break_even or 0) else 0)
     be_frac = max(0.01, min(1.0, float(break_even_pct if break_even_pct is not None else 50) / 100.0))
     tf_delta = timedelta(minutes=int(tf_minutes))
@@ -786,16 +899,21 @@ def run_backtest(
         signal_delta_pct: float,
         range_: float,
         rev_side: str,
+        trail_offset: float = 0.0,
     ) -> dict[str, Any]:
         entry = _apply_slip(raw, is_long=is_long, is_entry=True, slip_pct=slip)
         rng = float(range_)
-        # Directional BE: arm at 1×R from raw entry, lock stop at BE%×R
+        # R distance for BreakEven: prefer stop distance, else AGGR range
+        r_dist = abs(float(raw) - float(stop))
+        if r_dist <= 0:
+            r_dist = abs(rng) if rng > 0 else tick_sz
         if is_long:
-            be_arm = float(raw) + rng
-            be_lock = float(raw) + be_frac * rng
+            be_arm = float(raw) + r_dist
+            be_lock = float(raw) + be_frac * r_dist
         else:
-            be_arm = float(raw) - rng
-            be_lock = float(raw) - be_frac * rng
+            be_arm = float(raw) - r_dist
+            be_lock = float(raw) - be_frac * r_dist
+        toff = float(trail_offset) if trail_offset > 0 else r_dist
         return {
             "is_long": is_long,
             "entry": entry,
@@ -822,8 +940,29 @@ def run_backtest(
             "be_moved": False,
             "be_arm": be_arm,
             "be_lock": be_lock,
+            "trail_stop": bool(trail_on),
+            "trail_offset": toff,
             "pending_events": [],
         }
+
+    def _levels(
+        *,
+        raw: float,
+        is_long: bool,
+        range_: float,
+        range_stop: float | None,
+    ) -> tuple[float, float, float]:
+        return resolve_stop_target(
+            raw_entry=raw,
+            is_long=is_long,
+            unit=sl_unit,
+            stop_loss=sl_val,
+            take_profit=tp_val,
+            rr=rr,
+            range_=range_,
+            range_stop=range_stop,
+            tick_size=tick_sz,
+        )
 
     def _open_from_orb(
         *,
@@ -835,8 +974,13 @@ def run_backtest(
     ) -> None:
         nonlocal active, pending_reentry
         assert orb is not None
-        stop = float(orb["low"] if is_long else orb["high"])
-        target = raw + float(orb["range"]) * rr if is_long else raw - float(orb["range"]) * rr
+        range_stop = float(orb["low"] if is_long else orb["high"])
+        stop, target, toff = _levels(
+            raw=raw,
+            is_long=is_long,
+            range_=float(orb["range"]),
+            range_stop=range_stop,
+        )
         active = _build_active(
             is_long=is_long,
             raw=raw,
@@ -850,6 +994,7 @@ def run_backtest(
             signal_delta_pct=float(orb["signal_delta_pct"]),
             range_=float(orb["range"]),
             rev_side=str(orb["signal_side"]),
+            trail_offset=toff,
         )
         pending_reentry = None
         events.append(f"{tag}@{active['entry']:.2f}")
@@ -868,8 +1013,13 @@ def run_backtest(
         rng = float(was.get("rev_range") or was["range"])
         hi = float(was.get("rev_high") or was["signal_high"])
         lo = float(was.get("rev_low") or was["signal_low"])
-        stop = lo if is_long else hi
-        target = raw + rng * rr if is_long else raw - rng * rr
+        range_stop = lo if is_long else hi
+        stop, target, toff = _levels(
+            raw=raw,
+            is_long=is_long,
+            range_=rng,
+            range_stop=range_stop,
+        )
         sig_t = was.get("rev_signal_time") or was["signal_time"]
         dlt = float(was.get("rev_delta_pct") or was["signal_delta_pct"])
         side = str(was.get("rev_side") or ("Buy" if is_long else "Sell"))
@@ -886,6 +1036,7 @@ def run_backtest(
             signal_delta_pct=dlt,
             range_=rng,
             rev_side=side,
+            trail_offset=toff,
         )
         pending_reentry = None
         events.append(f"{tag}@{active['entry']:.2f}")
@@ -1071,9 +1222,11 @@ def run_backtest(
                         entry_time = brk[1].to_pydatetime()
                         is_long_e = brk[2]
                     elif allow_ohlc_fallback:
-                        # OHLC fallback only when no ticks consumed yet this bar
-                        hit_l = allow_long and h >= float(orb["high"])
-                        hit_s = allow_short and l <= float(orb["low"])
+                        # Bar-level crossover proxy: open on far side, range trades through level
+                        oh = float(orb["high"])
+                        ol = float(orb["low"])
+                        hit_l = allow_long and o < oh and h >= oh
+                        hit_s = allow_short and o > ol and l <= ol
                         if hit_l and not hit_s:
                             is_long_e = True
                             tick_i = book.seek(ot, tick_i)
@@ -1097,20 +1250,25 @@ def run_backtest(
         else:
             # Directional Wait=false: next eligible bar open (skip if ticks already used this bar)
             if active is None:
-                # Age setups and drop them if price already traded through the stop
-                # (stale AGGR while another trade was open → inverted stop on entry).
-                if long_setup is not None and long_setup["signal_time"] < ot:
-                    long_setup["bars"] += 1
-                    stop_lvl = float(long_setup["low"])
-                    if o <= stop_lvl or l <= stop_lvl:
-                        events.append(f"LE-SETUP-INVALID@{stop_lvl:.2f}")
-                        long_setup = None
-                if short_setup is not None and short_setup["signal_time"] < ot:
-                    short_setup["bars"] += 1
-                    stop_lvl = float(short_setup["high"])
-                    if o >= stop_lvl or h >= stop_lvl:
-                        events.append(f"SE-SETUP-INVALID@{stop_lvl:.2f}")
-                        short_setup = None
+                # Age setups; range-mode only: drop if price already traded through AGGR stop
+                if sl_unit == "range":
+                    if long_setup is not None and long_setup["signal_time"] < ot:
+                        long_setup["bars"] += 1
+                        stop_lvl = float(long_setup["low"])
+                        if o <= stop_lvl or l <= stop_lvl:
+                            events.append(f"LE-SETUP-INVALID@{stop_lvl:.2f}")
+                            long_setup = None
+                    if short_setup is not None and short_setup["signal_time"] < ot:
+                        short_setup["bars"] += 1
+                        stop_lvl = float(short_setup["high"])
+                        if o >= stop_lvl or h >= stop_lvl:
+                            events.append(f"SE-SETUP-INVALID@{stop_lvl:.2f}")
+                            short_setup = None
+                else:
+                    if long_setup is not None and long_setup["signal_time"] < ot:
+                        long_setup["bars"] += 1
+                    if short_setup is not None and short_setup["signal_time"] < ot:
+                        short_setup["bars"] += 1
 
             if active is None and in_win:
                 bar_tick_start = book.seek(ot, 0)
@@ -1118,13 +1276,18 @@ def run_backtest(
                 if tick_i <= bar_tick_start:
                     if allow_long and long_setup and int(long_setup["bars"]) >= 1 and active is None:
                         raw = o
-                        stop = float(long_setup["low"])
+                        range_stop = float(long_setup["low"])
+                        stop, target, toff = _levels(
+                            raw=raw,
+                            is_long=True,
+                            range_=float(long_setup["range"]),
+                            range_stop=range_stop,
+                        )
                         # Long stop must be strictly below entry
                         if stop >= raw:
                             events.append(f"LE-SKIP-BADSTOP@{stop:.2f}>={raw:.2f}")
                             long_setup = None
                         else:
-                            target = raw + float(long_setup["range"]) * rr
                             tick_i = book.seek(ot, tick_i)
                             tag = str(long_setup.get("pro_tag") or "LE")
                             active = _build_active(
@@ -1140,6 +1303,7 @@ def run_backtest(
                                 signal_delta_pct=float(long_setup["signal_delta_pct"]),
                                 range_=float(long_setup["range"]),
                                 rev_side="Buy",
+                                trail_offset=toff,
                             )
                             long_setup = short_setup = None
                             entered = True
@@ -1147,13 +1311,18 @@ def run_backtest(
 
                     if allow_short and short_setup and int(short_setup["bars"]) >= 1 and active is None:
                         raw = o
-                        stop = float(short_setup["high"])
+                        range_stop = float(short_setup["high"])
+                        stop, target, toff = _levels(
+                            raw=raw,
+                            is_long=False,
+                            range_=float(short_setup["range"]),
+                            range_stop=range_stop,
+                        )
                         # Short stop must be strictly above entry
                         if stop <= raw:
                             events.append(f"SE-SKIP-BADSTOP@{stop:.2f}<={raw:.2f}")
                             short_setup = None
                         else:
-                            target = raw - float(short_setup["range"]) * rr
                             tick_i = book.seek(ot, tick_i)
                             tag = str(short_setup.get("pro_tag") or "SE")
                             active = _build_active(
@@ -1169,6 +1338,7 @@ def run_backtest(
                                 signal_delta_pct=float(short_setup["signal_delta_pct"]),
                                 range_=float(short_setup["range"]),
                                 rev_side="Sell",
+                                trail_offset=toff,
                             )
                             long_setup = short_setup = None
                             entered = True
@@ -1396,6 +1566,10 @@ def run_backtest(
         ),
         "pro_mode": int(pro),
         "pro_vwap_sigma": sigma_n,
+        "sl_tp_unit": sl_unit,
+        "stop_loss": sl_val,
+        "take_profit": tp_val,
+        "trail_stop": int(trail_on),
         "tick_session_slice": {
             "after_min": int(entry_after),
             "before_min": int(entry_before),

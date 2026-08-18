@@ -33,7 +33,7 @@ from backend.engine.volume_delta import (  # noqa: E402
     write_parity_report,
 )
 
-APP_VERSION = "2.0.5"
+APP_VERSION = "2.0.8"
 app = FastAPI(title="cursor_backtest", version=APP_VERSION)
 app.add_middleware(
     CORSMiddleware,
@@ -215,6 +215,11 @@ def backtest(
     dayofweek: str | None = None,
     # Optional CSV of IST entry hours 0-23 (heatmap Apply filter), e.g. "8,9,11,15,20".
     allowed_entry_hours: str | None = None,
+    # SL/TP sizing: range (AGGR×RR) | tick | points | pct
+    sl_tp_unit: str = "range",
+    stop_loss: float = 50.0,
+    take_profit: float = 100.0,
+    trail_stop: int = 0,
 ):
     avail = _ensure_ready(
         exchange, symbol, start or "2026-08-01", end or "2026-08-03", tf
@@ -267,6 +272,10 @@ def backtest(
             pro_vwap_sigma=float(pro_vwap_sigma if pro_vwap_sigma is not None else 2),
             ticks=ticks,
             allowed_entry_hours=allowed_entry_hours,
+            sl_tp_unit=sl_tp_unit,
+            stop_loss=float(stop_loss),
+            take_profit=float(take_profit),
+            trail_stop=1 if int(trail_stop or 0) else 0,
         )
     except FileNotFoundError as e:
         raise HTTPException(409, str(e)) from e
@@ -313,6 +322,10 @@ def backtest(
             "stop_to_be": 1 if int(stop_to_be or 0) else 0,
             "break_even": 1 if int(break_even or 0) else 0,
             "break_even_pct": float(break_even_pct if break_even_pct is not None else 50),
+            "sl_tp_unit": sl_tp_unit,
+            "stop_loss": float(stop_loss),
+            "take_profit": float(take_profit),
+            "trail_stop": 1 if int(trail_stop or 0) else 0,
             "start": start,
             "end": end,
             "dayofweek": dayofweek,
@@ -361,6 +374,10 @@ def optimize(
     time_stop_minutes: float = 0.0,
     workers: int = 0,
     pro_vwap_sigma: float = 2.0,
+    sl_tp_unit: str = "range",
+    stop_losses: str | None = "50",
+    take_profits: str | None = "100",
+    trail_stop_flags: str = "0",
     stream: bool = False,
 ):
     _ensure_ready(exchange, symbol, start or "2026-08-01", end or "2026-08-03", tf)
@@ -385,6 +402,10 @@ def optimize(
         stop_to_be_flags=stop_to_be_flags,
         break_even_flags=break_even_flags,
         break_even_pcts=break_even_pcts,
+        sl_tp_unit=sl_tp_unit,
+        stop_losses=stop_losses,
+        take_profits=take_profits,
+        trail_stop_flags=trail_stop_flags,
         max_runs=max_runs,
         rank_by=rank_by,
         common_optimizer=common_optimizer,

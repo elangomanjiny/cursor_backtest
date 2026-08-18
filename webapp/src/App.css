@@ -783,6 +783,14 @@ th.sorted-desc .sort-ind {
 }
 .strategy-strip input[type="number"],
 .control-strip input[type="number"] { width: 4.25rem; }
+.control-strip label.check {
+  gap: 3px;
+}
+.control-strip label.check input[type="checkbox"] {
+  width: auto;
+  padding: 0;
+  accent-color: var(--accent, #3fb950);
+}
 .control-strip input.num-plain {
   width: 4.75rem;
   padding: 4px 8px;
@@ -2650,11 +2658,44 @@ th.sorted-desc .sort-ind {
 }
 .opt-cfg-card .num-plain { width: 100%; max-width: 120px; }
 .opt-cfg-card .check {
+  display: inline-flex;
   flex-direction: row;
   align-items: center;
   gap: 6px;
   color: #d4d4d8;
   font-size: 0.78rem;
+}
+.opt-range-hint {
+  margin: 0 0 8px;
+  font-size: 0.72rem;
+  color: var(--muted);
+  line-height: 1.35;
+}
+.opt-range-hint b { color: var(--text); font-weight: 600; }
+.opt-range-hdr,
+.opt-range-row {
+  display: grid;
+  grid-template-columns: 2.75rem 1fr 1fr 1fr;
+  gap: 4px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.opt-range-hdr {
+  font-size: 0.65rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.opt-range-lab {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.opt-range-row .num-plain {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  text-align: right;
+  padding: 3px 4px;
 }
 .opt-session-presets {
   display: flex;

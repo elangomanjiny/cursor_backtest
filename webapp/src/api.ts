@@ -8,6 +8,14 @@ export type StrategyParams = {
   /** Pro VWAP band multiplier: 1, 2, or 3 (default 2). */
   pro_vwap_sigma: number
   rr: number
+  /** SL/TP sizing: range (AGGR×RR) | tick | points | pct */
+  sl_tp_unit: 'range' | 'tick' | 'points' | 'pct'
+  /** Stop distance when unit is tick / points / pct */
+  stop_loss: number
+  /** Target distance when unit is tick / points / pct */
+  take_profit: number
+  /** 1 = trail stop by SL distance as price moves favorably */
+  trail_stop: number
   volume: number
   threshold: number
   entry_after: number
@@ -225,6 +233,10 @@ export type OptimizePoint = {
   stop_to_be?: number
   break_even?: number
   break_even_pct?: number
+  sl_tp_unit?: string
+  stop_loss?: number
+  take_profit?: number
+  trail_stop?: number
   trades: number
   entry_tags?: Record<string, number>
   net_pnl: number
@@ -261,7 +273,14 @@ export type OptimizePoint = {
   /** Lite trades for per-row CSV detail export */
   trades_lite?: OptimizeTradeLite[]
   exits: Record<string, number>
-  [key: string]: number | boolean | number[] | Record<string, number> | OptimizeTradeLite[] | undefined
+  [key: string]:
+    | number
+    | boolean
+    | string
+    | number[]
+    | Record<string, number>
+    | OptimizeTradeLite[]
+    | undefined
 }
 
 const qs = (params: Record<string, string | number | boolean | undefined>) =>
@@ -383,6 +402,10 @@ export async function fetchOptimize(
     stop_to_be_flags?: string
     break_even_flags?: string
     break_even_pcts?: string
+    sl_tp_unit?: string
+    stop_losses?: string
+    take_profits?: string
+    trail_stop_flags?: string
     max_runs?: number
     workers?: number
   },

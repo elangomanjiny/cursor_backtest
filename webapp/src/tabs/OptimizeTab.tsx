@@ -18,6 +18,52 @@ import { SortTh, useSortable } from '../useSortable'
 import { OptimizeHeatmap } from '../dashboard/OptimizeHeatmap'
 import { MiniEquityChart } from '../dashboard/MiniEquityChart'
 import { comboKey, flagOverfitRisk } from '../dashboard/overfitHeuristic'
+import { countRange, expandNumRange, type NumRange } from '../optRange'
+
+function RangeInputs({
+  label,
+  title,
+  value,
+  onChange,
+  stepHint = '1',
+}: {
+  label: string
+  title?: string
+  value: NumRange
+  onChange: (r: NumRange) => void
+  stepHint?: string
+}) {
+  const set = (patch: Partial<NumRange>) => onChange({ ...value, ...patch })
+  return (
+    <div className="opt-range-row" title={title}>
+      <span className="opt-range-lab">{label}</span>
+      <input
+        className="num-plain"
+        type="number"
+        step={stepHint}
+        value={value.min}
+        onChange={(e) => set({ min: Number(e.target.value) })}
+        aria-label={`${label} min`}
+      />
+      <input
+        className="num-plain"
+        type="number"
+        step={stepHint}
+        value={value.max}
+        onChange={(e) => set({ max: Number(e.target.value) })}
+        aria-label={`${label} max`}
+      />
+      <input
+        className="num-plain"
+        type="number"
+        step={stepHint}
+        value={value.step}
+        onChange={(e) => set({ step: Number(e.target.value) })}
+        aria-label={`${label} step`}
+      />
+    </div>
+  )
+}
 
 export type OptimizeGrid = {
   tf: number
@@ -28,6 +74,10 @@ export type OptimizeGrid = {
   stop_to_be_flags: string
   break_even_flags: string
   break_even_pcts: string
+  sl_tp_unit: 'range' | 'tick' | 'points' | 'pct'
+  stop_losses: string
+  take_profits: string
+  trail_stop_flags: string
   rank_by: string
   common_optimizer: boolean
   time_optimizer: boolean
@@ -183,8 +233,24 @@ export function OptimizeTab({
 }: Props) {
   const [subTab, setSubTab] = useState<SubTab>('config')
   const [tf, setTf] = useState(defaultTf)
-  const [thresholds, setThresholds] = useState('40,50,60')
-  const [rrs, setRrs] = useState('0.5,1,1.5,2')
+  const [thrRange, setThrRange] = useState<NumRange>({ min: 40, max: 60, step: 10 })
+  const [rrRange, setRrRange] = useState<NumRange>({ min: 0.5, max: 2, step: 0.5 })
+  const [slRange, setSlRange] = useState<NumRange>({ min: 30, max: 50, step: 10 })
+  const [tpRange, setTpRange] = useState<NumRange>({ min: 60, max: 100, step: 20 })
+  const [slipRange, setSlipRange] = useState<NumRange>({
+    min: 0,
+    max: defaultSlip > 0 ? defaultSlip : 0.01,
+    step: defaultSlip > 0 ? defaultSlip : 0.01,
+  })
+  const [feeRange, setFeeRange] = useState<NumRange>({
+    min: 0,
+    max: defaultFee > 0 ? defaultFee : 0.01,
+    step: defaultFee > 0 ? defaultFee : 0.01,
+  })
+  const [bePctRange, setBePctRange] = useState<NumRange>({ min: 50, max: 50, step: 10 })
+  const [slTpUnit, setSlTpUnit] = useState<'range' | 'tick' | 'points' | 'pct'>('range')
+  const [trailOff, setTrailOff] = useState(true)
+  const [trailOn, setTrailOn] = useState(false)
   const [waitFlags, setWaitFlags] = useState('false')
   const [proSigma, setProSigma] = useState<1 | 2 | 3>(2)
   const [rankBy, setRankBy] = useState('sharpe')
@@ -197,13 +263,8 @@ export function OptimizeTab({
   const [entryAfter, setEntryAfter] = useState(defaultEntryAfter)
   const [entryBefore, setEntryBefore] = useState(Math.min(defaultEntryBefore, 15 * 60))
   const [exitTime, setExitTime] = useState(Math.min(defaultExitTime, 15 * 60))
-  const [slipPcts, setSlipPcts] = useState(
-    defaultSlip > 0 ? `0,${defaultSlip}` : '0,0.01',
-  )
-  const [feePcts, setFeePcts] = useState(defaultFee > 0 ? `0,${defaultFee}` : '0,0.01')
   const [beOff, setBeOff] = useState(true)
   const [beOn, setBeOn] = useState(true)
-  const [bePcts, setBePcts] = useState('50')
   const [workers, setWorkers] = useState(0)
   const [resources, setResources] = useState<SystemResources | null>(null)
   const [selectedComboKey, setSelectedComboKey] = useState<string | null>(null)
@@ -227,6 +288,13 @@ export function OptimizeTab({
     return parts.join(',') || '0'
   }, [beOff, beOn])
 
+  const trailStopFlags = useMemo(() => {
+    const parts: string[] = []
+    if (trailOff) parts.push('0')
+    if (trailOn) parts.push('1')
+    return parts.join(',') || '0'
+  }, [trailOff, trailOn])
+
   const stepMins = timeStep === 60 ? 60 : 30
   /** When Time opt is on: sweep entry-start from After … (Before − Step); Before & Flat stay fixed. */
   const entryAfterTo = useMemo(() => {
@@ -240,15 +308,47 @@ export function OptimizeTab({
     return Math.max(1, n)
   }, [commonOn, timeOptOn, entryAfter, entryAfterTo, stepMins])
 
+  const estParamCombos = useMemo(() => {
+    const nTh = countRange(thrRange)
+    const nExit =
+      slTpUnit === 'range' ? countRange(rrRange) : countRange(slRange) * countRange(tpRange)
+    const nTrail = (trailOff ? 1 : 0) + (trailOn ? 1 : 0) || 1
+    const nSlip = countRange(slipRange)
+    const nFee = countRange(feeRange)
+    const nBe = (beOff ? 1 : 0) + (beOn ? 1 : 0) || 1
+    const nBePct = beOn ? countRange(bePctRange) : 1
+    const nStrat = Math.max(1, waitFlags.split(',').filter(Boolean).length)
+    return nTh * nExit * nTrail * nSlip * nFee * nBe * nBePct * nStrat * estSessions
+  }, [
+    thrRange,
+    rrRange,
+    slRange,
+    tpRange,
+    slTpUnit,
+    trailOff,
+    trailOn,
+    slipRange,
+    feeRange,
+    beOff,
+    beOn,
+    bePctRange,
+    waitFlags,
+    estSessions,
+  ])
+
   const buildGrid = (dayStr: string): OptimizeGrid => ({
     tf,
-    thresholds,
-    rrs,
+    thresholds: expandNumRange(thrRange),
+    rrs: expandNumRange(rrRange),
     wait_flags: waitFlags,
     re_entry_flags: '0',
     stop_to_be_flags: '0',
     break_even_flags: breakEvenFlags,
-    break_even_pcts: bePcts.trim() || '50',
+    break_even_pcts: expandNumRange(bePctRange),
+    sl_tp_unit: slTpUnit,
+    stop_losses: expandNumRange(slRange),
+    take_profits: expandNumRange(tpRange),
+    trail_stop_flags: trailStopFlags,
     rank_by: rankBy,
     common_optimizer: commonOn,
     time_optimizer: commonOn && timeOptOn,
@@ -261,8 +361,8 @@ export function OptimizeTab({
     entry_after_to: entryAfterTo,
     entry_before_to: entryBefore,
     exit_time_to: exitTime,
-    slippage_pcts: slipPcts,
-    fee_pcts: feePcts,
+    slippage_pcts: expandNumRange(slipRange),
+    fee_pcts: expandNumRange(feeRange),
     min_trades: 0,
     time_stop_minutes: 0,
     pro_vwap_sigma: proSigma,
@@ -681,13 +781,94 @@ export function OptimizeTab({
           <div className="opt-config-grid">
             <section className="opt-cfg-card">
               <h3>Parameter Grid Ranges</h3>
-              <label>
-                Thr
-                <input value={thresholds} onChange={(e) => setThresholds(e.target.value)} />
+              <p className="opt-range-hint">
+                Enter <b>Min</b> · <b>Max</b> · <b>Step</b> (not comma lists). Est. ~{estParamCombos}{' '}
+                combos before cap.
+              </p>
+              <div className="opt-range-hdr" aria-hidden>
+                <span />
+                <span>Min</span>
+                <span>Max</span>
+                <span>Step</span>
+              </div>
+              <RangeInputs
+                label="Thr"
+                title="Delta threshold %"
+                value={thrRange}
+                onChange={setThrRange}
+                stepHint="1"
+              />
+              <label title="How stop & target are sized">
+                SL/TP unit
+                <select
+                  value={slTpUnit}
+                  onChange={(e) => {
+                    const u = e.target.value
+                    if (u === 'range' || u === 'tick' || u === 'points' || u === 'pct') {
+                      setSlTpUnit(u)
+                    }
+                  }}
+                >
+                  <option value="range">Range×RR</option>
+                  <option value="tick">Tick</option>
+                  <option value="points">Points</option>
+                  <option value="pct">%</option>
+                </select>
               </label>
-              <label>
-                RR
-                <input value={rrs} onChange={(e) => setRrs(e.target.value)} />
+              {slTpUnit === 'range' ? (
+                <RangeInputs
+                  label="RR"
+                  title="Reward:risk multiple of AGGR range"
+                  value={rrRange}
+                  onChange={setRrRange}
+                  stepHint="0.1"
+                />
+              ) : (
+                <>
+                  <RangeInputs
+                    label="SL"
+                    title={`Stop loss in ${slTpUnit}`}
+                    value={slRange}
+                    onChange={setSlRange}
+                    stepHint={slTpUnit === 'pct' ? '0.1' : '1'}
+                  />
+                  <RangeInputs
+                    label="TP"
+                    title={`Take profit in ${slTpUnit}`}
+                    value={tpRange}
+                    onChange={setTpRange}
+                    stepHint={slTpUnit === 'pct' ? '0.1' : '1'}
+                  />
+                </>
+              )}
+              <label title="Optional trailing stop (by SL distance)">
+                Trail
+                <div className="be-opt-flags">
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={trailOff}
+                      onChange={(e) => {
+                        const on = e.target.checked
+                        if (!on && !trailOn) return
+                        setTrailOff(on)
+                      }}
+                    />
+                    Off
+                  </label>
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={trailOn}
+                      onChange={(e) => {
+                        const on = e.target.checked
+                        if (!on && !trailOff) return
+                        setTrailOn(on)
+                      }}
+                    />
+                    On
+                  </label>
+                </div>
               </label>
               <label>
                 Strategy
@@ -741,33 +922,29 @@ export function OptimizeTab({
                   </label>
                 </div>
               </label>
-              <label>
-                BE%
-                <input
-                  value={bePcts}
-                  disabled={!beOn}
-                  onChange={(e) => setBePcts(e.target.value)}
-                  placeholder="50"
+              {beOn && (
+                <RangeInputs
+                  label="BE%"
+                  title="BreakEven lock % of R"
+                  value={bePctRange}
+                  onChange={setBePctRange}
+                  stepHint="5"
                 />
-              </label>
-              <label title="Comma-separated slippage % of fill price (both sides). 0.01 = 0.01%">
-                Slip%
-                <input
-                  className="num-plain"
-                  value={slipPcts}
-                  onChange={(e) => setSlipPcts(e.target.value)}
-                  placeholder="0,0.01"
-                />
-              </label>
-              <label title="Comma-separated fee % of notional per side. 0.04 = 0.04%">
-                Fee%
-                <input
-                  className="num-plain"
-                  value={feePcts}
-                  onChange={(e) => setFeePcts(e.target.value)}
-                  placeholder="0,0.04"
-                />
-              </label>
+              )}
+              <RangeInputs
+                label="Slip%"
+                title="Slippage % of price (0.01 = 0.01%)"
+                value={slipRange}
+                onChange={setSlipRange}
+                stepHint="0.005"
+              />
+              <RangeInputs
+                label="Fee%"
+                title="Fee % of notional per side"
+                value={feeRange}
+                onChange={setFeeRange}
+                stepHint="0.005"
+              />
             </section>
 
             <section className="opt-cfg-card">

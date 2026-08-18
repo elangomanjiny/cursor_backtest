@@ -99,16 +99,89 @@ export function BacktestStep({
               onChange={(e) => set('threshold', Number(e.target.value))}
             />
           </label>
-          <label>
-            RR
+          <label title="How stop & target are measured from entry (Range = AGGR high/low × RR)">
+            SL/TP
+            <select
+              value={params.sl_tp_unit}
+              onChange={(e) => {
+                const u = e.target.value as StrategyParams['sl_tp_unit']
+                if (u === 'range' || u === 'tick' || u === 'points' || u === 'pct') {
+                  set('sl_tp_unit', u)
+                }
+              }}
+            >
+              <option value="range">Range×RR</option>
+              <option value="tick">Tick</option>
+              <option value="points">Points</option>
+              <option value="pct">%</option>
+            </select>
+          </label>
+          {params.sl_tp_unit === 'range' ? (
+            <label>
+              RR
+              <input
+                className="num-plain"
+                type="number"
+                inputMode="decimal"
+                step="0.01"
+                value={params.rr}
+                onChange={(e) => set('rr', Number(e.target.value))}
+              />
+            </label>
+          ) : (
+            <>
+              <label
+                title={
+                  params.sl_tp_unit === 'tick'
+                    ? 'Stop loss in ticks'
+                    : params.sl_tp_unit === 'points'
+                      ? 'Stop loss in price points'
+                      : 'Stop loss as % of entry price'
+                }
+              >
+                SL
+                <input
+                  className="num-plain"
+                  type="number"
+                  inputMode="decimal"
+                  step={params.sl_tp_unit === 'pct' ? '0.01' : '1'}
+                  min={0}
+                  value={params.stop_loss}
+                  onChange={(e) => set('stop_loss', Number(e.target.value))}
+                />
+              </label>
+              <label
+                title={
+                  params.sl_tp_unit === 'tick'
+                    ? 'Take profit in ticks'
+                    : params.sl_tp_unit === 'points'
+                      ? 'Take profit in price points'
+                      : 'Take profit as % of entry price'
+                }
+              >
+                TP
+                <input
+                  className="num-plain"
+                  type="number"
+                  inputMode="decimal"
+                  step={params.sl_tp_unit === 'pct' ? '0.01' : '1'}
+                  min={0}
+                  value={params.take_profit}
+                  onChange={(e) => set('take_profit', Number(e.target.value))}
+                />
+              </label>
+            </>
+          )}
+          <label
+            className="check"
+            title="Trail stop by the SL distance as price moves in your favor"
+          >
             <input
-              className="num-plain"
-              type="number"
-              inputMode="decimal"
-              step="0.01"
-              value={params.rr}
-              onChange={(e) => set('rr', Number(e.target.value))}
+              type="checkbox"
+              checked={params.trail_stop === 1}
+              onChange={(e) => set('trail_stop', e.target.checked ? 1 : 0)}
             />
+            Trail
           </label>
           <label>
             Vol
