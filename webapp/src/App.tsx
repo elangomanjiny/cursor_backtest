@@ -11,6 +11,7 @@ import {
   type OptimizePoint,
   type OptimizeResult,
   type StrategyParams,
+  type TradeRow,
 } from './api'
 import { clearChartRange } from './chartZoomStore'
 import { resetChartStudy } from './chartStudyStore'
@@ -20,6 +21,79 @@ import { OptimizeTab, type OptimizeGrid } from './tabs/OptimizeTab'
 import './App.css'
 
 type Step = 1 | 2 | 3
+
+function istHour(iso: string): number {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    hour: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date(iso))
+  return Number(parts.find((p) => p.type === 'hour')?.value || 0)
+}
+
+function istDow(iso: string): string {
+  const w = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata',
+    weekday: 'short',
+  }).format(new Date(iso))
+  return w.slice(0, 3).toLowerCase()
+}
+
+/**
+ * Match Optimize "view filter": keep trades by entry hour / DOW, rebuild equity + stats.
+ * Does NOT re-simulate the strategy (engine hour masks change path dependence).
+ */
+function filterBacktestLikeOptimizeView(
+  bt: BacktestResult,
+  hoursCsv?: string,
+  dowCsv?: string,
+): BacktestResult {
+  const hourSet =
+    hoursCsv && hoursCsv.trim()
+      ? new Set(
+          hoursCsv
+            .split(',')
+            .map((x) => Number(x.trim()))
+            .filter((n) => Number.isFinite(n)),
+        )
+      : null
+  const daySet =
+    dowCsv && dowCsv.trim()
+      ? new Set(
+          dowCsv
+            .split(',')
+            .map((x) => x.trim().toLowerCase())
+            .filter(Boolean),
+        )
+      : null
+  if (!hourSet && !daySet) return bt
+
+  const trades = bt.trades.filter((t: TradeRow) => {
+    if (daySet && !daySet.has(istDow(t.entry_time))) return false
+    if (hourSet && !hourSet.has(istHour(t.entry_time))) return false
+    return true
+  })
+  let run = 0
+  const equity =
+    trades.length > 0
+      ? trades.map((t) => {
+          run += Number(t.pnl) || 0
+          return { time: t.exit_time, equity: run }
+        })
+      : [{ time: bt.equity[0]?.time || new Date().toISOString(), equity: 0 }]
+  const wins = trades.filter((t) => Number(t.pnl) > 0).length
+  return {
+    ...bt,
+    trades,
+    equity,
+    stats: {
+      ...bt.stats,
+      trades: trades.length,
+      net_pnl: run,
+      win_rate: trades.length ? (100 * wins) / trades.length : 0,
+    },
+  }
+}
 
 const DEFAULTS: StrategyParams = {
   exchange: 'BINANCE_UM',
@@ -194,14 +268,20 @@ export default function App() {
 
   const [applyNote, setApplyNote] = useState<string | null>(null)
 
-  const applyCombo = (b: OptimizePoint) => {
+  const applyCombo = (
+    b: OptimizePoint,
+    viewFilter?: { dayofweek?: string; allowed_entry_hours?: string },
+  ) => {
     // Build the exact next params and run immediately — do not rely on the
     // params-effect alone (it can race with a stale closure and re-run the
     // previous combo, which looked like “thr 30 didn’t apply”).
-    const dow =
+    const dowFromOpt =
       typeof opt?.dayofweek === 'string' && opt.dayofweek.trim()
         ? opt.dayofweek.trim()
         : undefined
+    // View DOW filter for post-filter; engine dayofweek only when optimize used common.
+    const viewDow = viewFilter?.dayofweek?.trim() || undefined
+    const hours = viewFilter?.allowed_entry_hours?.trim() || undefined
     const next: StrategyParams = {
       ...params,
       tf: Number(opt?.tf_minutes ?? params.tf),
@@ -227,14 +307,20 @@ export default function App() {
       time_stop_minutes: 0,
       trade_mode: Number(params.trade_mode ?? 2),
       volume: Number(params.volume),
-      // Keep dayofweek on params only when optimize used common filters.
-      dayofweek: opt?.common_optimizer ? dow : undefined,
+      // Engine session = optimize common DOW only (not view hour mask — that is post-filter).
+      dayofweek: opt?.common_optimizer ? dowFromOpt : undefined,
+      allowed_entry_hours: undefined,
     }
     const beLab = next.break_even ? `BE On ${next.break_even_pct}%` : 'BE Off'
     const expectTrades = Number(b.trades ?? 0)
     const expectNet = Number(b.net_pnl ?? 0)
+    const filterNote = hours
+      ? ` · view entry hours ${hours}${viewDow ? ` · days ${viewDow}` : ''}`
+      : viewDow
+        ? ` · view days ${viewDow}`
+        : ''
     setApplyNote(
-      `Applied thr=${next.threshold} RR=${next.rr} ${beLab} · optimize cell trades=${expectTrades} net=${expectNet.toFixed(2)} → running backtest…`,
+      `Applied thr=${next.threshold} RR=${next.rr} ${beLab}${filterNote} · optimize cell trades=${expectTrades} net=${expectNet.toFixed(2)} → running backtest…`,
     )
     skipAutoBacktestRef.current = true
     setParams(next)
@@ -243,17 +329,24 @@ export default function App() {
     setSessionStarted(true)
     void runBacktest(next)
       .then((bt) => {
-        const gotTrades = Number(bt?.stats?.trades ?? 0)
-        const gotNet = Number(bt?.stats?.net_pnl ?? 0)
-        const mismatch =
+        if (!bt) return
+        const filtered = filterBacktestLikeOptimizeView(bt, hours, viewDow)
+        setData(filtered)
+        const gotTrades = Number(filtered.stats?.trades ?? 0)
+        const gotNet = Number(filtered.stats?.net_pnl ?? 0)
+        const cellMismatch =
+          !hours &&
+          !viewDow &&
           expectTrades > 0 &&
           (gotTrades !== expectTrades || Math.abs(gotNet - expectNet) > 0.02)
         setApplyNote(
-          mismatch
-            ? `Applied thr=${next.threshold} RR=${next.rr} ${beLab} · backtest trades=${gotTrades} net=${gotNet.toFixed(2)} (optimize cell was ${expectTrades} / ${expectNet.toFixed(2)}). Re-run Optimize after this update for full parity.`
-            : `Applied thr=${next.threshold} RR=${next.rr} ${beLab} · backtest ready — trades=${gotTrades} net=${gotNet.toFixed(2)} (matches optimize cell).`,
+          hours || viewDow
+            ? `Applied thr=${next.threshold} RR=${next.rr} ${beLab}${filterNote} · view-filtered trades=${gotTrades} net=${gotNet.toFixed(2)} (same rule as Optimize hour filter).`
+            : cellMismatch
+              ? `Applied thr=${next.threshold} RR=${next.rr} ${beLab} · backtest trades=${gotTrades} net=${gotNet.toFixed(2)} (optimize cell was ${expectTrades} / ${expectNet.toFixed(2)}).`
+              : `Applied thr=${next.threshold} RR=${next.rr} ${beLab} · backtest ready — trades=${gotTrades} net=${gotNet.toFixed(2)} (matches optimize cell).`,
         )
-        window.setTimeout(() => setApplyNote(null), 8000)
+        window.setTimeout(() => setApplyNote(null), 9000)
       })
       .catch(() => {
         setApplyNote(`Apply failed for thr=${next.threshold} RR=${next.rr}.`)

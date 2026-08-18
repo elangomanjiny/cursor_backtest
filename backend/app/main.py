@@ -33,7 +33,7 @@ from backend.engine.volume_delta import (  # noqa: E402
     write_parity_report,
 )
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.5"
 app = FastAPI(title="cursor_backtest", version=APP_VERSION)
 app.add_middleware(
     CORSMiddleware,
@@ -213,6 +213,8 @@ def backtest(
     exchange: str = "BINANCE_UM",
     # Optional IST weekday filter (same tokens as optimize) for Apply parity.
     dayofweek: str | None = None,
+    # Optional CSV of IST entry hours 0-23 (heatmap Apply filter), e.g. "8,9,11,15,20".
+    allowed_entry_hours: str | None = None,
 ):
     avail = _ensure_ready(
         exchange, symbol, start or "2026-08-01", end or "2026-08-03", tf
@@ -264,6 +266,7 @@ def backtest(
             pro_mode=bool(pro_mode),
             pro_vwap_sigma=float(pro_vwap_sigma if pro_vwap_sigma is not None else 2),
             ticks=ticks,
+            allowed_entry_hours=allowed_entry_hours,
         )
     except FileNotFoundError as e:
         raise HTTPException(409, str(e)) from e
@@ -312,6 +315,8 @@ def backtest(
             "break_even_pct": float(break_even_pct if break_even_pct is not None else 50),
             "start": start,
             "end": end,
+            "dayofweek": dayofweek,
+            "allowed_entry_hours": allowed_entry_hours,
         }
     )
     return payload

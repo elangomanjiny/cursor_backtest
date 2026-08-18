@@ -32,6 +32,8 @@ export type StrategyParams = {
   end: string
   /** Optional IST weekday filter for parity with optimize common filters. */
   dayofweek?: string
+  /** Optional CSV of IST entry hours 0–23 from heatmap filter, e.g. "8,9,11,15,20". */
+  allowed_entry_hours?: string
 }
 
 export type DataAvailability = {

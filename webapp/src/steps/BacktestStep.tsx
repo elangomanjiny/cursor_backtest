@@ -31,10 +31,10 @@ function timeToMins(v: string): number {
   return hh * 60 + mm
 }
 
-/** Slip/Fee: 0 = off, else clamp to [0.005, 1]. */
+/** Slip/Fee input: percent of price (0 = off). Allow 0.001% … 5%. */
 function clampCostPct(n: number): number {
   if (!Number.isFinite(n) || n <= 0) return 0
-  return Math.min(1, Math.max(0.005, n))
+  return Math.min(5, Math.max(0.001, n))
 }
 
 export function BacktestStep({
@@ -121,34 +121,34 @@ export function BacktestStep({
               onChange={(e) => set('volume', Number(e.target.value))}
             />
           </label>
-          <label>
+          <label title="Slippage as % of fill price (both sides). 0.01 = 0.01%">
             Slip%
             <input
               className="num-plain cost"
               type="number"
               inputMode="decimal"
-              step="0.005"
+              step="0.001"
               min={0}
-              max={1}
+              max={5}
               value={params.slippage_pct}
               onChange={(e) => set('slippage_pct', Number(e.target.value))}
               onBlur={() => set('slippage_pct', clampCostPct(params.slippage_pct))}
-              title="Slippage % of price (0 = off, else 0.005–1)"
+              title="Slippage as % of fill price (both sides). Example: 0.01 = 0.01%"
             />
           </label>
-          <label>
+          <label title="Fee as % of notional per side (entry + exit). 0.04 = 0.04%">
             Fee%
             <input
               className="num-plain cost"
               type="number"
               inputMode="decimal"
-              step="0.005"
+              step="0.001"
               min={0}
-              max={1}
+              max={5}
               value={params.fee_pct}
               onChange={(e) => set('fee_pct', Number(e.target.value))}
               onBlur={() => set('fee_pct', clampCostPct(params.fee_pct))}
-              title="Fee % of notional per side (0 = off, else 0.005–1)"
+              title="Fee as % of notional per side (entry + exit). Example: 0.04 = 0.04%"
             />
           </label>
           <label title="Directional = baseline. Non-Directional = ORB+reverse. Pro = Lo/Sh/Se/Co + VWAP±Nσ.">

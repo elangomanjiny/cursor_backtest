@@ -163,6 +163,37 @@ def _in_window(ts: datetime, after_min: int, before_min: int) -> bool:
     return after_min <= tod < before_min
 
 
+def _parse_allowed_hours(raw: str | None) -> set[int] | None:
+    """Parse CSV IST hours 0–23, e.g. '8,9,11,15,20'. Empty → None (all hours)."""
+    if raw is None or not str(raw).strip():
+        return None
+    out: set[int] = set()
+    for part in str(raw).replace(" ", "").split(","):
+        if not part:
+            continue
+        try:
+            h = int(part)
+        except ValueError:
+            continue
+        if 0 <= h <= 23:
+            out.add(h)
+    return out or None
+
+
+def _in_session(
+    ts: datetime,
+    after_min: int,
+    before_min: int,
+    allowed_hours: set[int] | None,
+) -> bool:
+    """Entry/AGGR window: After≤clock<Before, and optionally IST hour ∈ allowed set."""
+    if not _in_window(ts, after_min, before_min):
+        return False
+    if allowed_hours is None:
+        return True
+    return _to_ist(ts).hour in allowed_hours
+
+
 # Binance UM daily VWAP anchors at 05:30 IST (= 00:00 UTC), not midnight IST.
 _BINANCE_VWAP_START_MIN = 5 * 60 + 30
 
@@ -214,6 +245,100 @@ def _outside_vwap_nsigma(
     if n <= 0 or not (stdev > 0 and np.isfinite(vwap)):
         return False
     return high >= vwap + n * stdev or low <= vwap - n * stdev
+
+
+def session_tod_bounds(
+    entry_after: int,
+    entry_before: int,
+    exit_time: int,
+    *,
+    buffer_min: int = 5,
+) -> tuple[int, int]:
+    """
+    IST minute-of-day [lo, hi) for tick loading around the trade window.
+    Covers After → max(Before, Flat) plus a small buffer for edge fills.
+    """
+    buf = max(0, int(buffer_min))
+    lo = min(int(entry_after), int(entry_before)) - buf
+    hi = max(int(entry_before), int(exit_time)) + buf
+    return max(0, lo), min(24 * 60, hi)
+
+
+def slice_ticks_to_session(
+    ticks: pd.DataFrame,
+    entry_after: int,
+    entry_before: int,
+    exit_time: int,
+    *,
+    buffer_min: int = 5,
+) -> pd.DataFrame:
+    """
+    Keep only ticks whose IST clock falls in the trade window (+ buffer).
+    Full-day bars stay elsewhere for indicator precompute; ticks are the costly path.
+    """
+    if ticks is None or ticks.empty or "ts" not in ticks.columns:
+        return ticks
+    lo, hi = session_tod_bounds(
+        entry_after, entry_before, exit_time, buffer_min=buffer_min
+    )
+    # Near-full day: slicing buys nothing
+    if lo <= 0 and hi >= 24 * 60 - 1:
+        return ticks
+    ts = pd.to_datetime(ticks["ts"], utc=True)
+    ist = ts.dt.tz_convert(IST)
+    tod = ist.dt.hour * 60 + ist.dt.minute
+    out = ticks.loc[(tod >= lo) & (tod < hi)].copy()
+    return out.reset_index(drop=True)
+
+
+def attach_session_indicators(bars: pd.DataFrame) -> pd.DataFrame:
+    """
+    Precompute session indicators on *full* bars (idempotent).
+
+    Currently: Binance-session VWAP + volume-weighted σ (ind_vwap, ind_vwap_sd).
+    Future strategy indicators should be added here so entry-window ticks can
+    look up values without loading overnight ticks.
+    """
+    if bars is None or bars.empty:
+        return bars
+    if "ind_vwap" in bars.columns and "ind_vwap_sd" in bars.columns:
+        return bars
+
+    df = bars.copy()
+    df["open_time"] = pd.to_datetime(df["open_time"], utc=True)
+    if not df["open_time"].is_monotonic_increasing:
+        df = df.sort_values("open_time").reset_index(drop=True)
+
+    n = len(df)
+    ot = df["open_time"]
+    h = df["high"].to_numpy(dtype=float, copy=False)
+    l = df["low"].to_numpy(dtype=float, copy=False)
+    c = df["close"].to_numpy(dtype=float, copy=False)
+    if "volume_quote" in df.columns:
+        vol_q = df["volume_quote"].to_numpy(dtype=float, copy=False)
+    else:
+        vol_q = np.zeros(n, dtype=float)
+    if "volume_base" in df.columns:
+        vol_b = df["volume_base"].to_numpy(dtype=float, copy=False)
+    elif "volume" in df.columns:
+        vol_b = df["volume"].to_numpy(dtype=float, copy=False)
+    else:
+        vol_b = np.zeros(n, dtype=float)
+
+    tr = _BinanceVwapTracker()
+    vw = np.empty(n, dtype=float)
+    sd = np.empty(n, dtype=float)
+    for i in range(n):
+        typical = (h[i] + l[i] + c[i]) / 3.0
+        vol = float(vol_q[i]) if vol_q[i] > 0 else float(vol_b[i])
+        ts = ot.iloc[i].to_pydatetime()
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        vw[i], sd[i] = tr.update(ts, typical, vol)
+
+    df["ind_vwap"] = vw
+    df["ind_vwap_sd"] = sd
+    return df
 
 
 def _classify_pro_tag(
@@ -478,6 +603,7 @@ def run_backtest(
     pro_mode: bool = False,
     pro_vwap_sigma: float = 2.0,
     ticks: pd.DataFrame | None = None,
+    allowed_entry_hours: str | None = None,
 ) -> BacktestResult:
     """
     Hybrid engine: bar AGGR/entry levels + tick SL/TP/session fills.
@@ -485,6 +611,11 @@ def run_backtest(
     Session (IST, entry_after…entry_before, default 05:30–21:00):
       Only bars inside this window can form Aggressive candles / arm setups.
       Entries also require the entry bar open to fall inside the window.
+
+    Performance:
+      Session indicators (VWAP ±σ, …) are precomputed on *full* bars.
+      Ticks are sliced to After → max(Before, Flat) (+ TF buffer) so a 2h/4h/6h
+      window does not require loading overnight ticks.
 
     Directional (wait_and_trade=False, pro_mode=False) — Baseline:
       Buy AGGR → long only; Sell AGGR → short only; next-bar open
@@ -522,9 +653,35 @@ def run_backtest(
     be_on = (pro or not wait_and_trade) and (1 if int(break_even or 0) else 0)
     be_frac = max(0.01, min(1.0, float(break_even_pct if break_even_pct is not None else 50) / 100.0))
     tf_delta = timedelta(minutes=int(tf_minutes))
+    hour_set = _parse_allowed_hours(allowed_entry_hours)
 
     df = bars.copy()
     df["open_time"] = pd.to_datetime(df["open_time"], utc=True)
+    # Full-bar indicator pass (VWAP etc.) — independent of tick window length
+    df = attach_session_indicators(df)
+    buf = max(5, int(tf_minutes))
+    tick_lo, tick_hi = session_tod_bounds(
+        entry_after, entry_before, exit_time, buffer_min=buf
+    )
+    if ticks is None:
+        from backend.engine.bars import load_ticks as _load_ticks
+
+        start = end = None
+        if not df.empty:
+            t0 = _as_utc_ts(df["open_time"].iloc[0])
+            last = _as_utc_ts(df["open_time"].iloc[-1])
+            start = t0.strftime("%Y-%m-%d")
+            end = (last + timedelta(days=2)).strftime("%Y-%m-%d")
+        ticks = _load_ticks(symbol, start=start, end=end)
+    ticks = slice_ticks_to_session(
+        ticks, entry_after, entry_before, exit_time, buffer_min=buf
+    )
+    if ticks is None or ticks.empty:
+        raise FileNotFoundError(
+            f"No aggTrade ticks in session window "
+            f"{tick_lo//60:02d}:{tick_lo%60:02d}–{tick_hi//60:02d}:{tick_hi%60:02d} IST "
+            f"for {symbol}. Widen After/Flat or load more data."
+        )
     book = _prepare_ticks(symbol, df, ticks)
     tick_i = 0
 
@@ -539,8 +696,10 @@ def run_backtest(
     realized = 0.0
     bar_rows: list[dict[str, Any]] = []
     last_eq_ts: pd.Timestamp | None = None
-    vwap_tr = _BinanceVwapTracker()
     prev_close: float | None = None
+    has_ind_vwap = "ind_vwap" in df.columns and "ind_vwap_sd" in df.columns
+    # Fallback tracker only if indicators were not attached
+    vwap_tr = None if has_ind_vwap else _BinanceVwapTracker()
 
     def _push_equity(ts: datetime | pd.Timestamp) -> None:
         """Append equity only in non-decreasing time order (required by chart)."""
@@ -751,7 +910,7 @@ def run_backtest(
         if reason in ("LR", "SR"):
             # SR = reversing short → new long; LR = reversing long → new short
             is_long_new = reason == "SR"
-            can_rev = _in_window(x_ts, entry_after, entry_before) and (
+            can_rev = _in_session(x_ts, entry_after, entry_before, hour_set) and (
                 (is_long_new and allow_long) or ((not is_long_new) and allow_short)
             )
             profit = (x_px > float(was["entry"])) if is_long else (x_px < float(was["entry"]))
@@ -844,7 +1003,7 @@ def run_backtest(
                 _flush_be_events(events)
 
         entered = False
-        in_win = _in_window(ot, entry_after, entry_before)
+        in_win = _in_session(ot, entry_after, entry_before, hour_set)
 
         if wait_and_trade:
             # ORB: advance eligibility; try re-entry then dual-side break
@@ -1032,12 +1191,17 @@ def run_backtest(
 
         # Aggressive candle: only inside the session window (default 05:30–21:00 IST).
         # Outside that window we neither list AGGR nor arm Directional/ORB setups.
-        # Always advance Binance VWAP (05:30 IST) so Pro ±2σ uses full session volume.
-        typical = (h + l + c) / 3.0
-        vol_for_vwap = vol_q if vol_q > 0 else vol_b
-        vwap_px, vwap_sd = vwap_tr.update(ot, typical, vol_for_vwap)
+        # VWAP (±σ) comes from precomputed full-bar indicators (or live fallback).
+        if has_ind_vwap:
+            vwap_px = float(row["ind_vwap"])
+            vwap_sd = float(row["ind_vwap_sd"])
+        else:
+            typical = (h + l + c) / 3.0
+            vol_for_vwap = vol_q if vol_q > 0 else vol_b
+            assert vwap_tr is not None
+            vwap_px, vwap_sd = vwap_tr.update(ot, typical, vol_for_vwap)
 
-        if abs(dlt) >= threshold and _in_window(ot, entry_after, entry_before):
+        if abs(dlt) >= threshold and _in_session(ot, entry_after, entry_before, hour_set):
             side = "Buy" if dlt >= threshold else "Sell"
             rng = h - l
             ltp = float(prev_close) if prev_close is not None else o
@@ -1232,6 +1396,15 @@ def run_backtest(
         ),
         "pro_mode": int(pro),
         "pro_vwap_sigma": sigma_n,
+        "tick_session_slice": {
+            "after_min": int(entry_after),
+            "before_min": int(entry_before),
+            "flat_min": int(exit_time),
+            "tod_lo": int(tick_lo),
+            "tod_hi": int(tick_hi),
+            "buffer_min": int(buf),
+            "ticks_used": int(book.n),
+        },
         "exits": {
             r: sum(1 for t in trades if t.exit_reason == r)
             for r in sorted({t.exit_reason for t in trades})

@@ -66,7 +66,10 @@ type Props = {
   onRun: (grid: OptimizeGrid) => void
   onStop?: () => void
   onApplyBest: () => void
-  onLoadCombo?: (point: OptimizePoint) => void
+  onLoadCombo?: (
+    point: OptimizePoint,
+    viewFilter?: { dayofweek?: string; allowed_entry_hours?: string },
+  ) => void
 }
 
 type SubTab = 'config' | 'heatmap' | 'leaderboard'
@@ -445,10 +448,13 @@ export function OptimizeTab({
   }
 
   /** Load into Backtest engine (switches to Backtest tab). */
-  const applyCombo = (point: OptimizePoint) => {
+  const applyCombo = (
+    point: OptimizePoint,
+    viewFilter?: { dayofweek?: string; allowed_entry_hours?: string },
+  ) => {
     setSelectedComboKey(comboKey(point))
     setSelectedCombo(point)
-    onLoadCombo?.(point)
+    onLoadCombo?.(point, viewFilter)
   }
 
   const toggleDay = (key: string) => {
@@ -531,18 +537,50 @@ export function OptimizeTab({
   }, [overview, filterDays, filterHours])
 
   const equitySpark = useMemo(() => {
+    const lite =
+      overview?.trades_lite ||
+      (!selectedCombo && result?.best_trades
+        ? result.best_trades.map((t) => ({
+            entry_time: t.entry_time,
+            pnl: Number(t.pnl) || 0,
+            side: t.side,
+            exit_reason: t.exit_reason,
+          }))
+        : null)
+    if (lite?.length) {
+      const hourSet = filterHours
+      const trades = lite.filter((t) => {
+        if (!filterDays.has(istDow(String(t.entry_time)))) return false
+        if (hourSet && !hourSet.has(istHour(String(t.entry_time)))) return false
+        return true
+      })
+      if (trades.length) {
+        let eq = 0
+        return trades.map((t) => {
+          eq += Number(t.pnl) || 0
+          return eq
+        })
+      }
+    }
     if (overview && Array.isArray(overview.equity_spark) && overview.equity_spark.length) {
       return overview.equity_spark as number[]
     }
-    if (!selectedCombo && result?.best_trades?.length) {
-      let eq = 0
-      return result.best_trades.map((t) => {
-        eq += Number(t.pnl) || 0
-        return eq
-      })
-    }
     return [] as number[]
-  }, [overview, selectedCombo, result?.best_trades])
+  }, [overview, selectedCombo, result?.best_trades, filterDays, filterHours])
+
+  const viewFilterForApply = useMemo(() => {
+    const dayStr = daysToStr(filterDays)
+    const allDays = filterDays.size >= 7
+    const hours =
+      filterHours && filterHours.size > 0
+        ? [...filterHours].sort((a, b) => a - b).join(',')
+        : undefined
+    if (!hours && allDays) return undefined
+    return {
+      dayofweek: allDays ? undefined : dayStr,
+      allowed_entry_hours: hours,
+    }
+  }, [filterDays, filterHours])
 
   const sparkMin = equitySpark.length ? Math.min(...equitySpark, 0) : 0
   const sparkMax = equitySpark.length ? Math.max(...equitySpark, 0) : 1
@@ -712,22 +750,22 @@ export function OptimizeTab({
                   placeholder="50"
                 />
               </label>
-              <label>
+              <label title="Comma-separated slippage % of fill price (both sides). 0.01 = 0.01%">
                 Slip%
                 <input
                   className="num-plain"
-                  disabled={!commonOn}
                   value={slipPcts}
                   onChange={(e) => setSlipPcts(e.target.value)}
+                  placeholder="0,0.01"
                 />
               </label>
-              <label>
+              <label title="Comma-separated fee % of notional per side. 0.04 = 0.04%">
                 Fee%
                 <input
                   className="num-plain"
-                  disabled={!commonOn}
                   value={feePcts}
                   onChange={(e) => setFeePcts(e.target.value)}
+                  placeholder="0,0.04"
                 />
               </label>
             </section>
@@ -934,7 +972,7 @@ export function OptimizeTab({
             <div className="opt-heat-bottom">
               <section className="opt-heat-hour">
                 <div className="opt-card-h row">
-                  <span>ENTRY HOUR DISTRIBUTION (IST)</span>
+                  <span>ENTRY HOUR DISTRIBUTION (IST) — by entry time</span>
                   <div className="opt-hour-modes">
                     {(
                       [
@@ -960,8 +998,9 @@ export function OptimizeTab({
                   </div>
                 </div>
                 <p className="opt-best-meta">
-                  Bars = selected combo (or best). Color by Net PnL (green/red), trade count, or
-                  Slip+Fee cost (amber). Click an hour to filter.
+                  Hours use each trade&apos;s <b>entry</b> clock (IST), not exit. Bars show the selected
+                  metric as labels. Click hours to filter; Apply sends those hours into the backtest
+                  engine.
                 </p>
                 {result && (
                   <div className="dow-chips compact" style={{ marginBottom: 8 }}>
@@ -1013,6 +1052,18 @@ export function OptimizeTab({
                           : hourMode === 'cost'
                             ? `${h}:00 → slip+fee ${fmt2(b.cost)} · ${b.trades} trades`
                             : `${h}:00 → ${b.trades} trades`
+                      const valLab =
+                        hourMode === 'pnl'
+                          ? b.trades
+                            ? fmt2(b.pnl)
+                            : ''
+                          : hourMode === 'cost'
+                            ? b.trades
+                              ? fmt2(b.cost)
+                              : ''
+                            : b.trades
+                              ? String(b.trades)
+                              : ''
                       return (
                         <button
                           key={h}
@@ -1022,6 +1073,7 @@ export function OptimizeTab({
                           disabled={!result}
                           onClick={() => toggleFilterHour(h)}
                         >
+                          <span className="hour-heat-val">{valLab}</span>
                           <div
                             className="hour-heat-bar"
                             style={{
@@ -1119,9 +1171,10 @@ export function OptimizeTab({
                     {filteredOverview && (
                       <div className="opt-best-meta">
                         View filter: {filteredOverview.trades} trades / net{' '}
-                        {fmt2(filteredOverview.net_pnl)} (optimize cell is still{' '}
-                        {overview?.trades} / {fmt2(Number(overview?.net_pnl))} — Apply uses
-                        the cell)
+                        {fmt2(filteredOverview.net_pnl)} (cell {overview?.trades} /{' '}
+                        {fmt2(Number(overview?.net_pnl))}). Equity spark uses the filter; Apply
+                        runs the full combo then keeps the same entry-hour / day trades (matches
+                        this view).
                       </div>
                     )}
                     {filteredBest && !overviewIsSelected && !filteredOverview && (
@@ -1134,11 +1187,13 @@ export function OptimizeTab({
                       className="opt-run-btn"
                       disabled={busy}
                       onClick={() => {
-                        if (onLoadCombo && overview) applyCombo(overview)
+                        if (overview) applyCombo(overview, viewFilterForApply)
                         else onApplyBest()
                       }}
                     >
-                      Apply to Backtest
+                      {viewFilterForApply?.allowed_entry_hours || viewFilterForApply?.dayofweek
+                        ? 'Apply filtered to Backtest'
+                        : 'Apply to Backtest'}
                     </button>
                   </>
                 ) : (

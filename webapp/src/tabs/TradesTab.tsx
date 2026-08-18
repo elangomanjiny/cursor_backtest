@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from 'react'
 import type { AggressiveRow, BacktestResult, BarRow, TradeRow } from '../api'
-import { fmt2 } from '../format'
+import { fmt2, fmtPct } from '../format'
 import { selectTrade, useChartStudy } from '../chartStudyStore'
 import { SortTh, useSortable } from '../useSortable'
 
@@ -37,6 +37,16 @@ function tradePoints(t: TradeRow): number {
   return t.side === 'Short' ? entry - exit : exit - entry
 }
 
+/** Binance UM instrument tick size (price increment) — not an average. */
+function instrumentTickSize(symbol: string): number {
+  const s = symbol.toUpperCase()
+  if (s.startsWith('BTC')) return 0.1
+  if (s.startsWith('ETH')) return 0.01
+  if (s.startsWith('BNB')) return 0.01
+  if (s.startsWith('SOL')) return 0.01
+  return 0.01
+}
+
 type TradeView = {
   idx: number
   date: string
@@ -62,8 +72,19 @@ type TradeView = {
   exitTag: string
   slip: number
   fee: number
+  /** Realized slip as % of entry notional */
+  slipPct: number
+  /** Realized fee as % of round-trip notional */
+  feePct: number
   pnl: number
   cumPnl: number
+  mfeTicks: number
+  maeTicks: number
+  mfePts: number
+  maePts: number
+  mfeLabel: string
+  maeLabel: string
+  eRatio: number
 }
 
 type AggrView = {
@@ -94,6 +115,7 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
   const tradeRows = useMemo(() => {
     if (!data) return [] as TradeView[]
     const lots = Number(data.volume)
+    const tick = instrumentTickSize(data.symbol)
     let run = 0
     return data.trades.map((t, i) => {
       run += Number(t.pnl) || 0
@@ -122,6 +144,18 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
         sig && 'range' in sig && sig.range != null
           ? Number(sig.range)
           : t.range ?? t.signal_high - t.signal_low
+      const mfe = Number(t.mfe ?? 0)
+      const mae = Number(t.mae ?? 0)
+      const mfeTicks = tick > 0 ? mfe / tick : 0
+      const maeTicks = tick > 0 ? mae / tick : 0
+      const eRatio = mae > 1e-12 ? mfe / mae : mfe > 0 ? 999 : 0
+      const slip = Number(t.slippage ?? 0)
+      const fee = Number(t.fee ?? 0)
+      const entryNotional = Math.abs(Number(t.entry_price)) * lots
+      const rtNotional =
+        (Math.abs(Number(t.entry_price)) + Math.abs(Number(t.exit_price))) * lots
+      const slipPct = entryNotional > 1e-12 ? (slip / entryNotional) * 100 : 0
+      const feePct = rtNotional > 1e-12 ? (fee / rtNotional) * 100 : 0
       return {
         idx: i,
         date: sigDT.date,
@@ -145,10 +179,19 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
         lots,
         entryTag: t.entry_tag || (t.side === 'Short' ? 'SE' : 'LE'),
         exitTag: t.exit_reason,
-        slip: Number(t.slippage ?? 0),
-        fee: Number(t.fee ?? 0),
+        slip,
+        fee,
+        slipPct,
+        feePct,
         pnl: t.pnl,
         cumPnl: run,
+        mfeTicks,
+        maeTicks,
+        mfePts: mfe,
+        maePts: mae,
+        mfeLabel: `${fmt2(mfeTicks)} / ${fmt2(mfe)}`,
+        maeLabel: `${fmt2(maeTicks)} / ${fmt2(mae)}`,
+        eRatio,
       }
     })
   }, [data])
@@ -191,6 +234,8 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
       <div className="panel-head">
         <p className="hint">
           Click a trade row to jump to it on the Visualization chart. Click column headers to sort.
+          MFE / MAE shown as <b>ticks / price</b> (tick={data ? instrumentTickSize(data.symbol) : '—'}
+          ). E-ratio = MFE÷MAE in price.
         </p>
       </div>
 
@@ -262,6 +307,30 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
                   <SortTh col="points" sort={tradesSort.sort} onSort={tradesSort.toggle}>
                     Points
                   </SortTh>
+                  <SortTh
+                    col="mfePts"
+                    sort={tradesSort.sort}
+                    onSort={tradesSort.toggle}
+                    title="Maximum Favorable Excursion — ticks / price points"
+                  >
+                    MFE
+                  </SortTh>
+                  <SortTh
+                    col="maePts"
+                    sort={tradesSort.sort}
+                    onSort={tradesSort.toggle}
+                    title="Maximum Adverse Excursion — ticks / price points"
+                  >
+                    MAE
+                  </SortTh>
+                  <SortTh
+                    col="eRatio"
+                    sort={tradesSort.sort}
+                    onSort={tradesSort.toggle}
+                    title="Per-trade MFE÷MAE (ticks)"
+                  >
+                    E-ratio
+                  </SortTh>
                   <SortTh col="lots" sort={tradesSort.sort} onSort={tradesSort.toggle}>
                     Lots
                   </SortTh>
@@ -271,11 +340,21 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
                   <SortTh col="exitTag" sort={tradesSort.sort} onSort={tradesSort.toggle}>
                     Exit Tag
                   </SortTh>
-                  <SortTh col="slip" sort={tradesSort.sort} onSort={tradesSort.toggle}>
-                    Slip
+                  <SortTh
+                    col="slipPct"
+                    sort={tradesSort.sort}
+                    onSort={tradesSort.toggle}
+                    title="Realized slippage as % of entry notional"
+                  >
+                    Slip%
                   </SortTh>
-                  <SortTh col="fee" sort={tradesSort.sort} onSort={tradesSort.toggle}>
-                    Fee
+                  <SortTh
+                    col="feePct"
+                    sort={tradesSort.sort}
+                    onSort={tradesSort.toggle}
+                    title="Realized fee as % of round-trip notional"
+                  >
+                    Fee%
                   </SortTh>
                   <SortTh col="pnl" sort={tradesSort.sort} onSort={tradesSort.toggle}>
                     PnL
@@ -312,11 +391,22 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
                       <td>{r.exitTime}</td>
                       <td>{fmt2(r.exitPrice)}</td>
                       <td className={r.points >= 0 ? 'pos' : 'neg'}>{fmt2(r.points)}</td>
+                      <td className="pos" title={`${fmt2(r.mfeTicks)} ticks`}>
+                        {r.mfeLabel}
+                      </td>
+                      <td className="neg" title={`${fmt2(r.maeTicks)} ticks`}>
+                        {r.maeLabel}
+                      </td>
+                      <td>{fmt2(r.eRatio)}</td>
                       <td>{fmt2(r.lots)}</td>
                       <td>{r.entryTag}</td>
                       <td>{r.exitTag}</td>
-                      <td>{fmt2(r.slip)}</td>
-                      <td>{fmt2(r.fee)}</td>
+                      <td title={`$${fmt2(r.slip)} absolute`}>
+                        {fmtPct(r.slipPct, 3)}
+                      </td>
+                      <td title={`$${fmt2(r.fee)} absolute`}>
+                        {fmtPct(r.feePct, 3)}
+                      </td>
                       <td className={r.pnl >= 0 ? 'pos' : 'neg'}>{fmt2(r.pnl)}</td>
                       <td className={r.cumPnl >= 0 ? 'pos' : 'neg'}>{fmt2(r.cumPnl)}</td>
                     </tr>

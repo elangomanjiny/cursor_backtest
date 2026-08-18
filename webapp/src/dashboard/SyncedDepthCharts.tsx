@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import {
+  BaselineSeries,
   AreaSeries,
   LineStyle,
   createChart,
@@ -15,9 +16,12 @@ type Props = {
   visible?: boolean
 }
 
-const EQ = '#34d399'
-const EQ_FILL_TOP = 'rgba(52, 211, 153, 0.35)'
-const EQ_FILL_BOT = 'rgba(52, 211, 153, 0.02)'
+const EQ_POS = '#22c55e'
+const EQ_NEG = '#ef4444'
+const EQ_POS_FILL = 'rgba(34, 197, 94, 0.35)'
+const EQ_POS_FADE = 'rgba(34, 197, 94, 0.0)'
+const EQ_NEG_FILL = 'rgba(239, 68, 68, 0.35)'
+const EQ_NEG_FADE = 'rgba(239, 68, 68, 0.0)'
 const DD = '#f87171'
 const DD_FILL_TOP = 'rgba(248, 113, 113, 0.02)'
 const DD_FILL_BOT = 'rgba(248, 113, 113, 0.4)'
@@ -126,10 +130,15 @@ export function SyncedDepthCharts({ model, visible = true }: Props) {
       value: Math.min(0, e.drawdownPct),
     }))
 
-    const eqSeries = chart.addSeries(AreaSeries, {
-      lineColor: EQ,
-      topColor: EQ_FILL_TOP,
-      bottomColor: EQ_FILL_BOT,
+    const eqSeries = chart.addSeries(BaselineSeries, {
+      baseValue: { type: 'price', price: 0 },
+      relativeGradient: true,
+      topLineColor: EQ_POS,
+      bottomLineColor: EQ_NEG,
+      topFillColor1: EQ_POS_FILL,
+      topFillColor2: EQ_POS_FADE,
+      bottomFillColor1: EQ_NEG_FADE,
+      bottomFillColor2: EQ_NEG_FILL,
       lineWidth: 2,
       priceLineVisible: false,
       lastValueVisible: true,
@@ -182,7 +191,7 @@ export function SyncedDepthCharts({ model, visible = true }: Props) {
         exits.map((m) => ({
           time: m.time as Time,
           position: 'inBar' as const,
-          color: m.win ? EQ : DD,
+          color: m.win ? EQ_POS : EQ_NEG,
           shape: 'circle' as const,
           size: 0.55,
         })),
@@ -269,7 +278,8 @@ export function SyncedDepthCharts({ model, visible = true }: Props) {
       <div className="pod-tip" ref={tipRef} style={{ display: 'none' }} />
       <div className="pod-depth-legend">
         <span>
-          <i style={{ background: EQ }} /> Equity
+          <i style={{ background: `linear-gradient(90deg, ${EQ_POS}, ${EQ_NEG})` }} /> Equity ≥0
+          green / &lt;0 red
         </span>
         <span>
           <i style={{ background: DD }} /> Underwater DD%

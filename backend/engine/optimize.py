@@ -14,7 +14,11 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from backend.engine.metrics import compute_trade_metrics
-from backend.engine.volume_delta import run_backtest
+from backend.engine.volume_delta import (
+    attach_session_indicators,
+    run_backtest,
+    slice_ticks_to_session,
+)
 
 ProgressCb = Callable[[int, int], None]
 
@@ -128,7 +132,7 @@ def _parse_re_entry_flags(raw: str | Iterable[int] | None) -> list[int]:
 
 
 def _parse_cost_pcts(raw: str | Iterable[float] | None, fallback: float) -> list[float]:
-    """Parse slip/fee grid; 0 allowed, else clamp to [0.005, 1]."""
+    """Parse slip/fee grid as percent-of-price values; 0 = off, else clamp to [0.001, 5]."""
     if raw is None or (isinstance(raw, str) and not str(raw).strip()):
         vals = [float(fallback)]
     else:
@@ -138,7 +142,7 @@ def _parse_cost_pcts(raw: str | Iterable[float] | None, fallback: float) -> list
         if v <= 0:
             out.append(0.0)
         else:
-            out.append(min(1.0, max(0.005, float(v))))
+            out.append(min(5.0, max(0.001, float(v))))
     return out or [0.0]
 
 
@@ -607,6 +611,20 @@ def _iter_grid(
             start = ot.iloc[0].strftime("%Y-%m-%d")
             end = (ot.iloc[-1] + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
         ticks = load_ticks(symbol, start=start, end=end)
+
+    # Precompute indicators on full bars; slice ticks to widest session window
+    filtered = attach_session_indicators(filtered)
+    buf = max(5, int(tf_minutes))
+    eas = [int(s[0]) for s in sessions]
+    ebs = [int(s[1]) for s in sessions]
+    ets = [int(s[2]) for s in sessions]
+    ticks = slice_ticks_to_session(
+        ticks,
+        min(eas),
+        max(ebs),
+        max(ets),
+        buffer_min=buf,
+    )
 
     # re_entry only when WaitAndTrade=true (ORB); Wait=false / Pro forces 0
     # break_even only when Directional or Pro; Non-Dir forces 0

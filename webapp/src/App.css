@@ -2317,6 +2317,42 @@ th.sorted-desc .sort-ind {
   font-size: 0.78rem;
   color: #94a3b8;
 }
+.equity-curve-tools {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+.equity-side-filters {
+  display: inline-flex;
+  gap: 4px;
+  background: #1e222d;
+  border: 1px solid #363a45;
+  border-radius: 6px;
+  padding: 2px;
+}
+.equity-side-btn {
+  background: transparent;
+  border: 0;
+  color: #8b9bb0;
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.equity-side-btn:hover {
+  color: #e8eef6;
+}
+.equity-side-btn.on {
+  background: #2a2e39;
+  color: #4ade80;
+}
+.equity-side-note {
+  color: #8b9bb0;
+  font-weight: 500;
+}
 .equity-curve-legend {
   display: flex;
   gap: 14px;
@@ -2327,6 +2363,24 @@ th.sorted-desc .sort-ind {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+.hour-heat-val {
+  display: block;
+  min-height: 1.1em;
+  font-size: 0.58rem;
+  line-height: 1.1;
+  color: #c4d0dc;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.hour-heat.compact .hour-heat-val {
+  font-size: 0.55rem;
+}
+.hour-heat-cell.off .hour-heat-val {
+  opacity: 0.35;
 }
 .equity-curve-legend i {
   width: 10px;
