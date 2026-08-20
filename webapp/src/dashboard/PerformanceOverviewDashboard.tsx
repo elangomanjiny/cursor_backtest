@@ -91,11 +91,14 @@ export function PerformanceOverviewDashboard({ data, visible = true }: Props) {
   }, [model.allTradeRows, tradeSort, sideFilter])
 
   const cagrDisplay = Number.isFinite(m.cagrPct) ? `${fmtPct(m.cagrPct)}%` : 'N/A'
-  const mode = data.wait_and_trade
-    ? 'Non-Directional'
-    : data.pro_mode
-      ? `Pro ±${Number((data.stats as { pro_vwap_sigma?: number })?.pro_vwap_sigma ?? data.params?.pro_vwap_sigma ?? 2)}σ`
-      : 'Directional'
+  const mode =
+    Number(data.pro_mtf_mode) || String(data.stats?.strategy_mode || '') === 'pro_mtf'
+      ? `Pro-MTF ${Number(data.base_tf_minutes || data.stats?.base_tf_minutes || 15)}m`
+      : data.wait_and_trade
+        ? 'Non-Directional'
+        : data.pro_mode
+          ? `Pro ±${Number((data.stats as { pro_vwap_sigma?: number })?.pro_vwap_sigma ?? data.params?.pro_vwap_sigma ?? 2)}σ`
+          : 'Directional'
 
   if (!visible) {
     return <div className="pod pod-perf" style={{ display: 'none' }} />

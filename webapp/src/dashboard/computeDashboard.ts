@@ -1,5 +1,8 @@
 import type { BacktestResult, TradeRow } from '../api'
 
+/** Starting equity for the Equity Curve tab (cumulative PnL is added on top). */
+export const INITIAL_CAPITAL = 10_000
+
 export type EquityPoint = {
   time: number
   equity: number
@@ -311,23 +314,29 @@ function nearestEquityAt(equity: EquityPoint[], t: number): number {
 }
 
 /** Post-process existing backtest result into dashboard series + metrics (no re-run). */
-export function computeDashboard(data: BacktestResult): DashboardModel {
+export function computeDashboard(
+  data: BacktestResult,
+  initialCapital: number = INITIAL_CAPITAL,
+): DashboardModel {
+  const capital = Number.isFinite(initialCapital) && initialCapital > 0 ? initialCapital : INITIAL_CAPITAL
   const volume = Number(data.volume || 0.01)
   const stats = data.stats || ({} as BacktestResult['stats'])
   const trades = data.trades || []
 
   const rawEq = dedupeTimeSeries(
-    (data.equity || []).map((e) => ({ time: toUnix(e.time), value: Number(e.equity) })),
+    (data.equity || []).map((e) => ({
+      time: toUnix(e.time),
+      value: Number(e.equity) + capital,
+    })),
   )
   if (rawEq.length === 1) {
-    rawEq.unshift({ time: rawEq[0].time - 60, value: 0 })
+    rawEq.unshift({ time: rawEq[0].time - 60, value: capital })
   }
   if (!rawEq.length) {
-    rawEq.push({ time: Math.floor(Date.now() / 1000), value: 0 })
+    rawEq.push({ time: Math.floor(Date.now() / 1000), value: capital })
   }
 
-  // Underwater + cumulative return
-  // Equity is typically cumulative PnL from ~0 — defer return base until notional is known
+  // Underwater + cumulative return (equity = initial capital + realized PnL)
   const equity: EquityPoint[] = []
   let peak = rawEq[0].value
   const startEq = rawEq[0].value
@@ -344,7 +353,7 @@ export function computeDashboard(data: BacktestResult): DashboardModel {
     })
   }
 
-  // Buy & hold from bars (same volume, long from first close)
+  // Buy & hold from bars (same volume, long from first close) — capital + unrealized
   const bars = data.bars || []
   let buyHold: { time: number; value: number }[] = []
   if (bars.length >= 2) {
@@ -353,7 +362,7 @@ export function computeDashboard(data: BacktestResult): DashboardModel {
     if (firstClose > 0 && Number.isFinite(t0)) {
       buyHold = bars.map((b) => ({
         time: Number(b.time),
-        value: volume * (Number(b.close) - firstClose),
+        value: capital + volume * (Number(b.close) - firstClose),
       }))
       buyHold = dedupeTimeSeries(buyHold)
     }
@@ -513,9 +522,11 @@ export function computeDashboard(data: BacktestResult): DashboardModel {
   const avgPositionSize = volume
   const turnover = trades.length * 2 // entry+exit legs proxy
 
-  const bhEnd = buyHold.length ? buyHold[buyHold.length - 1].value : 0
+  const bhEnd = buyHold.length ? buyHold[buyHold.length - 1].value : capital
   const bhNotional = notional
-  const bhTotalReturnPct = clampPct(bhNotional > 1e-9 ? (bhEnd / bhNotional) * 100 : 0)
+  const bhTotalReturnPct = clampPct(
+    bhNotional > 1e-9 ? ((bhEnd - capital) / bhNotional) * 100 : 0,
+  )
   const excessReturnPct = clampPct(totalReturnPct - bhTotalReturnPct)
 
   const avgWin = wins.length ? wins.reduce((a, b) => a + b, 0) / wins.length : 0

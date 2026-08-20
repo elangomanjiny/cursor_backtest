@@ -33,7 +33,7 @@ from backend.engine.volume_delta import (  # noqa: E402
     write_parity_report,
 )
 
-APP_VERSION = "2.0.8"
+APP_VERSION = "2.1.10"
 app = FastAPI(title="cursor_backtest", version=APP_VERSION)
 app.add_middleware(
     CORSMiddleware,
@@ -220,6 +220,14 @@ def backtest(
     stop_loss: float = 50.0,
     take_profit: float = 100.0,
     trail_stop: int = 0,
+    risk_on: int = 1,
+    trail_unit: str = "range",
+    trail_value: float = 0.0,
+    be_unit: str = "range",
+    be_value: float = 0.0,
+    pro_mtf_mode: bool = False,
+    base_tf: int = Query(15, alias="base_tf"),
+    base_threshold: float = 30.0,
 ):
     avail = _ensure_ready(
         exchange, symbol, start or "2026-08-01", end or "2026-08-03", tf
@@ -242,6 +250,23 @@ def backtest(
         )
         if scoped.empty:
             raise HTTPException(400, "No bars left after dayofweek filter")
+
+    base_scoped = None
+    if pro_mtf_mode:
+        if int(base_tf) <= int(tf):
+            raise HTTPException(
+                400,
+                f"Pro-MTF Base TF ({base_tf}m) must be greater than chart TF ({tf}m).",
+            )
+        try:
+            base_all = _load_bars(symbol, int(base_tf))
+        except FileNotFoundError as e:
+            raise HTTPException(409, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        base_scoped = _scope_bars(base_all, start, end)
+        if base_scoped.empty:
+            raise HTTPException(400, f"No {base_tf}m bars in requested range for Pro-MTF")
 
     try:
         ticks = load_ticks(symbol, start=start, end=end)
@@ -276,6 +301,15 @@ def backtest(
             stop_loss=float(stop_loss),
             take_profit=float(take_profit),
             trail_stop=1 if int(trail_stop or 0) else 0,
+            risk_on=1 if int(risk_on if risk_on is not None else 1) else 0,
+            trail_unit=trail_unit,
+            trail_value=float(trail_value if trail_value is not None else 0),
+            be_unit=be_unit,
+            be_value=float(be_value if be_value is not None else 0),
+            pro_mtf_mode=bool(pro_mtf_mode),
+            base_tf_minutes=int(base_tf),
+            base_threshold=float(base_threshold),
+            base_bars=base_scoped,
         )
     except FileNotFoundError as e:
         raise HTTPException(409, str(e)) from e
@@ -326,6 +360,14 @@ def backtest(
             "stop_loss": float(stop_loss),
             "take_profit": float(take_profit),
             "trail_stop": 1 if int(trail_stop or 0) else 0,
+            "risk_on": 1 if int(risk_on if risk_on is not None else 1) else 0,
+            "trail_unit": trail_unit,
+            "trail_value": float(trail_value if trail_value is not None else 0),
+            "be_unit": be_unit,
+            "be_value": float(be_value if be_value is not None else 0),
+            "pro_mtf_mode": bool(pro_mtf_mode),
+            "base_tf": int(base_tf),
+            "base_threshold": float(base_threshold),
             "start": start,
             "end": end,
             "dayofweek": dayofweek,
@@ -370,17 +412,37 @@ def optimize(
     exit_time_to: int | None = None,
     slippage_pcts: str | None = None,
     fee_pcts: str | None = None,
+    volumes: str | None = None,
     min_trades: int = 0,
     time_stop_minutes: float = 0.0,
     workers: int = 0,
     pro_vwap_sigma: float = 2.0,
+    pro_vwap_sigmas: str | None = None,
     sl_tp_unit: str = "range",
     stop_losses: str | None = "50",
     take_profits: str | None = "100",
     trail_stop_flags: str = "0",
+    risk_on_flags: str = "1",
+    trail_unit: str = "range",
+    trail_value: float = 0.0,
+    be_unit: str = "range",
+    be_value: float = 0.0,
     stream: bool = False,
+    base_tfs: str | None = None,
+    base_thresholds: str | None = None,
 ):
     _ensure_ready(exchange, symbol, start or "2026-08-01", end or "2026-08-03", tf)
+    if "mtf" in (wait_flags or "").lower():
+        for raw in (base_tfs or "15,30,60").split(","):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                btf = int(float(raw))
+            except ValueError:
+                continue
+            if btf > int(tf):
+                _ensure_ready(exchange, symbol, start or "2026-08-01", end or "2026-08-03", btf)
 
     bars = _load_bars(symbol, tf)
     scoped = _scope_bars(bars, start, end)
@@ -395,6 +457,7 @@ def optimize(
         symbol=symbol,
         tf_minutes=tf,
         volume=volume,
+        volumes=volumes,
         thresholds=thresholds,
         rrs=rrs,
         wait_flags=wait_flags,
@@ -406,6 +469,11 @@ def optimize(
         stop_losses=stop_losses,
         take_profits=take_profits,
         trail_stop_flags=trail_stop_flags,
+        risk_on_flags=risk_on_flags,
+        trail_unit=trail_unit,
+        trail_value=trail_value,
+        be_unit=be_unit,
+        be_value=be_value,
         max_runs=max_runs,
         rank_by=rank_by,
         common_optimizer=common_optimizer,
@@ -427,7 +495,10 @@ def optimize(
         time_stop_minutes=time_stop_minutes,
         workers=workers,
         pro_vwap_sigma=pro_vwap_sigma,
+        pro_vwap_sigmas=pro_vwap_sigmas,
         ticks=ticks,
+        base_tfs=base_tfs,
+        base_thresholds=base_thresholds,
     )
 
     if stream:

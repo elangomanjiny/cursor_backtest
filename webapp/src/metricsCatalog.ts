@@ -64,18 +64,17 @@ export type OptReportCol = {
 }
 
 function strategyLabel(r: Record<string, unknown>): string {
+  if (Number(r.pro_mtf_mode)) return 'Pro-MTF'
   if (r.pro_mode) return 'Pro'
   if (r.wait_and_trade) return 'Non-Dir'
   return 'Dir'
 }
 
 function beLabel(r: Record<string, unknown>): string {
-  if (r.wait_and_trade && !r.pro_mode) return '—'
   return Number(r.break_even) ? 'On' : 'Off'
 }
 
 function bePctValue(r: Record<string, unknown>): unknown {
-  if (r.wait_and_trade && !r.pro_mode) return ''
   if (!Number(r.break_even)) return 0
   return r.break_even_pct ?? 0
 }
@@ -93,9 +92,12 @@ export const OPTIMIZE_REPORT_COLUMNS: OptReportCol[] = [
   { key: 'threshold', header: 'threshold', label: 'Thr', section: 'param', format: 'num' },
   { key: 'rr', header: 'rr', label: 'RR', section: 'param', format: 'num' },
   { key: 'sl_tp_unit', header: 'sl_tp_unit', label: 'SL/TP unit', section: 'param', format: 'text' },
+  { key: 'risk_on', header: 'risk_on', label: 'Risk', section: 'param', format: 'num' },
   { key: 'stop_loss', header: 'stop_loss', label: 'SL', section: 'param', format: 'num' },
   { key: 'take_profit', header: 'take_profit', label: 'TP', section: 'param', format: 'num' },
   { key: 'trail_stop', header: 'trail_stop', label: 'Trail', section: 'param', format: 'num' },
+  { key: 'trail_unit', header: 'trail_unit', label: 'Trail unit', section: 'param', format: 'text' },
+  { key: 'trail_value', header: 'trail_value', label: 'Trail dist', section: 'param', format: 'num' },
   {
     key: 'strategy',
     header: 'strategy',
@@ -105,6 +107,9 @@ export const OPTIMIZE_REPORT_COLUMNS: OptReportCol[] = [
     format: 'text',
     get: strategyLabel,
   },
+  { key: 'base_tf', header: 'base_tf', label: 'Base TF', section: 'param', format: 'num' },
+  { key: 'base_threshold', header: 'base_threshold', label: 'Base Thr', section: 'param', format: 'num' },
+  { key: 'pro_vwap_sigma', header: 'pro_vwap_sigma', label: 'Pro σ', section: 'param', format: 'num' },
   {
     key: 'be',
     header: 'be',
@@ -123,6 +128,8 @@ export const OPTIMIZE_REPORT_COLUMNS: OptReportCol[] = [
     format: 'num',
     get: bePctValue,
   },
+  { key: 'be_unit', header: 'be_unit', label: 'BE unit', section: 'param', format: 'text' },
+  { key: 'be_value', header: 'be_value', label: 'BE dist', section: 'param', format: 'num' },
   {
     key: 'after',
     header: 'after',
@@ -152,6 +159,7 @@ export const OPTIMIZE_REPORT_COLUMNS: OptReportCol[] = [
   },
   { key: 'slippage_pct', header: 'slippage_pct', label: 'Slip%', section: 'param', format: 'num' },
   { key: 'fee_pct', header: 'fee_pct', label: 'Fee%', section: 'param', format: 'num' },
+  { key: 'volume', header: 'volume', label: 'Vol', section: 'param', format: 'num' },
   { key: 'equity', header: 'equity_spark', label: 'Equity', section: 'equity', format: 'spark' },
   { key: 'trades', header: 'trades', label: 'Trades', section: 'metric', format: 'num' },
   { key: 'net_pnl', header: 'net_pnl', label: 'Net PnL', section: 'metric', format: 'num' },

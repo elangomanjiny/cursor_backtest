@@ -6,7 +6,7 @@ import {
   useState,
   type MouseEvent as ReactMouseEvent,
 } from 'react'
-import type { OptimizePoint, OptimizeResult, SystemResources } from '../api'
+import type { OptimizePoint, OptimizeResult, StrategyParams, SystemResources } from '../api'
 import { fetchSystemResources } from '../api'
 import { fmt2, fmtPct } from '../format'
 import {
@@ -18,9 +18,9 @@ import { SortTh, useSortable } from '../useSortable'
 import { OptimizeHeatmap } from '../dashboard/OptimizeHeatmap'
 import { MiniEquityChart } from '../dashboard/MiniEquityChart'
 import { comboKey, flagOverfitRisk } from '../dashboard/overfitHeuristic'
-import { countRange, expandNumRange, type NumRange } from '../optRange'
+import { countSweep, expandSweep, type SweepNum } from '../optRange'
 
-function RangeInputs({
+function SweepRow({
   label,
   title,
   value,
@@ -29,19 +29,36 @@ function RangeInputs({
 }: {
   label: string
   title?: string
-  value: NumRange
-  onChange: (r: NumRange) => void
+  value: SweepNum
+  onChange: (r: SweepNum) => void
   stepHint?: string
 }) {
-  const set = (patch: Partial<NumRange>) => onChange({ ...value, ...patch })
+  const set = (patch: Partial<SweepNum>) => onChange({ ...value, ...patch })
   return (
-    <div className="opt-range-row" title={title}>
+    <div className={`opt-range-row${value.on ? '' : ' opt-range-off'}`} title={title}>
+      <button
+        type="button"
+        className={`opt-sweep-btn${value.on ? ' on' : ''}`}
+        onClick={() => set({ on: !value.on })}
+      >
+        {value.on ? 'On' : 'Off'}
+      </button>
       <span className="opt-range-lab">{label}</span>
       <input
         className="num-plain"
         type="number"
         step={stepHint}
+        value={value.def}
+        disabled={value.on}
+        onChange={(e) => set({ def: Number(e.target.value) })}
+        aria-label={`${label} default`}
+      />
+      <input
+        className="num-plain"
+        type="number"
+        step={stepHint}
         value={value.min}
+        disabled={!value.on}
         onChange={(e) => set({ min: Number(e.target.value) })}
         aria-label={`${label} min`}
       />
@@ -50,6 +67,7 @@ function RangeInputs({
         type="number"
         step={stepHint}
         value={value.max}
+        disabled={!value.on}
         onChange={(e) => set({ max: Number(e.target.value) })}
         aria-label={`${label} max`}
       />
@@ -58,11 +76,23 @@ function RangeInputs({
         type="number"
         step={stepHint}
         value={value.step}
+        disabled={!value.on}
         onChange={(e) => set({ step: Number(e.target.value) })}
         aria-label={`${label} step`}
       />
     </div>
   )
+}
+
+function strategyToken(p: {
+  wait_and_trade?: boolean
+  pro_mode?: boolean
+  pro_mtf_mode?: boolean
+}): string {
+  if (p.pro_mtf_mode) return 'pro_mtf'
+  if (p.pro_mode) return 'pro'
+  if (p.wait_and_trade) return 'true'
+  return 'false'
 }
 
 export type OptimizeGrid = {
@@ -78,6 +108,13 @@ export type OptimizeGrid = {
   stop_losses: string
   take_profits: string
   trail_stop_flags: string
+  risk_on_flags: string
+  trail_unit: 'range' | 'tick' | 'points' | 'pct'
+  trail_value: number
+  be_unit: 'range' | 'tick' | 'points' | 'pct'
+  be_value: number
+  /** Position size (lots). Comma list when sweeping. */
+  volumes: string
   rank_by: string
   common_optimizer: boolean
   time_optimizer: boolean
@@ -94,8 +131,13 @@ export type OptimizeGrid = {
   fee_pcts: string
   min_trades: number
   time_stop_minutes: number
-  /** Pro VWAP ±Nσ (1/2/3); used when wait_flags includes pro */
+  /** Pro VWAP ±Nσ list (1,2,3) when Strategy includes Pro */
   pro_vwap_sigma: number
+  pro_vwap_sigmas: string
+  /** Pro-MTF base timeframe minutes (comma list). */
+  base_tfs: string
+  /** Pro-MTF base AGGR threshold % (comma list). */
+  base_thresholds: string
   /** 0 = auto (CPU-1, capped at 4) */
   workers: number
 }
@@ -113,6 +155,7 @@ type Props = {
   defaultExitTime?: number
   defaultSlip?: number
   defaultFee?: number
+  defaults?: Partial<StrategyParams>
   onRun: (grid: OptimizeGrid) => void
   onStop?: () => void
   onApplyBest: () => void
@@ -226,6 +269,7 @@ export function OptimizeTab({
   defaultExitTime = 1260,
   defaultSlip = 0,
   defaultFee = 0,
+  defaults,
   onRun,
   onStop,
   onApplyBest,
@@ -233,26 +277,130 @@ export function OptimizeTab({
 }: Props) {
   const [subTab, setSubTab] = useState<SubTab>('config')
   const [tf, setTf] = useState(defaultTf)
-  const [thrRange, setThrRange] = useState<NumRange>({ min: 40, max: 60, step: 10 })
-  const [rrRange, setRrRange] = useState<NumRange>({ min: 0.5, max: 2, step: 0.5 })
-  const [slRange, setSlRange] = useState<NumRange>({ min: 30, max: 50, step: 10 })
-  const [tpRange, setTpRange] = useState<NumRange>({ min: 60, max: 100, step: 20 })
-  const [slipRange, setSlipRange] = useState<NumRange>({
-    min: 0,
-    max: defaultSlip > 0 ? defaultSlip : 0.01,
-    step: defaultSlip > 0 ? defaultSlip : 0.01,
+  const dThr = Number(defaults?.threshold ?? 50)
+  const dRr = Number(defaults?.rr ?? 1)
+  const dSl = Number(defaults?.stop_loss ?? 50)
+  const dTp = Number(defaults?.take_profit ?? 100)
+  const dBePct = Number(defaults?.break_even_pct ?? 50)
+  const dBaseTf = Number(defaults?.base_tf ?? 15)
+  const dBaseThr = Number(defaults?.base_threshold ?? 30)
+  const dSlip = Number(defaults?.slippage_pct ?? defaultSlip)
+  const dFee = Number(defaults?.fee_pct ?? defaultFee)
+  const dVol = Number(defaults?.volume ?? 0.01)
+  const [thrRange, setThrRange] = useState<SweepNum>({
+    on: true,
+    def: dThr,
+    min: 40,
+    max: 60,
+    step: 10,
   })
-  const [feeRange, setFeeRange] = useState<NumRange>({
-    min: 0,
-    max: defaultFee > 0 ? defaultFee : 0.01,
-    step: defaultFee > 0 ? defaultFee : 0.01,
+  const [rrRange, setRrRange] = useState<SweepNum>({
+    on: true,
+    def: dRr,
+    min: 0.5,
+    max: 2,
+    step: 0.5,
   })
-  const [bePctRange, setBePctRange] = useState<NumRange>({ min: 50, max: 50, step: 10 })
-  const [slTpUnit, setSlTpUnit] = useState<'range' | 'tick' | 'points' | 'pct'>('range')
+  const [slRange, setSlRange] = useState<SweepNum>({
+    on: false,
+    def: dSl,
+    min: 30,
+    max: 50,
+    step: 10,
+  })
+  const [tpRange, setTpRange] = useState<SweepNum>({
+    on: false,
+    def: dTp,
+    min: 60,
+    max: 100,
+    step: 20,
+  })
+  const [slipRange, setSlipRange] = useState<SweepNum>({
+    on: false,
+    def: dSlip,
+    min: 0,
+    max: dSlip > 0 ? dSlip : 0.01,
+    step: dSlip > 0 ? dSlip : 0.01,
+  })
+  const [feeRange, setFeeRange] = useState<SweepNum>({
+    on: false,
+    def: dFee,
+    min: 0,
+    max: dFee > 0 ? dFee : 0.01,
+    step: dFee > 0 ? dFee : 0.01,
+  })
+  const [volRange, setVolRange] = useState<SweepNum>({
+    on: false,
+    def: dVol > 0 ? dVol : 0.01,
+    min: dVol > 0 ? dVol : 0.01,
+    max: dVol > 0 ? dVol : 0.01,
+    step: 0.01,
+  })
+  const [bePctRange, setBePctRange] = useState<SweepNum>({
+    on: false,
+    def: dBePct,
+    min: 50,
+    max: 50,
+    step: 10,
+  })
+  const [baseTfRange, setBaseTfRange] = useState<SweepNum>({
+    on: false,
+    def: dBaseTf,
+    min: 15,
+    max: 60,
+    step: 15,
+  })
+  const [baseThrRange, setBaseThrRange] = useState<SweepNum>({
+    on: false,
+    def: dBaseThr,
+    min: 20,
+    max: 40,
+    step: 10,
+  })
+  const [slTpUnit, setSlTpUnit] = useState<'range' | 'tick' | 'points' | 'pct'>(
+    defaults?.sl_tp_unit === 'tick' ||
+      defaults?.sl_tp_unit === 'points' ||
+      defaults?.sl_tp_unit === 'pct'
+      ? defaults.sl_tp_unit
+      : 'range',
+  )
+  const [trailSweep, setTrailSweep] = useState(false)
   const [trailOff, setTrailOff] = useState(true)
-  const [trailOn, setTrailOn] = useState(false)
-  const [waitFlags, setWaitFlags] = useState('false')
-  const [proSigma, setProSigma] = useState<1 | 2 | 3>(2)
+  const [trailOn, setTrailOn] = useState(Boolean(defaults?.trail_stop))
+  const [trailDefault, setTrailDefault] = useState(Boolean(defaults?.trail_stop))
+  const [trailUnit, setTrailUnit] = useState<'range' | 'tick' | 'points' | 'pct'>(
+    defaults?.trail_unit === 'tick' ||
+      defaults?.trail_unit === 'points' ||
+      defaults?.trail_unit === 'pct'
+      ? defaults.trail_unit
+      : 'range',
+  )
+  const [trailValue, setTrailValue] = useState(Number(defaults?.trail_value ?? 50))
+  const [riskSweep, setRiskSweep] = useState(false)
+  const [riskOff, setRiskOff] = useState(false)
+  const [riskOnFlag, setRiskOnFlag] = useState(true)
+  const [riskDefault, setRiskDefault] = useState(defaults?.risk_on !== 0)
+  const [beUnit, setBeUnit] = useState<'range' | 'tick' | 'points' | 'pct'>(
+    defaults?.be_unit === 'tick' || defaults?.be_unit === 'points' || defaults?.be_unit === 'pct'
+      ? defaults.be_unit
+      : 'range',
+  )
+  const [beValue, setBeValue] = useState(Number(defaults?.be_value ?? 50))
+  const [stratSweep, setStratSweep] = useState(false)
+  const [stratDefault, setStratDefault] = useState(strategyToken(defaults || {}))
+  const [stratDir, setStratDir] = useState(strategyToken(defaults || {}) === 'false')
+  const [stratNd, setStratNd] = useState(strategyToken(defaults || {}) === 'true')
+  const [stratPro, setStratPro] = useState(strategyToken(defaults || {}) === 'pro')
+  const [stratMtf, setStratMtf] = useState(strategyToken(defaults || {}) === 'pro_mtf')
+  const [sigmaRange, setSigmaRange] = useState<SweepNum>({
+    on: false,
+    def: defaults?.pro_vwap_sigma === 1 || defaults?.pro_vwap_sigma === 3
+      ? defaults.pro_vwap_sigma
+      : 2,
+    min: 1,
+    max: 3,
+    step: 1,
+  })
   const [rankBy, setRankBy] = useState('sharpe')
   const [commonOn, setCommonOn] = useState(true)
   const [timeOptOn, setTimeOptOn] = useState(false)
@@ -263,8 +411,10 @@ export function OptimizeTab({
   const [entryAfter, setEntryAfter] = useState(defaultEntryAfter)
   const [entryBefore, setEntryBefore] = useState(Math.min(defaultEntryBefore, 15 * 60))
   const [exitTime, setExitTime] = useState(Math.min(defaultExitTime, 15 * 60))
+  const [beSweep, setBeSweep] = useState(true)
   const [beOff, setBeOff] = useState(true)
   const [beOn, setBeOn] = useState(true)
+  const [beDefault, setBeDefault] = useState(Boolean(defaults?.break_even))
   const [workers, setWorkers] = useState(0)
   const [resources, setResources] = useState<SystemResources | null>(null)
   const [selectedComboKey, setSelectedComboKey] = useState<string | null>(null)
@@ -281,19 +431,48 @@ export function OptimizeTab({
   const [colFilters, setColFilters] = useState<Record<string, string>>({})
   const [hourMode, setHourMode] = useState<'trades' | 'pnl' | 'cost'>('pnl')
 
+  const waitFlags = useMemo(() => {
+    if (!stratSweep) return stratDefault
+    const parts: string[] = []
+    if (stratDir) parts.push('false')
+    if (stratNd) parts.push('true')
+    if (stratPro) parts.push('pro')
+    if (stratMtf) parts.push('pro_mtf')
+    return parts.join(',') || stratDefault
+  }, [stratSweep, stratDefault, stratDir, stratNd, stratPro, stratMtf])
+
+  const includesMtf = waitFlags.split(',').some((p) => {
+    const t = p.trim().toLowerCase().replace('-', '_')
+    return t === 'pro_mtf' || t === 'mtf' || t === 'pmtf'
+  })
+  const includesPro = waitFlags.split(',').some((p) => {
+    const t = p.trim().toLowerCase()
+    return t === 'pro' || t === 'p'
+  })
+
   const breakEvenFlags = useMemo(() => {
+    if (!beSweep) return beDefault ? '1' : '0'
     const parts: string[] = []
     if (beOff) parts.push('0')
     if (beOn) parts.push('1')
     return parts.join(',') || '0'
-  }, [beOff, beOn])
+  }, [beSweep, beDefault, beOff, beOn])
 
   const trailStopFlags = useMemo(() => {
+    if (!trailSweep) return trailDefault ? '1' : '0'
     const parts: string[] = []
     if (trailOff) parts.push('0')
     if (trailOn) parts.push('1')
     return parts.join(',') || '0'
-  }, [trailOff, trailOn])
+  }, [trailSweep, trailDefault, trailOff, trailOn])
+
+  const riskOnFlags = useMemo(() => {
+    if (!riskSweep) return riskDefault ? '1' : '0'
+    const parts: string[] = []
+    if (riskOff) parts.push('0')
+    if (riskOnFlag) parts.push('1')
+    return parts.join(',') || '1'
+  }, [riskSweep, riskDefault, riskOff, riskOnFlag])
 
   const stepMins = timeStep === 60 ? 60 : 30
   /** When Time opt is on: sweep entry-start from After … (Before − Step); Before & Flat stay fixed. */
@@ -309,46 +488,83 @@ export function OptimizeTab({
   }, [commonOn, timeOptOn, entryAfter, entryAfterTo, stepMins])
 
   const estParamCombos = useMemo(() => {
-    const nTh = countRange(thrRange)
+    const nTh = countSweep(thrRange)
     const nExit =
-      slTpUnit === 'range' ? countRange(rrRange) : countRange(slRange) * countRange(tpRange)
-    const nTrail = (trailOff ? 1 : 0) + (trailOn ? 1 : 0) || 1
-    const nSlip = countRange(slipRange)
-    const nFee = countRange(feeRange)
-    const nBe = (beOff ? 1 : 0) + (beOn ? 1 : 0) || 1
-    const nBePct = beOn ? countRange(bePctRange) : 1
+      slTpUnit === 'range' ? countSweep(rrRange) : countSweep(slRange) * countSweep(tpRange)
+    const nTrail = trailSweep ? (trailOff ? 1 : 0) + (trailOn ? 1 : 0) || 1 : 1
+    const nRisk = riskSweep ? (riskOff ? 1 : 0) + (riskOnFlag ? 1 : 0) || 1 : 1
+    const nSlip = countSweep(slipRange)
+    const nFee = countSweep(feeRange)
+    const nVol = countSweep(volRange)
+    const nBe = beSweep ? (beOff ? 1 : 0) + (beOn ? 1 : 0) || 1 : 1
+    const nBePct = (beSweep ? beOn : beDefault) ? countSweep(bePctRange) : 1
     const nStrat = Math.max(1, waitFlags.split(',').filter(Boolean).length)
-    return nTh * nExit * nTrail * nSlip * nFee * nBe * nBePct * nStrat * estSessions
+    const nBase =
+      includesMtf ? countSweep(baseTfRange) * countSweep(baseThrRange) : 1
+    const nSigma = includesPro ? countSweep(sigmaRange) : 1
+    return (
+      nTh *
+      nExit *
+      nTrail *
+      nRisk *
+      nSlip *
+      nFee *
+      nVol *
+      nBe *
+      nBePct *
+      nStrat *
+      nBase *
+      nSigma *
+      estSessions
+    )
   }, [
     thrRange,
     rrRange,
     slRange,
     tpRange,
     slTpUnit,
+    trailSweep,
     trailOff,
     trailOn,
+    riskSweep,
+    riskOff,
+    riskOnFlag,
     slipRange,
     feeRange,
+    volRange,
+    beSweep,
     beOff,
     beOn,
+    beDefault,
     bePctRange,
     waitFlags,
+    includesMtf,
+    includesPro,
+    baseTfRange,
+    baseThrRange,
+    sigmaRange,
     estSessions,
   ])
 
   const buildGrid = (dayStr: string): OptimizeGrid => ({
     tf,
-    thresholds: expandNumRange(thrRange),
-    rrs: expandNumRange(rrRange),
+    thresholds: expandSweep(thrRange),
+    rrs: expandSweep(rrRange),
     wait_flags: waitFlags,
     re_entry_flags: '0',
     stop_to_be_flags: '0',
     break_even_flags: breakEvenFlags,
-    break_even_pcts: expandNumRange(bePctRange),
+    break_even_pcts: expandSweep(bePctRange),
     sl_tp_unit: slTpUnit,
-    stop_losses: expandNumRange(slRange),
-    take_profits: expandNumRange(tpRange),
+    stop_losses: expandSweep(slRange),
+    take_profits: expandSweep(tpRange),
     trail_stop_flags: trailStopFlags,
+    risk_on_flags: riskOnFlags,
+    trail_unit: trailUnit,
+    trail_value: trailValue,
+    be_unit: beUnit,
+    be_value: beValue,
+    volumes: expandSweep(volRange),
     rank_by: rankBy,
     common_optimizer: commonOn,
     time_optimizer: commonOn && timeOptOn,
@@ -361,11 +577,14 @@ export function OptimizeTab({
     entry_after_to: entryAfterTo,
     entry_before_to: entryBefore,
     exit_time_to: exitTime,
-    slippage_pcts: expandNumRange(slipRange),
-    fee_pcts: expandNumRange(feeRange),
+    slippage_pcts: expandSweep(slipRange),
+    fee_pcts: expandSweep(feeRange),
     min_trades: 0,
     time_stop_minutes: 0,
-    pro_vwap_sigma: proSigma,
+    pro_vwap_sigma: sigmaRange.def,
+    pro_vwap_sigmas: includesPro ? expandSweep(sigmaRange) : String(sigmaRange.def),
+    base_tfs: includesMtf ? expandSweep(baseTfRange) : '',
+    base_thresholds: includesMtf ? expandSweep(baseThrRange) : '',
     workers: Math.max(0, Math.floor(workers)),
   })
 
@@ -486,12 +705,15 @@ export function OptimizeTab({
       (result?.results ?? []).map((r, i) => ({
         ...r,
         _rank: i,
-        _strategy: r.pro_mode ? 'Pro' : r.wait_and_trade ? 'Non-Dir' : 'Dir',
-        _be: r.wait_and_trade && !r.pro_mode ? '—' : Number(r.break_even) ? 'On' : 'Off',
-        _bePct:
-          (r.wait_and_trade && !r.pro_mode) || !Number(r.break_even)
-            ? -1
-            : Number(r.break_even_pct ?? 50),
+        _strategy: Number(r.pro_mtf_mode)
+          ? 'Pro-MTF'
+          : r.pro_mode
+            ? 'Pro'
+            : r.wait_and_trade
+              ? 'Non-Dir'
+              : 'Dir',
+        _be: Number(r.break_even) ? 'On' : 'Off',
+        _bePct: Number(r.break_even) ? Number(r.break_even_pct ?? 50) : -1,
         _key: comboKey(r),
         _robust: 0,
       })),
@@ -711,21 +933,21 @@ export function OptimizeTab({
           className={subTab === 'config' ? 'active' : ''}
           onClick={() => setSubTab('config')}
         >
-          Config &amp; Execution
+          Settings
         </button>
         <button
           type="button"
           className={subTab === 'heatmap' ? 'active' : ''}
           onClick={() => setSubTab('heatmap')}
         >
-          Heatmap &amp; Surface
+          Analysis
         </button>
         <button
           type="button"
           className={subTab === 'leaderboard' ? 'active' : ''}
           onClick={() => setSubTab('leaderboard')}
         >
-          Leaderboard &amp; Robustness
+          Results
         </button>
       </nav>
 
@@ -782,22 +1004,71 @@ export function OptimizeTab({
             <section className="opt-cfg-card">
               <h3>Parameter Grid Ranges</h3>
               <p className="opt-range-hint">
-                Enter <b>Min</b> · <b>Max</b> · <b>Step</b> (not comma lists). Est. ~{estParamCombos}{' '}
-                combos before cap.
+                <b>On</b> = sweep Min·Max·Step. <b>Off</b> = use Default only. Est. ~
+                {estParamCombos} combos before cap.
               </p>
               <div className="opt-range-hdr" aria-hidden>
-                <span />
+                <span>Sweep</span>
+                <span>Param</span>
+                <span>Default</span>
                 <span>Min</span>
                 <span>Max</span>
                 <span>Step</span>
               </div>
-              <RangeInputs
+              <SweepRow
                 label="Thr"
                 title="Delta threshold %"
                 value={thrRange}
                 onChange={setThrRange}
                 stepHint="1"
               />
+              <div className="opt-flag-row">
+                <button
+                  type="button"
+                  className={`opt-sweep-btn${riskSweep ? ' on' : ''}`}
+                  onClick={() => setRiskSweep((v) => !v)}
+                >
+                  {riskSweep ? 'On' : 'Off'}
+                </button>
+                <span className="opt-range-lab">Risk</span>
+                {riskSweep ? (
+                  <div className="be-opt-flags">
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={riskOff}
+                        onChange={(e) => {
+                          const on = e.target.checked
+                          if (!on && !riskOnFlag) return
+                          setRiskOff(on)
+                        }}
+                      />
+                      Off
+                    </label>
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={riskOnFlag}
+                        onChange={(e) => {
+                          const on = e.target.checked
+                          if (!on && !riskOff) return
+                          setRiskOnFlag(on)
+                        }}
+                      />
+                      On
+                    </label>
+                  </div>
+                ) : (
+                  <select
+                    value={riskDefault ? '1' : '0'}
+                    onChange={(e) => setRiskDefault(e.target.value === '1')}
+                    aria-label="Risk default"
+                  >
+                    <option value="0">Default Off</option>
+                    <option value="1">Default On</option>
+                  </select>
+                )}
+              </div>
               <label title="How stop & target are sized">
                 SL/TP unit
                 <select
@@ -816,7 +1087,7 @@ export function OptimizeTab({
                 </select>
               </label>
               {slTpUnit === 'range' ? (
-                <RangeInputs
+                <SweepRow
                   label="RR"
                   title="Reward:risk multiple of AGGR range"
                   value={rrRange}
@@ -825,14 +1096,14 @@ export function OptimizeTab({
                 />
               ) : (
                 <>
-                  <RangeInputs
+                  <SweepRow
                     label="SL"
                     title={`Stop loss in ${slTpUnit}`}
                     value={slRange}
                     onChange={setSlRange}
                     stepHint={slTpUnit === 'pct' ? '0.1' : '1'}
                   />
-                  <RangeInputs
+                  <SweepRow
                     label="TP"
                     title={`Take profit in ${slTpUnit}`}
                     value={tpRange}
@@ -841,89 +1112,254 @@ export function OptimizeTab({
                   />
                 </>
               )}
-              <label title="Optional trailing stop (by SL distance)">
-                Trail
-                <div className="be-opt-flags">
-                  <label className="check">
-                    <input
-                      type="checkbox"
-                      checked={trailOff}
-                      onChange={(e) => {
-                        const on = e.target.checked
-                        if (!on && !trailOn) return
-                        setTrailOff(on)
-                      }}
-                    />
-                    Off
-                  </label>
-                  <label className="check">
-                    <input
-                      type="checkbox"
-                      checked={trailOn}
-                      onChange={(e) => {
-                        const on = e.target.checked
-                        if (!on && !trailOff) return
-                        setTrailOn(on)
-                      }}
-                    />
-                    On
-                  </label>
-                </div>
-              </label>
-              <label>
-                Strategy
-                <input
-                  value={waitFlags}
-                  onChange={(e) => setWaitFlags(e.target.value)}
-                  placeholder="false"
-                  title="false=Directional, true=Non-Directional, pro=Pro (Lo/Sh/Se/Co + VWAP±Nσ)"
-                />
-              </label>
-              <label title="Pro VWAP band used when Strategy includes pro">
-                Pro σ
-                <select
-                  value={proSigma}
-                  onChange={(e) => {
-                    const n = Number(e.target.value)
-                    setProSigma(n === 1 || n === 3 ? n : 2)
-                  }}
+              <div className="opt-flag-row">
+                <button
+                  type="button"
+                  className={`opt-sweep-btn${trailSweep ? ' on' : ''}`}
+                  onClick={() => setTrailSweep((v) => !v)}
                 >
-                  <option value={1}>±1σ</option>
-                  <option value={2}>±2σ</option>
-                  <option value={3}>±3σ</option>
-                </select>
-              </label>
-              <label title="Directional BreakEven">
-                BE
-                <div className="be-opt-flags">
-                  <label className="check">
-                    <input
-                      type="checkbox"
-                      checked={beOff}
-                      onChange={(e) => {
-                        const on = e.target.checked
-                        if (!on && !beOn) return
-                        setBeOff(on)
-                      }}
-                    />
-                    Off
-                  </label>
-                  <label className="check">
-                    <input
-                      type="checkbox"
-                      checked={beOn}
-                      onChange={(e) => {
-                        const on = e.target.checked
-                        if (!on && !beOff) return
-                        setBeOn(on)
-                      }}
-                    />
-                    On
-                  </label>
+                  {trailSweep ? 'On' : 'Off'}
+                </button>
+                <span className="opt-range-lab">Trail</span>
+                {trailSweep ? (
+                  <div className="be-opt-flags">
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={trailOff}
+                        onChange={(e) => {
+                          const on = e.target.checked
+                          if (!on && !trailOn) return
+                          setTrailOff(on)
+                        }}
+                      />
+                      Off
+                    </label>
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={trailOn}
+                        onChange={(e) => {
+                          const on = e.target.checked
+                          if (!on && !trailOff) return
+                          setTrailOn(on)
+                        }}
+                      />
+                      On
+                    </label>
+                  </div>
+                ) : (
+                  <select
+                    value={trailDefault ? '1' : '0'}
+                    onChange={(e) => setTrailDefault(e.target.value === '1')}
+                    aria-label="Trail default"
+                  >
+                    <option value="0">Default Off</option>
+                    <option value="1">Default On</option>
+                  </select>
+                )}
+              </div>
+              {(trailSweep ? trailOn : trailDefault) && (
+                <div className="opt-flag-row">
+                  <span className="opt-range-lab">Trail unit</span>
+                  <select
+                    value={trailUnit}
+                    onChange={(e) => {
+                      const u = e.target.value
+                      if (u === 'range' || u === 'tick' || u === 'points' || u === 'pct') {
+                        setTrailUnit(u)
+                      }
+                    }}
+                    aria-label="Trail unit"
+                  >
+                    <option value="range">Range</option>
+                    <option value="tick">Tick</option>
+                    <option value="points">Points</option>
+                    <option value="pct">%</option>
+                  </select>
+                  {trailUnit !== 'range' && (
+                    <label>
+                      Dist
+                      <input
+                        className="num-plain"
+                        type="number"
+                        inputMode="decimal"
+                        min={0}
+                        step={trailUnit === 'pct' ? '0.01' : '1'}
+                        value={trailValue}
+                        onChange={(e) => setTrailValue(Number(e.target.value))}
+                      />
+                    </label>
+                  )}
                 </div>
-              </label>
-              {beOn && (
-                <RangeInputs
+              )}
+              <div className="opt-flag-row">
+                <button
+                  type="button"
+                  className={`opt-sweep-btn${stratSweep ? ' on' : ''}`}
+                  onClick={() => setStratSweep((v) => !v)}
+                >
+                  {stratSweep ? 'On' : 'Off'}
+                </button>
+                <span className="opt-range-lab">Strategy</span>
+                {stratSweep ? (
+                  <div className="be-opt-flags opt-strat-flags">
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={stratDir}
+                        onChange={(e) => setStratDir(e.target.checked)}
+                      />
+                      Dir
+                    </label>
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={stratNd}
+                        onChange={(e) => setStratNd(e.target.checked)}
+                      />
+                      Non-Dir
+                    </label>
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={stratPro}
+                        onChange={(e) => setStratPro(e.target.checked)}
+                      />
+                      Pro
+                    </label>
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={stratMtf}
+                        onChange={(e) => setStratMtf(e.target.checked)}
+                      />
+                      Pro-MTF
+                    </label>
+                  </div>
+                ) : (
+                  <select
+                    value={stratDefault}
+                    onChange={(e) => setStratDefault(e.target.value)}
+                    aria-label="Strategy default"
+                  >
+                    <option value="false">Directional</option>
+                    <option value="true">Non-Directional</option>
+                    <option value="pro">Pro</option>
+                    <option value="pro_mtf">Pro-MTF</option>
+                  </select>
+                )}
+              </div>
+              {includesPro && (
+                <SweepRow
+                  label="Pro σ"
+                  title="Pro VWAP band ±Nσ (1, 2, or 3)"
+                  value={sigmaRange}
+                  onChange={setSigmaRange}
+                  stepHint="1"
+                />
+              )}
+              {includesMtf && (
+                <>
+                  <SweepRow
+                    label="Base TF"
+                    title="Pro-MTF higher timeframe (must be > chart TF)"
+                    value={baseTfRange}
+                    onChange={setBaseTfRange}
+                    stepHint="15"
+                  />
+                  <SweepRow
+                    label="Base Thr"
+                    title="Pro-MTF HTF AGGR threshold %"
+                    value={baseThrRange}
+                    onChange={setBaseThrRange}
+                    stepHint="5"
+                  />
+                </>
+              )}
+              <div className="opt-flag-row">
+                <button
+                  type="button"
+                  className={`opt-sweep-btn${beSweep ? ' on' : ''}`}
+                  onClick={() => setBeSweep((v) => !v)}
+                >
+                  {beSweep ? 'On' : 'Off'}
+                </button>
+                <span className="opt-range-lab">BE</span>
+                {beSweep ? (
+                  <div className="be-opt-flags">
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={beOff}
+                        onChange={(e) => {
+                          const on = e.target.checked
+                          if (!on && !beOn) return
+                          setBeOff(on)
+                        }}
+                      />
+                      Off
+                    </label>
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={beOn}
+                        onChange={(e) => {
+                          const on = e.target.checked
+                          if (!on && !beOff) return
+                          setBeOn(on)
+                        }}
+                      />
+                      On
+                    </label>
+                  </div>
+                ) : (
+                  <select
+                    value={beDefault ? '1' : '0'}
+                    onChange={(e) => setBeDefault(e.target.value === '1')}
+                    aria-label="BE default"
+                  >
+                    <option value="0">Default Off</option>
+                    <option value="1">Default On</option>
+                  </select>
+                )}
+              </div>
+              {(beSweep ? beOn : beDefault) && (
+                <div className="opt-flag-row">
+                  <span className="opt-range-lab">BE unit</span>
+                  <select
+                    value={beUnit}
+                    onChange={(e) => {
+                      const u = e.target.value
+                      if (u === 'range' || u === 'tick' || u === 'points' || u === 'pct') {
+                        setBeUnit(u)
+                      }
+                    }}
+                    aria-label="BE unit"
+                  >
+                    <option value="range">Range</option>
+                    <option value="tick">Tick</option>
+                    <option value="points">Points</option>
+                    <option value="pct">%</option>
+                  </select>
+                  {beUnit !== 'range' && (
+                    <label>
+                      Dist
+                      <input
+                        className="num-plain"
+                        type="number"
+                        inputMode="decimal"
+                        min={0}
+                        step={beUnit === 'pct' ? '0.01' : '1'}
+                        value={beValue}
+                        onChange={(e) => setBeValue(Number(e.target.value))}
+                      />
+                    </label>
+                  )}
+                </div>
+              )}
+              {(beSweep ? beOn : beDefault) && (
+                <SweepRow
                   label="BE%"
                   title="BreakEven lock % of R"
                   value={bePctRange}
@@ -931,14 +1367,21 @@ export function OptimizeTab({
                   stepHint="5"
                 />
               )}
-              <RangeInputs
+              <SweepRow
+                label="Vol"
+                title="Position size in lots (ETHUSDT 0.01 = 0.01 ETH). Scales PnL, fees, and drawdown."
+                value={volRange}
+                onChange={setVolRange}
+                stepHint="0.01"
+              />
+              <SweepRow
                 label="Slip%"
                 title="Slippage % of price (0.01 = 0.01%)"
                 value={slipRange}
                 onChange={setSlipRange}
                 stepHint="0.005"
               />
-              <RangeInputs
+              <SweepRow
                 label="Fee%"
                 title="Fee % of notional per side"
                 value={feeRange}
@@ -1274,8 +1717,8 @@ export function OptimizeTab({
                   <>
                     <p className="opt-best-meta">
                       {overviewIsSelected
-                        ? 'Showing the combo selected from Leaderboard / heatmap. Apply loads it into Backtest.'
-                        : 'Showing rank #1. Click a heatmap cell or Leaderboard row to inspect that combo here.'}
+                        ? 'Showing the combo selected from Results / Analysis. Apply loads it into Backtest.'
+                        : 'Showing rank #1. Click an Analysis cell or Results row to inspect that combo here.'}
                     </p>
                     <div className="opt-best-main">
                       <span>
@@ -1285,16 +1728,23 @@ export function OptimizeTab({
                         RR <b>{fmt2(overview.rr)}</b>
                       </span>
                       <span>
-                        {overview.pro_mode ? 'Pro' : overview.wait_and_trade ? 'Non-Dir' : 'Dir'}
+                        Vol <b>{fmt2(Number(overview.volume ?? result?.volume ?? 0))}</b>
+                      </span>
+                      <span>
+                        {overview.pro_mtf_mode
+                          ? 'Pro-MTF'
+                          : overview.pro_mode
+                            ? 'Pro'
+                            : overview.wait_and_trade
+                              ? 'Non-Dir'
+                              : 'Dir'}
                       </span>
                       <span>
                         BE{' '}
                         <b>
-                          {overview.wait_and_trade && !overview.pro_mode
-                            ? '—'
-                            : Number(overview.break_even)
-                              ? `On ${fmt2(Number(overview.break_even_pct ?? 0))}%`
-                              : 'Off'}
+                          {Number(overview.break_even)
+                            ? `On ${fmt2(Number(overview.break_even_pct ?? 0))}%`
+                            : 'Off'}
                         </b>
                       </span>
                       <span className={Number(overview.net_pnl) >= 0 ? 'pos' : 'neg'}>
@@ -1375,7 +1825,7 @@ export function OptimizeTab({
                   </>
                 ) : (
                   <p className="opt-empty">
-                    Run optimize, then select a Leaderboard row or heatmap cell to study a combo
+                    Run optimize, then select a Results row or Analysis cell to study a combo
                     here before applying to Backtest.
                   </p>
                 )}
@@ -1389,7 +1839,7 @@ export function OptimizeTab({
             <div className="opt-lb-hint">
               Column filters support text match or numeric ops: <code>&gt;1</code>, <code>&lt;5</code>,{' '}
               <code>10-20</code>. Row CSV = full params + metrics + equity + trades. Click a row to
-              inspect on Heatmap (Selected vs Best); use Apply to Backtest there.
+              inspect on Analysis (Selected vs Best); use Apply to Backtest there.
             </div>
             <div className="opt-lb-table-wrap">
               {result ? (
@@ -1567,7 +2017,11 @@ export function OptimizeTab({
                   </tbody>
                 </table>
               ) : (
-                <p className="opt-empty">No results yet.</p>
+                <p className="opt-empty">
+                  {busy
+                    ? `Running… ${progress?.done ?? 0}/${progress?.total ?? 0} combos will appear here as they finish.`
+                    : 'No results yet.'}
+                </p>
               )}
             </div>
           </div>

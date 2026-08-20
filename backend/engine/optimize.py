@@ -32,6 +32,7 @@ ALLOWED_TIME_STEPS = frozenset({30, 60})
 _W_BARS: pd.DataFrame | None = None
 _W_TICKS: pd.DataFrame | None = None
 _W_COMMON: dict[str, Any] | None = None
+_W_BASE: dict[int, pd.DataFrame] | None = None
 
 _DOW = {
     "mon": 0,
@@ -126,23 +127,39 @@ def _parse_bools(raw: str | Iterable[bool]) -> list[bool]:
     return [bool(x) for x in raw]
 
 
-def _parse_strategy_flags(raw: str | Iterable[Any]) -> list[tuple[bool, bool]]:
+def _parse_strategy_flags(raw: str | Iterable[Any]) -> list[tuple[bool, bool, bool]]:
     """
-    Parse strategy grid into (wait_and_trade, pro_mode) pairs.
-    Accepts: false/true/pro (and aliases).
+    Parse strategy grid into (wait_and_trade, pro_mode, pro_mtf_mode) triples.
+    Accepts: false/true/pro/pro_mtf (and aliases).
     """
     if not isinstance(raw, str):
-        return [(bool(x), False) for x in raw]
-    out: list[tuple[bool, bool]] = []
+        return [(bool(x), False, False) for x in raw]
+    out: list[tuple[bool, bool, bool]] = []
     for p in raw.split(","):
-        p = p.strip().lower()
-        if p in ("pro", "p"):
-            out.append((False, True))
+        p = p.strip().lower().replace("-", "_")
+        if p in ("pro_mtf", "mtf", "pmtf", "promtf"):
+            out.append((False, False, True))
+        elif p in ("pro", "p"):
+            out.append((False, True, False))
         elif p in ("1", "true", "t", "yes", "y", "non_directional", "nd"):
-            out.append((True, False))
+            out.append((True, False, False))
         elif p in ("0", "false", "f", "no", "n", "directional", "dir"):
-            out.append((False, False))
+            out.append((False, False, False))
     return out
+
+
+def _parse_sigmas(raw: str | Iterable[float] | None, fallback: float = 2.0) -> list[float]:
+    """Snap Pro VWAP σ grid to {1, 2, 3}."""
+    if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+        vals = [float(fallback or 2)]
+    else:
+        vals = _parse_floats(raw)
+    out: list[float] = []
+    for s in vals:
+        v = min((1.0, 2.0, 3.0), key=lambda x: abs(x - float(s)))
+        if v not in out:
+            out.append(v)
+    return out or [2.0]
 
 
 def _parse_re_entry_flags(raw: str | Iterable[int] | None) -> list[int]:
@@ -348,6 +365,15 @@ def _equity_spark_from_trades(
     return out
 
 
+def _public_row(r: dict[str, Any]) -> dict[str, Any]:
+    """JSON-safe combo row for live leaderboard (no full trade blotter)."""
+    out = {k: v for k, v in r.items() if k != "_trades_lite"}
+    lite = r.get("_trades_lite") or []
+    if "equity_spark" not in out:
+        out["equity_spark"] = _equity_spark_from_trades(lite)
+    return out
+
+
 def _finalize(
     results: list[dict[str, Any]],
     *,
@@ -435,29 +461,67 @@ def _resolve_workers(requested: int | None, total: int) -> int:
     return max(1, min(n, total, cpu))
 
 
+def _load_htf_bars(
+    symbol: str,
+    exec_tf: int,
+    exec_bars: pd.DataFrame,
+    base_tfs: Iterable[int],
+) -> dict[int, pd.DataFrame]:
+    """Load HTF bars for Pro-MTF combos, scoped around the exec window."""
+    from backend.engine.bars import load_or_build_bars
+
+    needed = sorted({int(x) for x in base_tfs if int(x) > int(exec_tf)})
+    if not needed:
+        return {}
+    if exec_bars is None or getattr(exec_bars, "empty", True):
+        return {}
+    ot = pd.to_datetime(exec_bars["open_time"], utc=True)
+    t0 = ot.min() - pd.Timedelta(days=2)
+    t1 = ot.max() + pd.Timedelta(minutes=max(needed))
+    out: dict[int, pd.DataFrame] = {}
+    for btf in needed:
+        df = load_or_build_bars(symbol, btf).copy()
+        df["open_time"] = pd.to_datetime(df["open_time"], utc=True)
+        scoped = df[(df["open_time"] >= t0) & (df["open_time"] <= t1)]
+        if scoped.empty:
+            raise ValueError(
+                f"Pro-MTF needs {btf}m bars for {symbol} in the selected range. Load that TF first."
+            )
+        out[btf] = scoped
+    return out
+
+
 def _worker_init(bars_path: str, ticks_path: str, common: dict[str, Any]) -> None:
-    global _W_BARS, _W_TICKS, _W_COMMON
+    global _W_BARS, _W_TICKS, _W_COMMON, _W_BASE
     _W_BARS = pd.read_parquet(bars_path)
     _W_TICKS = pd.read_parquet(ticks_path)
     _W_COMMON = common
+    _W_BASE = {}
+    for k, p in (common.get("base_bar_paths") or {}).items():
+        _W_BASE[int(k)] = pd.read_parquet(p)
 
 
 def _worker_eval(job: dict[str, Any]) -> dict[str, Any]:
     """Evaluate one grid combo inside a worker process."""
     assert _W_BARS is not None and _W_TICKS is not None and _W_COMMON is not None
     c = _W_COMMON
-    wt = bool(job["wait_and_trade"])
-    pro = bool(job.get("pro_mode"))
-    be = int(job["break_even"]) if (not wt or pro) else 0
-    if wt:
-        be = 0
+    mtf = bool(job.get("pro_mtf_mode"))
+    wt = False if mtf else bool(job["wait_and_trade"])
+    pro = False if mtf else bool(job.get("pro_mode"))
+    be = int(job["break_even"] or 0)
+    base_tf = int(job.get("base_tf") or 0)
+    base_thr = float(job.get("base_threshold") or 0)
+    base_bars = None
+    if mtf:
+        base_map = _W_BASE or {}
+        base_bars = base_map.get(base_tf)
     result = run_backtest(
         _W_BARS,
         symbol=str(c["symbol"]),
         tf_minutes=int(c["tf_minutes"]),
         wait_and_trade=wt,
         rr=float(job["rr"]),
-        volume=float(c["volume"]),
+        volume=float(job["volume"] if job.get("volume") is not None else c["volume"]),
         threshold=float(job["threshold"]),
         entry_after=int(job["entry_after"]),
         entry_before=int(job["entry_before"]),
@@ -471,12 +535,21 @@ def _worker_eval(job: dict[str, Any]) -> dict[str, Any]:
         break_even=be,
         break_even_pct=float(job["break_even_pct"]),
         pro_mode=pro,
-        pro_vwap_sigma=float(c.get("pro_vwap_sigma") or 2),
+        pro_vwap_sigma=float(job.get("pro_vwap_sigma") or c.get("pro_vwap_sigma") or 2),
         ticks=_W_TICKS,
         sl_tp_unit=str(job.get("sl_tp_unit") or c.get("sl_tp_unit") or "range"),
         stop_loss=float(job.get("stop_loss") if job.get("stop_loss") is not None else 50),
         take_profit=float(job.get("take_profit") if job.get("take_profit") is not None else 100),
         trail_stop=1 if int(job.get("trail_stop") or 0) else 0,
+        risk_on=1 if int(job.get("risk_on") if job.get("risk_on") is not None else 1) else 0,
+        trail_unit=str(job.get("trail_unit") or "range"),
+        trail_value=float(job.get("trail_value") if job.get("trail_value") is not None else 0),
+        be_unit=str(job.get("be_unit") or "range"),
+        be_value=float(job.get("be_value") if job.get("be_value") is not None else 0),
+        pro_mtf_mode=mtf,
+        base_tf_minutes=base_tf or 15,
+        base_threshold=base_thr or 30.0,
+        base_bars=base_bars,
     )
     m = compute_trade_metrics(
         result.trades,
@@ -489,14 +562,24 @@ def _worker_eval(job: dict[str, Any]) -> dict[str, Any]:
         "rr": float(job["rr"]),
         "wait_and_trade": wt,
         "pro_mode": int(pro),
+        "pro_mtf_mode": int(mtf),
+        "base_tf": int(base_tf) if mtf else 0,
+        "base_threshold": float(base_thr) if mtf else 0.0,
+        "pro_vwap_sigma": float(job.get("pro_vwap_sigma") or 0) if pro else 0.0,
         "re_entry": int(job["re_entry"]) if wt else 0,
         "stop_to_be": int(job["stop_to_be"]),
         "break_even": be,
-        "break_even_pct": float(job["break_even_pct"]) if ((not wt or pro) and be) else 0.0,
+        "break_even_pct": float(job["break_even_pct"]) if be else 0.0,
         "sl_tp_unit": str(job.get("sl_tp_unit") or "range"),
         "stop_loss": float(job.get("stop_loss") or 0),
         "take_profit": float(job.get("take_profit") or 0),
         "trail_stop": 1 if int(job.get("trail_stop") or 0) else 0,
+        "risk_on": 1 if int(job.get("risk_on") if job.get("risk_on") is not None else 1) else 0,
+        "trail_unit": str(job.get("trail_unit") or "range"),
+        "trail_value": float(job.get("trail_value") if job.get("trail_value") is not None else 0),
+        "be_unit": str(job.get("be_unit") or "range"),
+        "be_value": float(job.get("be_value") if job.get("be_value") is not None else 0),
+        "volume": float(job["volume"] if job.get("volume") is not None else c["volume"]),
         "entry_after": int(job["entry_after"]),
         "entry_before": int(job["entry_before"]),
         "exit_time": int(job["exit_time"]),
@@ -546,11 +629,13 @@ def _eval_combo_local(
     tstop: float,
     job: dict[str, Any],
     pro_vwap_sigma: float = 2.0,
+    base_by_tf: dict[int, pd.DataFrame] | None = None,
 ) -> dict[str, Any]:
     """Sequential path (same shape as worker result)."""
-    global _W_BARS, _W_TICKS, _W_COMMON
+    global _W_BARS, _W_TICKS, _W_COMMON, _W_BASE
     _W_BARS = bars
     _W_TICKS = ticks
+    _W_BASE = base_by_tf or {}
     _W_COMMON = {
         "symbol": symbol,
         "tf_minutes": tf_minutes,
@@ -562,7 +647,7 @@ def _eval_combo_local(
     try:
         return _worker_eval(job)
     finally:
-        _W_BARS = _W_TICKS = _W_COMMON = None
+        _W_BARS = _W_TICKS = _W_COMMON = _W_BASE = None
 
 
 def _iter_grid(
@@ -571,6 +656,7 @@ def _iter_grid(
     symbol: str = "ETHUSDT",
     tf_minutes: int = 15,
     volume: float = 0.01,
+    volumes: str | list[float] | None = None,
     thresholds: str | list[float] = "40,50,60",
     rrs: str | list[float] = "0.5,1,1.5,2",
     wait_flags: str | list[bool] = "false,true",
@@ -595,6 +681,7 @@ def _iter_grid(
     min_trades: int = 0,
     time_stop_minutes: float = 0.0,
     pro_vwap_sigma: float = 2.0,
+    pro_vwap_sigmas: str | list[float] | None = None,
     re_entry_flags: str | list[int] | None = "0,1",
     stop_to_be_flags: str | list[int] | None = "0,1",
     break_even_flags: str | list[int] | None = "0,1",
@@ -603,8 +690,15 @@ def _iter_grid(
     stop_losses: str | list[float] | None = "50",
     take_profits: str | list[float] | None = "100",
     trail_stop_flags: str | list[int] | None = "0",
+    risk_on_flags: str | list[int] | None = "1",
+    trail_unit: str = "range",
+    trail_value: float = 0.0,
+    be_unit: str = "range",
+    be_value: float = 0.0,
     workers: int | None = 0,
     ticks: pd.DataFrame | None = None,
+    base_tfs: str | list[float] | None = None,
+    base_thresholds: str | list[float] | None = None,
 ) -> Iterator[dict[str, Any]]:
     from backend.engine.volume_delta import _normalize_sl_tp_unit
 
@@ -619,6 +713,13 @@ def _iter_grid(
     fee_list = _parse_cost_pcts(fee_pcts, fee_pct)
     sl_unit = _normalize_sl_tp_unit(sl_tp_unit)
     trail_list = _parse_re_entry_flags(trail_stop_flags if trail_stop_flags is not None else "0")
+    risk_list = _parse_re_entry_flags(risk_on_flags if risk_on_flags is not None else "1") or [1]
+    trail_u = _normalize_sl_tp_unit(trail_unit)
+    trail_v = float(trail_value if trail_value is not None else 0.0)
+    be_u = _normalize_sl_tp_unit(be_unit)
+    be_v = float(be_value if be_value is not None else 0.0)
+    vol_raw = _parse_floats(volumes) if volumes not in (None, "") else []
+    vol_list = [max(1e-8, float(v)) for v in vol_raw] or [max(1e-8, float(volume or 0.01))]
     if sl_unit == "range":
         rr_list = _parse_floats(rrs)
         sl_list = [50.0]
@@ -681,34 +782,98 @@ def _iter_grid(
         buffer_min=buf,
     )
 
-    # re_entry only when WaitAndTrade=true (ORB); Wait=false / Pro forces 0
-    # break_even only when Directional or Pro; Non-Dir forces 0
+    # re_entry only when WaitAndTrade=true (ORB); Wait=false / Pro / Pro-MTF forces 0
+    # BreakEven is available in all modes (independent of Risk)
     # BE% only multiplies the grid when BreakEven is on
+    # Pro-MTF extra axes: Base TF / Base Thr%
+    wants_mtf = any(mtf for _, _, mtf in strat_list)
+    sigma_list = _parse_sigmas(pro_vwap_sigmas, float(pro_vwap_sigma or 2))
+    base_tf_list = [
+        int(x) for x in (_parse_floats(base_tfs) if base_tfs not in (None, "") else [])
+        if int(x) > int(tf_minutes)
+    ]
+    base_thr_list = (
+        _parse_floats(base_thresholds) if base_thresholds not in (None, "") else [30.0]
+    ) or [30.0]
+    if wants_mtf and not base_tf_list:
+        for cand in (15, 30, 60, 120, 240):
+            if cand > int(tf_minutes):
+                base_tf_list = [cand]
+                break
+        if not base_tf_list:
+            raise ValueError(
+                f"Pro-MTF Base TF must be greater than chart TF ({tf_minutes}m)."
+            )
+
     combos: list[tuple] = []
+
+    def _append(
+        th: float,
+        rr: float,
+        sl: float,
+        tp: float,
+        wt: bool,
+        pro: bool,
+        mtf: bool,
+        slip: float,
+        fee: float,
+        trail: int,
+        sess: tuple,
+        re: int,
+        stobe: int,
+        be: int,
+        be_pct: float,
+        vol: float,
+        risk: int,
+    ) -> None:
+        btf_iter: Iterable[int] = base_tf_list if mtf else (0,)
+        bthr_iter: Iterable[float] = base_thr_list if mtf else (0.0,)
+        for btf in btf_iter:
+            if mtf and int(btf) <= int(tf_minutes):
+                continue
+            for bthr in bthr_iter:
+                sig_iter: Iterable[float] = sigma_list if pro else (2.0,)
+                for sig in sig_iter:
+                    combos.append(
+                        (
+                            th, rr, sl, tp, wt, pro, mtf, slip, fee, trail, sess,
+                            re, stobe, be, be_pct, int(btf), float(bthr), float(sig),
+                            float(vol), int(risk),
+                        )
+                    )
+
     if sl_unit == "range":
-        for th, rr, (wt, pro), slip, fee, trail, sess in product(
-            th_list, rr_list, strat_list, slip_list, fee_list, trail_list, sessions
+        for th, rr, (wt, pro, mtf), slip, fee, trail, vol, sess in product(
+            th_list, rr_list, strat_list, slip_list, fee_list, trail_list, vol_list, sessions
         ):
             for re in re_list if wt else (0,):
                 for stobe in stobe_list:
-                    for be in be_list if not wt else (0,):
+                    for be in be_list:
                         pct_iter = be_pct_list if be else (be_pct_list[0],)
                         for be_pct in pct_iter:
-                            combos.append(
-                                (th, rr, 50.0, 100.0, wt, pro, slip, fee, trail, sess, re, stobe, be, be_pct)
-                            )
+                            for risk in risk_list:
+                                _append(
+                                    th, rr, 50.0, 100.0, wt, pro, mtf, slip, fee, trail,
+                                    sess, re, stobe, be, be_pct, vol, risk,
+                                )
     else:
-        for th, sl, tp, (wt, pro), slip, fee, trail, sess in product(
-            th_list, sl_list, tp_list, strat_list, slip_list, fee_list, trail_list, sessions
+        for th, sl, tp, (wt, pro, mtf), slip, fee, trail, vol, sess in product(
+            th_list, sl_list, tp_list, strat_list, slip_list, fee_list, trail_list, vol_list, sessions
         ):
             for re in re_list if wt else (0,):
                 for stobe in stobe_list:
-                    for be in be_list if not wt else (0,):
+                    for be in be_list:
                         pct_iter = be_pct_list if be else (be_pct_list[0],)
                         for be_pct in pct_iter:
-                            combos.append(
-                                (th, 1.0, sl, tp, wt, pro, slip, fee, trail, sess, re, stobe, be, be_pct)
-                            )
+                            for risk in risk_list:
+                                _append(
+                                    th, 1.0, sl, tp, wt, pro, mtf, slip, fee, trail,
+                                    sess, re, stobe, be, be_pct, vol, risk,
+                                )
+    if wants_mtf and not any(c[6] for c in combos):
+        raise ValueError(
+            f"Pro-MTF produced no combos — Base TF must be > chart TF ({tf_minutes}m)."
+        )
     truncated = len(combos) > max_runs
     if truncated:
         combos = combos[:max_runs]
@@ -721,7 +886,7 @@ def _iter_grid(
     if sigma_n not in (1.0, 2.0, 3.0):
         sigma_n = min((1.0, 2.0, 3.0), key=lambda x: abs(x - sigma_n))
     jobs: list[dict[str, Any]] = []
-    for th, rr, sl, tp, wt, pro, slip, fee, trail, sess, re, stobe, be, be_pct in combos:
+    for th, rr, sl, tp, wt, pro, mtf, slip, fee, trail, sess, re, stobe, be, be_pct, btf, bthr, sig, vol, risk in combos:
         ea, eb, et = sess
         jobs.append(
             {
@@ -729,8 +894,13 @@ def _iter_grid(
                 "rr": float(rr),
                 "wait_and_trade": bool(wt),
                 "pro_mode": bool(pro),
+                "pro_mtf_mode": bool(mtf),
+                "base_tf": int(btf),
+                "base_threshold": float(bthr),
+                "pro_vwap_sigma": float(sig) if pro else 2.0,
                 "slippage_pct": float(slip),
                 "fee_pct": float(fee),
+                "volume": float(vol),
                 "entry_after": int(ea),
                 "entry_before": int(eb),
                 "exit_time": int(et),
@@ -742,8 +912,16 @@ def _iter_grid(
                 "stop_loss": float(sl),
                 "take_profit": float(tp),
                 "trail_stop": 1 if int(trail) else 0,
+                "risk_on": 1 if int(risk) else 0,
+                "trail_unit": trail_u,
+                "trail_value": trail_v,
+                "be_unit": be_u,
+                "be_value": be_v,
             }
         )
+
+    mtf_tfs = sorted({int(j["base_tf"]) for j in jobs if j.get("pro_mtf_mode")})
+    base_by_tf = _load_htf_bars(symbol, int(tf_minutes), filtered, mtf_tfs) if mtf_tfs else {}
 
     results: list[dict[str, Any]] = []
     tmp_dir: str | None = None
@@ -751,24 +929,25 @@ def _iter_grid(
     try:
         if n_workers <= 1 or total <= 1:
             for i, job in enumerate(jobs, start=1):
-                results.append(
-                    _eval_combo_local(
-                        bars=filtered,
-                        ticks=ticks,
-                        symbol=symbol,
-                        tf_minutes=tf_minutes,
-                        volume=volume,
-                        trade_mode=trade_mode,
-                        tstop=tstop,
-                        job=job,
-                        pro_vwap_sigma=sigma_n,
-                    )
+                row = _eval_combo_local(
+                    bars=filtered,
+                    ticks=ticks,
+                    symbol=symbol,
+                    tf_minutes=tf_minutes,
+                    volume=volume,
+                    trade_mode=trade_mode,
+                    tstop=tstop,
+                    job=job,
+                    pro_vwap_sigma=sigma_n,
+                    base_by_tf=base_by_tf,
                 )
+                results.append(row)
                 yield {
-                    "type": "progress",
+                    "type": "combo",
                     "done": i,
                     "total": total,
                     "workers": n_workers,
+                    "row": _public_row(row),
                 }
         else:
             tmp_dir = tempfile.mkdtemp(prefix="opt_")
@@ -776,6 +955,11 @@ def _iter_grid(
             ticks_path = str(Path(tmp_dir) / "ticks.parquet")
             filtered.to_parquet(bars_path, index=False)
             ticks.to_parquet(ticks_path, index=False)
+            base_bar_paths: dict[str, str] = {}
+            for btf, df in base_by_tf.items():
+                p = str(Path(tmp_dir) / f"base_{int(btf)}.parquet")
+                df.to_parquet(p, index=False)
+                base_bar_paths[str(int(btf))] = p
             common = {
                 "symbol": symbol,
                 "tf_minutes": int(tf_minutes),
@@ -783,6 +967,7 @@ def _iter_grid(
                 "trade_mode": int(trade_mode),
                 "time_stop_minutes": tstop,
                 "pro_vwap_sigma": sigma_n,
+                "base_bar_paths": base_bar_paths,
             }
             executor = ProcessPoolExecutor(
                 max_workers=n_workers,
@@ -792,13 +977,15 @@ def _iter_grid(
             futs = [executor.submit(_worker_eval, job) for job in jobs]
             done = 0
             for fut in as_completed(futs):
-                results.append(fut.result())
+                row = fut.result()
+                results.append(row)
                 done += 1
                 yield {
-                    "type": "progress",
+                    "type": "combo",
                     "done": done,
                     "total": total,
                     "workers": n_workers,
+                    "row": _public_row(row),
                 }
     finally:
         if executor is not None:

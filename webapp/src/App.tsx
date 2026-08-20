@@ -22,6 +22,32 @@ import './App.css'
 
 type Step = 1 | 2 | 3
 
+function mergeLiveOpt(
+  prev: OptimizeResult | null,
+  row: OptimizePoint,
+  rankBy: string,
+): OptimizeResult {
+  const results = [...(prev?.results ?? []), row]
+  const reverse = rankBy !== 'max_drawdown'
+  results.sort((a, b) => {
+    const av = Number((a as Record<string, unknown>)[rankBy] ?? a.net_pnl)
+    const bv = Number((b as Record<string, unknown>)[rankBy] ?? b.net_pnl)
+    if (bv === av) return Number(b.net_pnl) - Number(a.net_pnl)
+    return reverse ? bv - av : av - bv
+  })
+  return {
+    ...prev,
+    rank_by: rankBy,
+    metric_columns: prev?.metric_columns ?? [],
+    symbol: prev?.symbol,
+    tf_minutes: prev?.tf_minutes,
+    volume: prev?.volume,
+    runs: results.length,
+    results,
+    best: results[0] ?? null,
+  }
+}
+
 function istHour(iso: string): number {
   const parts = new Intl.DateTimeFormat('en-GB', {
     timeZone: 'Asia/Kolkata',
@@ -101,12 +127,18 @@ const DEFAULTS: StrategyParams = {
   tf: 15,
   wait_and_trade: false,
   pro_mode: false,
+  pro_mtf_mode: false,
+  base_tf: 15,
+  base_threshold: 30,
   pro_vwap_sigma: 2,
   rr: 1,
   sl_tp_unit: 'range',
   stop_loss: 50,
   take_profit: 100,
+  risk_on: 1,
   trail_stop: 0,
+  trail_unit: 'range',
+  trail_value: 50,
   volume: 0.01,
   threshold: 50,
   entry_after: 330,
@@ -120,6 +152,8 @@ const DEFAULTS: StrategyParams = {
   stop_to_be: 0,
   break_even: 0,
   break_even_pct: 50,
+  be_unit: 'range',
+  be_value: 50,
   start: '2026-08-01',
   end: '2026-08-03',
 }
@@ -229,6 +263,16 @@ export default function App() {
     setBusy(true)
     setErr(null)
     setOptProgress({ done: 0, total: 0 })
+    setOpt({
+      runs: 0,
+      rank_by: grid.rank_by,
+      best: null,
+      results: [],
+      metric_columns: [],
+      symbol: params.symbol,
+      tf_minutes: grid.tf,
+      volume: params.volume,
+    })
     try {
       const result = await fetchOptimize(
         {
@@ -243,7 +287,12 @@ export default function App() {
           ...grid,
           tf: grid.tf,
         },
-        (done, total, workers) => setOptProgress({ done, total, workers }),
+        (done, total, workers, combo) => {
+          setOptProgress({ done, total, workers })
+          if (combo) {
+            setOpt((prev) => mergeLiveOpt(prev, combo, grid.rank_by))
+          }
+        },
         ac.signal,
       )
       if (ac.signal.aborted) return
@@ -291,8 +340,13 @@ export default function App() {
       tf: Number(opt?.tf_minutes ?? params.tf),
       threshold: Number(b.threshold),
       rr: Number(b.rr),
-      wait_and_trade: Boolean(b.wait_and_trade),
-      pro_mode: Boolean((b as { pro_mode?: boolean | number }).pro_mode),
+      wait_and_trade: Boolean(b.wait_and_trade) && !Boolean(b.pro_mtf_mode),
+      pro_mode: Boolean((b as { pro_mode?: boolean | number }).pro_mode) && !Boolean(b.pro_mtf_mode),
+      pro_mtf_mode: Boolean(b.pro_mtf_mode),
+      base_tf: Number(b.base_tf || params.base_tf || 15),
+      base_threshold: Number(
+        b.base_threshold || params.base_threshold || 30,
+      ),
       pro_vwap_sigma: (() => {
         const n = Number(
           (b as { pro_vwap_sigma?: number }).pro_vwap_sigma ?? params.pro_vwap_sigma ?? 2,
@@ -301,8 +355,14 @@ export default function App() {
       })(),
       re_entry: 0,
       stop_to_be: 0,
-      break_even: b.wait_and_trade ? 0 : Number(b.break_even ?? 0) ? 1 : 0,
+      break_even: Number(b.break_even ?? 0) ? 1 : 0,
       break_even_pct: Number(b.break_even_pct ?? params.break_even_pct ?? 50),
+      be_unit: (['range', 'tick', 'points', 'pct'].includes(
+        String((b as { be_unit?: string }).be_unit || params.be_unit),
+      )
+        ? String((b as { be_unit?: string }).be_unit || params.be_unit)
+        : params.be_unit) as StrategyParams['be_unit'],
+      be_value: Number((b as { be_value?: number }).be_value ?? params.be_value ?? 50),
       slippage_pct: Number(b.slippage_pct ?? params.slippage_pct ?? 0),
       fee_pct: Number(b.fee_pct ?? params.fee_pct ?? 0),
       entry_after: Number(b.entry_after ?? opt?.entry_after ?? params.entry_after),
@@ -310,7 +370,7 @@ export default function App() {
       exit_time: Number(b.exit_time ?? opt?.exit_time ?? params.exit_time),
       time_stop_minutes: 0,
       trade_mode: Number(params.trade_mode ?? 2),
-      volume: Number(params.volume),
+      volume: Number((b as { volume?: number }).volume ?? params.volume),
       sl_tp_unit: (['range', 'tick', 'points', 'pct'].includes(
         String((b as { sl_tp_unit?: string }).sl_tp_unit || params.sl_tp_unit),
       )
@@ -323,6 +383,15 @@ export default function App() {
         (b as { take_profit?: number }).take_profit ?? params.take_profit ?? 100,
       ),
       trail_stop: Number((b as { trail_stop?: number }).trail_stop ?? 0) ? 1 : 0,
+      risk_on: Number((b as { risk_on?: number }).risk_on ?? params.risk_on ?? 1) ? 1 : 0,
+      trail_unit: (['range', 'tick', 'points', 'pct'].includes(
+        String((b as { trail_unit?: string }).trail_unit || params.trail_unit),
+      )
+        ? String((b as { trail_unit?: string }).trail_unit || params.trail_unit)
+        : params.trail_unit) as StrategyParams['trail_unit'],
+      trail_value: Number(
+        (b as { trail_value?: number }).trail_value ?? params.trail_value ?? 50,
+      ),
       // Engine session = optimize common DOW only (not view hour mask — that is post-filter).
       dayofweek: opt?.common_optimizer ? dowFromOpt : undefined,
       allowed_entry_hours: undefined,
@@ -467,6 +536,7 @@ export default function App() {
             defaultExitTime={params.exit_time}
             defaultSlip={params.slippage_pct}
             defaultFee={params.fee_pct}
+            defaults={params}
             onRun={runOptimize}
             onStop={stopOptimize}
             onApplyBest={applyBest}

@@ -30,10 +30,24 @@ export function comboKey(r: {
   rr: number
   wait_and_trade?: boolean
   pro_mode?: number | boolean
+  pro_mtf_mode?: number | boolean
+  base_tf?: number
+  base_threshold?: number
+  pro_vwap_sigma?: number
   break_even?: number
   break_even_pct?: number
   slippage_pct?: number
   fee_pct?: number
+  volume?: number
+  trail_stop?: number
+  risk_on?: number
+  trail_unit?: string
+  trail_value?: number
+  stop_loss?: number
+  take_profit?: number
+  sl_tp_unit?: string
+  be_unit?: string
+  be_value?: number
   entry_after?: number
   entry_before?: number
   exit_time?: number
@@ -47,10 +61,24 @@ export function comboKey(r: {
     n(r.rr),
     r.wait_and_trade ? 1 : 0,
     r.pro_mode ? 1 : 0,
+    r.pro_mtf_mode ? 1 : 0,
+    n(r.base_tf),
+    n(r.base_threshold),
+    n(r.pro_vwap_sigma),
     n(r.break_even),
     n(r.break_even_pct),
     n(r.slippage_pct),
     n(r.fee_pct),
+    n(r.volume),
+    n(r.trail_stop),
+    n(r.risk_on),
+    n(r.stop_loss),
+    n(r.take_profit),
+    String(r.sl_tp_unit ?? ''),
+    String(r.trail_unit ?? ''),
+    n(r.trail_value),
+    String(r.be_unit ?? ''),
+    n(r.be_value),
     n(r.entry_after),
     n(r.entry_before),
     n(r.exit_time),

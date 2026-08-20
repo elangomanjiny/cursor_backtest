@@ -2313,6 +2313,12 @@ th.sorted-desc .sort-ind {
   gap: 12px;
   flex-wrap: wrap;
 }
+.equity-curve-header-one {
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 10px;
+  min-height: 34px;
+}
 .equity-curve-header h2 {
   margin: 0;
   font-size: 1rem;
@@ -2320,10 +2326,100 @@ th.sorted-desc .sort-ind {
   text-transform: uppercase;
   color: #e2e8f0;
 }
+.equity-curve-header-one h2 {
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1 1 auto;
+  min-width: 0;
+}
 .equity-curve-header p {
   margin: 4px 0 0;
   font-size: 0.78rem;
   color: #94a3b8;
+}
+.equity-cap-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.72rem;
+  color: #94a3b8;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.equity-cap-field input {
+  width: 88px;
+  text-align: right;
+}
+.equity-kind-select {
+  flex: 0 0 auto;
+  background: #1e222d;
+  border: 1px solid #363a45;
+  color: #e2e8f0;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 0.75rem;
+}
+.excursion-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: auto 1fr auto;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+  padding: 4px 0 8px;
+}
+.excursion-toolbar {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.excursion-pane {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #09090b;
+  border: 1px solid #27272a;
+  border-radius: 8px;
+  padding: 6px 8px 4px;
+}
+.excursion-pane h3 {
+  margin: 0 0 4px;
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #e2e8f0;
+}
+.excursion-svg {
+  width: 100%;
+  height: 100%;
+  min-height: 220px;
+  flex: 1 1 auto;
+}
+.excursion-plot-bg { fill: #0b1220; }
+.excursion-grid { stroke: rgba(63, 63, 70, 0.45); stroke-width: 1; }
+.excursion-axis { stroke: rgba(56, 189, 248, 0.55); stroke-width: 1; stroke-dasharray: 4 3; }
+.excursion-tick { fill: #a1a1aa; font-size: 10px; font-family: ui-monospace, monospace; }
+.excursion-axis-lab { fill: #94a3b8; font-size: 11px; }
+.excursion-legend {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 14px;
+  margin: 0;
+  font-size: 0.72rem;
+  color: #94a3b8;
+  align-items: center;
+}
+.excursion-legend i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 4px;
 }
 .equity-curve-tools {
   display: flex;
@@ -2675,11 +2771,37 @@ th.sorted-desc .sort-ind {
 .opt-range-hdr,
 .opt-range-row {
   display: grid;
-  grid-template-columns: 2.75rem 1fr 1fr 1fr;
+  grid-template-columns: 2.6rem 3.2rem 1fr 1fr 1fr 1fr;
   gap: 4px;
   align-items: center;
   margin-bottom: 6px;
 }
+.opt-range-off .num-plain:not(:nth-child(3)) {
+  opacity: 0.4;
+}
+.opt-sweep-btn {
+  font-size: 0.65rem;
+  padding: 2px 0;
+  border-radius: 4px;
+  border: 1px solid #3f3f46;
+  background: #18181b;
+  color: #a1a1aa;
+  cursor: pointer;
+}
+.opt-sweep-btn.on {
+  background: #14532d;
+  border-color: #22c55e;
+  color: #bbf7d0;
+}
+.opt-flag-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.opt-flag-row .opt-range-lab { min-width: 3.2rem; }
+.opt-strat-flags { flex-wrap: wrap; }
 .opt-range-hdr {
   font-size: 0.65rem;
   color: var(--muted);

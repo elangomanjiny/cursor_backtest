@@ -9,11 +9,13 @@ import {
   type Time,
 } from 'lightweight-charts'
 import type { DashboardModel, EquityPoint, MarkerPoint } from './computeDashboard'
+import { INITIAL_CAPITAL } from './computeDashboard'
 import { fmt2 } from '../format'
 
 type Props = {
   model: DashboardModel
   visible?: boolean
+  startCapital?: number
 }
 
 const EQ_POS = '#22c55e'
@@ -59,11 +61,12 @@ function nearestExit(markers: MarkerPoint[], t: number): MarkerPoint | null {
  * Modern high-speed equity + underwater chart (lightweight-charts canvas).
  * Optimized for mouse-wheel scroll / pan — minimal markers, throttled tooltips.
  */
-export function SyncedDepthCharts({ model, visible = true }: Props) {
+export function SyncedDepthCharts({ model, visible = true, startCapital }: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
   const tipRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const tipRaf = useRef(0)
+  const baseEq = startCapital ?? model.equity[0]?.equity ?? INITIAL_CAPITAL
 
   useEffect(() => {
     const el = hostRef.current
@@ -131,7 +134,7 @@ export function SyncedDepthCharts({ model, visible = true }: Props) {
     }))
 
     const eqSeries = chart.addSeries(BaselineSeries, {
-      baseValue: { type: 'price', price: 0 },
+      baseValue: { type: 'price', price: baseEq },
       relativeGradient: true,
       topLineColor: EQ_POS,
       bottomLineColor: EQ_NEG,
@@ -148,12 +151,12 @@ export function SyncedDepthCharts({ model, visible = true }: Props) {
     })
     eqSeries.setData(eqData)
     eqSeries.createPriceLine({
-      price: 0,
+      price: baseEq,
       color: 'rgba(56, 189, 248, 0.65)',
       lineWidth: 1,
       lineStyle: LineStyle.Dashed,
       axisLabelVisible: true,
-      title: '0',
+      title: String(Math.round(baseEq)),
     })
 
     const ddPane = chart.addPane(true)
@@ -183,17 +186,29 @@ export function SyncedDepthCharts({ model, visible = true }: Props) {
     )
     ddSeries.setData(ddData)
 
-    // Exit markers only (no text) — keeps wheel scroll smooth
-    const exits = model.markers.filter((m) => m.kind === 'exit').slice(0, 80)
-    if (exits.length) {
-      createSeriesMarkers(
-        eqSeries,
+    // Exit markers — size tracks zoom; hide when bars are too dense
+    const exits = model.markers.filter((m) => m.kind === 'exit')
+    const eqMarkerApi = exits.length ? createSeriesMarkers(eqSeries, []) : null
+    const applyEqMarkerSize = () => {
+      if (!eqMarkerApi) return
+      const r = chart.timeScale().getVisibleLogicalRange()
+      if (!r) {
+        eqMarkerApi.setMarkers([])
+        return
+      }
+      const barPx = Math.max(1, (el.clientWidth - 56) / Math.max(1, r.to - r.from))
+      if (barPx < 3.5) {
+        eqMarkerApi.setMarkers([])
+        return
+      }
+      const size = Math.max(0.12, Math.min(0.7, (barPx * 0.45) / 18))
+      eqMarkerApi.setMarkers(
         exits.map((m) => ({
           time: m.time as Time,
           position: 'inBar' as const,
           color: m.win ? EQ_POS : EQ_NEG,
           shape: 'circle' as const,
-          size: 0.55,
+          size,
         })),
       )
     }
@@ -225,7 +240,7 @@ export function SyncedDepthCharts({ model, visible = true }: Props) {
         tip.style.left = `${Math.min(el.clientWidth - 170, param.point.x + 12)}px`
         tip.style.top = `${Math.max(8, param.point.y - 8)}px`
         tip.innerHTML = `<div class="pod-tip-date">${fmtTipTime(pt.time)}</div>
-          <div>Equity <b class="${pt.equity >= 0 ? 'pos' : 'neg'}">${fmt2(pt.equity)}</b></div>
+          <div>Equity <b class="${pt.equity >= baseEq ? 'pos' : 'neg'}">${fmt2(pt.equity)}</b></div>
           <div>DD <b class="neg">${fmt2(pt.drawdownPct)}%</b></div>
           ${
             near && trade
@@ -245,21 +260,25 @@ export function SyncedDepthCharts({ model, visible = true }: Props) {
       } catch {
         /* ignore */
       }
+      applyEqMarkerSize()
     }
     fit()
     chart.timeScale().fitContent()
     chart.timeScale().applyOptions({ rightOffset: 6 })
+    applyEqMarkerSize()
+    chart.timeScale().subscribeVisibleLogicalRangeChange(applyEqMarkerSize)
     const ro = new ResizeObserver(() => fit())
     ro.observe(el)
 
     return () => {
       cancelAnimationFrame(tipRaf.current)
       ro.disconnect()
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(applyEqMarkerSize)
       chart.unsubscribeCrosshairMove(onMove as never)
       chart.remove()
       chartRef.current = null
     }
-  }, [model])
+  }, [model, baseEq])
 
   useEffect(() => {
     if (!visible) return

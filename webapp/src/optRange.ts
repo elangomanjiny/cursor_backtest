@@ -24,3 +24,14 @@ export function countRange(r: NumRange): number {
   const s = expandNumRange(r)
   return s ? s.split(',').length : 0
 }
+
+export type SweepNum = NumRange & { on: boolean; def: number }
+
+export function expandSweep(p: SweepNum, limit = 500): string {
+  if (!p.on) return String(p.def)
+  return expandNumRange(p, limit)
+}
+
+export function countSweep(p: SweepNum): number {
+  return p.on ? countRange(p) : 1
+}

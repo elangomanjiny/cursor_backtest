@@ -5,6 +5,12 @@ export type StrategyParams = {
   wait_and_trade: boolean
   /** Pro: Lo/Sh/Se/Co + VWAP±Nσ qualifier (Directional-style entries). */
   pro_mode: boolean
+  /** Pro-MTF: HTF AGGR bias + LTF Directional (no VWAP). */
+  pro_mtf_mode: boolean
+  /** Pro-MTF base (higher) timeframe minutes. */
+  base_tf: number
+  /** Pro-MTF base TF AGGR threshold %. */
+  base_threshold: number
   /** Pro VWAP band multiplier: 1, 2, or 3 (default 2). */
   pro_vwap_sigma: number
   rr: number
@@ -14,8 +20,14 @@ export type StrategyParams = {
   stop_loss: number
   /** Target distance when unit is tick / points / pct */
   take_profit: number
-  /** 1 = trail stop by SL distance as price moves favorably */
+  /** 1 = Risk box live (LSL/SSL + LT/ST). 0 = no Risk SL/TP. */
+  risk_on: number
+  /** 1 = trail stop as price moves favorably */
   trail_stop: number
+  /** Trail distance unit (independent of Risk). Range = AGGR gap. */
+  trail_unit: 'range' | 'tick' | 'points' | 'pct'
+  /** Trail distance when unit is tick / points / pct */
+  trail_value: number
   volume: number
   threshold: number
   entry_after: number
@@ -32,10 +44,14 @@ export type StrategyParams = {
   re_entry: number
   /** 1 = move stop to new AGGR extreme only if past entry (BE+); 0 = always tighten. */
   stop_to_be: number
-  /** Directional / Pro: 1 = arm at 1R → lock stop at BE% of R once; 0 = off. */
+  /** 1 = arm at BE value → lock stop at BE% of that distance once; 0 = off. */
   break_even: number
-  /** BreakEven lock as % of range (default 50 → 0.5×R from entry). */
+  /** BreakEven lock as % of arm distance (default 50). */
   break_even_pct: number
+  /** BreakEven arm-distance unit (independent of Risk). Range = AGGR gap. */
+  be_unit: 'range' | 'tick' | 'points' | 'pct'
+  /** BreakEven arm distance when unit is tick / points / pct */
+  be_value: number
   start: string
   end: string
   /** Optional IST weekday filter for parity with optimize common filters. */
@@ -88,11 +104,20 @@ export type BacktestStats = {
   [key: string]: number | Record<string, number> | undefined
 }
 
+export type MtfBiasRow = {
+  time: string
+  mode: 'bull' | 'bear' | string
+  invalid: number
+}
+
 export type BacktestResult = {
   symbol: string
   tf_minutes: number
   wait_and_trade: boolean
   pro_mode?: number | boolean
+  pro_mtf_mode?: number | boolean
+  base_tf_minutes?: number
+  base_threshold?: number
   rr: number
   volume: number
   threshold: number
@@ -105,6 +130,8 @@ export type BacktestResult = {
   aggressive: AggressiveRow[]
   bars: BarRow[]
   equity: { time: string; equity: number }[]
+  /** Pro-MTF: HTF bias + invalidator timeline (active from bar close). */
+  mtf_bias?: MtfBiasRow[]
   parity_ok?: boolean | null
   parity_checked?: boolean
   parity_errors?: string[]
@@ -138,6 +165,10 @@ export type TradeRow = {
   entry_tag?: string
   /** Directional BreakEven moved stop to 0.5R lock */
   be_moved?: boolean
+  /** Initial stop at entry (before trail / BE). */
+  stop_init?: number
+  /** Trail staircase when Trail is on. */
+  trail_path?: { time: string; stop: number }[] | null
 }
 
 export type AggressiveRow = {
@@ -229,6 +260,10 @@ export type OptimizePoint = {
   rr: number
   wait_and_trade: boolean
   pro_mode?: number | boolean
+  pro_mtf_mode?: number | boolean
+  base_tf?: number
+  base_threshold?: number
+  pro_vwap_sigma?: number
   re_entry?: number
   stop_to_be?: number
   break_even?: number
@@ -237,6 +272,12 @@ export type OptimizePoint = {
   stop_loss?: number
   take_profit?: number
   trail_stop?: number
+  risk_on?: number
+  trail_unit?: string
+  trail_value?: number
+  be_unit?: string
+  be_value?: number
+  volume?: number
   trades: number
   entry_tags?: Record<string, number>
   net_pnl: number
@@ -398,6 +439,7 @@ export async function fetchOptimize(
     min_trades?: number
     time_stop_minutes?: number
     pro_vwap_sigma?: number
+    pro_vwap_sigmas?: string
     re_entry_flags?: string
     stop_to_be_flags?: string
     break_even_flags?: string
@@ -406,10 +448,23 @@ export async function fetchOptimize(
     stop_losses?: string
     take_profits?: string
     trail_stop_flags?: string
+    risk_on_flags?: string
+    trail_unit?: string
+    trail_value?: number
+    be_unit?: string
+    be_value?: number
+    volumes?: string
+    base_tfs?: string
+    base_thresholds?: string
     max_runs?: number
     workers?: number
   },
-  onProgress?: (done: number, total: number, workers?: number) => void,
+  onProgress?: (
+    done: number,
+    total: number,
+    workers?: number,
+    combo?: OptimizePoint,
+  ) => void,
   signal?: AbortSignal,
 ) {
   const r = await fetch(`/api/optimize?${qs({ ...params, stream: true })}`, { signal })
@@ -438,10 +493,15 @@ export async function fetchOptimize(
           total?: number
           workers?: number
           payload?: OptimizeResult
+          row?: OptimizePoint
           message?: string
         }
         if (ev.type === 'progress' && onProgress) {
           onProgress(Number(ev.done || 0), Number(ev.total || 0), ev.workers)
+        } else if (ev.type === 'combo') {
+          if (onProgress) {
+            onProgress(Number(ev.done || 0), Number(ev.total || 0), ev.workers, ev.row)
+          }
         } else if (ev.type === 'result' && ev.payload) {
           result = ev.payload
         } else if (ev.type === 'error') {

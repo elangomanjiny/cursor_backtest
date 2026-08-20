@@ -23,10 +23,9 @@ function splitDT(iso: string) {
   return { date: s.slice(0, 10), time: s.slice(11, 19) }
 }
 
-/** Clock HH:MM:SS(.mmm) — keeps ms when tick exit differs from bar-open entry. */
+/** Clock HH:MM:SS — drops milliseconds for table display. */
 function clockTime(iso: string): string {
   const t = iso.replace('T', ' ').slice(11)
-  if (t.length >= 12 && t[8] === '.') return t.slice(0, 12) // HH:MM:SS.mmm
   return t.slice(0, 8)
 }
 
@@ -144,11 +143,12 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
         sig && 'range' in sig && sig.range != null
           ? Number(sig.range)
           : t.range ?? t.signal_high - t.signal_low
-      const mfe = Number(t.mfe ?? 0)
-      const mae = Number(t.mae ?? 0)
+      const mfe = Math.abs(Number(t.mfe ?? 0))
+      const maeAbs = Math.abs(Number(t.mae ?? 0))
+      const mae = -maeAbs
       const mfeTicks = tick > 0 ? mfe / tick : 0
       const maeTicks = tick > 0 ? mae / tick : 0
-      const eRatio = mae > 1e-12 ? mfe / mae : mfe > 0 ? 999 : 0
+      const eRatio = maeAbs > 1e-12 ? mfe / maeAbs : mfe > 0 ? 999 : 0
       const slip = Number(t.slippage ?? 0)
       const fee = Number(t.fee ?? 0)
       const entryNotional = Math.abs(Number(t.entry_price)) * lots
@@ -235,7 +235,7 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
         <p className="hint">
           Click a trade row to jump to it on the Visualization chart. Click column headers to sort.
           MFE / MAE shown as <b>ticks / price</b> (tick={data ? instrumentTickSize(data.symbol) : '—'}
-          ). E-ratio = MFE÷MAE in price.
+          ). MAE is signed negative (adverse). E-ratio = |MFE|÷|MAE| in price.
         </p>
       </div>
 
@@ -307,30 +307,6 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
                   <SortTh col="points" sort={tradesSort.sort} onSort={tradesSort.toggle}>
                     Points
                   </SortTh>
-                  <SortTh
-                    col="mfePts"
-                    sort={tradesSort.sort}
-                    onSort={tradesSort.toggle}
-                    title="Maximum Favorable Excursion — ticks / price points"
-                  >
-                    MFE
-                  </SortTh>
-                  <SortTh
-                    col="maePts"
-                    sort={tradesSort.sort}
-                    onSort={tradesSort.toggle}
-                    title="Maximum Adverse Excursion — ticks / price points"
-                  >
-                    MAE
-                  </SortTh>
-                  <SortTh
-                    col="eRatio"
-                    sort={tradesSort.sort}
-                    onSort={tradesSort.toggle}
-                    title="Per-trade MFE÷MAE (ticks)"
-                  >
-                    E-ratio
-                  </SortTh>
                   <SortTh col="lots" sort={tradesSort.sort} onSort={tradesSort.toggle}>
                     Lots
                   </SortTh>
@@ -362,6 +338,30 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
                   <SortTh col="cumPnl" sort={tradesSort.sort} onSort={tradesSort.toggle}>
                     CumPnL
                   </SortTh>
+                  <SortTh
+                    col="mfePts"
+                    sort={tradesSort.sort}
+                    onSort={tradesSort.toggle}
+                    title="Maximum Favorable Excursion — ticks / price points"
+                  >
+                    MFE
+                  </SortTh>
+                  <SortTh
+                    col="maePts"
+                    sort={tradesSort.sort}
+                    onSort={tradesSort.toggle}
+                    title="Maximum Adverse Excursion — ticks / price points"
+                  >
+                    MAE
+                  </SortTh>
+                  <SortTh
+                    col="eRatio"
+                    sort={tradesSort.sort}
+                    onSort={tradesSort.toggle}
+                    title="Per-trade MFE÷MAE (ticks)"
+                  >
+                    E-ratio
+                  </SortTh>
                 </tr>
               </thead>
               <tbody>
@@ -391,13 +391,6 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
                       <td>{r.exitTime}</td>
                       <td>{fmt2(r.exitPrice)}</td>
                       <td className={r.points >= 0 ? 'pos' : 'neg'}>{fmt2(r.points)}</td>
-                      <td className="pos" title={`${fmt2(r.mfeTicks)} ticks`}>
-                        {r.mfeLabel}
-                      </td>
-                      <td className="neg" title={`${fmt2(r.maeTicks)} ticks`}>
-                        {r.maeLabel}
-                      </td>
-                      <td>{fmt2(r.eRatio)}</td>
                       <td>{fmt2(r.lots)}</td>
                       <td>{r.entryTag}</td>
                       <td>{r.exitTag}</td>
@@ -409,6 +402,13 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
                       </td>
                       <td className={r.pnl >= 0 ? 'pos' : 'neg'}>{fmt2(r.pnl)}</td>
                       <td className={r.cumPnl >= 0 ? 'pos' : 'neg'}>{fmt2(r.cumPnl)}</td>
+                      <td className="pos" title={`${fmt2(r.mfeTicks)} ticks`}>
+                        {r.mfeLabel}
+                      </td>
+                      <td className="neg" title={`${fmt2(r.maeTicks)} ticks`}>
+                        {r.maeLabel}
+                      </td>
+                      <td>{fmt2(r.eRatio)}</td>
                     </tr>
                   )
                 })}

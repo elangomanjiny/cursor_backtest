@@ -35,6 +35,31 @@ const AGGR_TAG_COLOR: Record<AggrTag, string> = {
   Co: '#58a6ff',
 }
 
+const TRAIL_CYAN = '#22d3ee'
+const TRAIL_DOTTED: LineStyleValue =
+  ((LineStyle as unknown as { Dotted?: LineStyleValue }).Dotted ?? LineStyle.Dashed)
+
+/** Horizontal-then-vertical vertices so trail plots as a staircase (unique times). */
+function staircaseFromStops(pts: { time: number; value: number }[]) {
+  const uniq: { time: number; value: number }[] = []
+  for (const p of pts) {
+    const t = Math.floor(p.time)
+    if (!Number.isFinite(t) || !Number.isFinite(p.value)) continue
+    const last = uniq[uniq.length - 1]
+    if (last && last.time === t) last.value = p.value
+    else uniq.push({ time: t, value: p.value })
+  }
+  if (uniq.length < 2) return uniq
+  const out: { time: number; value: number }[] = [{ ...uniq[0] }]
+  for (let i = 1; i < uniq.length; i++) {
+    const prev = uniq[i - 1]
+    const cur = uniq[i]
+    if (cur.time > prev.time + 1) out.push({ time: cur.time - 1, value: prev.value })
+    out.push({ ...cur })
+  }
+  return out
+}
+
 type Unit = 'quote' | 'base'
 
 type Props = {
@@ -43,6 +68,27 @@ type Props = {
   visible?: boolean
   /** Show Lo/Sh/Se/Co AGGR tags only in Pro strategy mode. */
   proMode?: boolean
+  /** Pro-MTF: plot HTF bias invalidator levels on the LTF chart. */
+  proMtfMode?: boolean
+}
+
+/** Library `size=1` is ~20px. Scale to candle width; hide AGGR when bars are too thin. */
+const MARKER_GLYPH_PX = 20
+const AGGR_MIN_BAR_PX = 5.5
+
+type ChartMarker = {
+  time: never
+  position: 'aboveBar' | 'belowBar'
+  color: string
+  shape: 'arrowDown' | 'arrowUp' | 'circle'
+  text?: string
+  kind: 'aggr' | 'trade'
+}
+
+function markerSizeFromBarPx(barPx: number, kind: ChartMarker['kind']): number {
+  const frac = kind === 'aggr' ? 0.42 : 0.62
+  const targetPx = Math.min(kind === 'aggr' ? 10 : 12, Math.max(1.4, barPx * frac))
+  return Math.max(0.05, Math.min(1.05, targetPx / MARKER_GLYPH_PX))
 }
 
 type Tip = {
@@ -100,7 +146,7 @@ function snapToBarTime(tsSec: number, barTimes: number[], tfSec: number): number
   return best
 }
 
-export function ChartsTab({ data, visible = true, proMode = false }: Props) {
+export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = false }: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
   const navRef = useRef<HTMLDivElement>(null)
@@ -110,6 +156,7 @@ export function ChartsTab({ data, visible = true, proMode = false }: Props) {
   const [tip, setTip] = useState<Tip | null>(null)
   const [showSignals, setShowSignals] = useState(true)
   const [showTrades, setShowTrades] = useState(true)
+  const [showMtfLevels, setShowMtfLevels] = useState(true)
   const [showVwap, setShowVwap] = useState(false)
   const [vwapSource, setVwapSource] = useState<VwapSource>('hlc3')
   const [vwapSession, setVwapSession] = useState<VwapSession>('binance')
@@ -196,7 +243,9 @@ export function ChartsTab({ data, visible = true, proMode = false }: Props) {
       showSignals,
       showTrades,
       showVwap,
+      showMtfLevels,
       proMode,
+      proMtfMode,
       vwapSettings.source,
       vwapSettings.session,
       vwapSettings.bands.join(','),
@@ -348,14 +397,40 @@ export function ChartsTab({ data, visible = true, proMode = false }: Props) {
         const tagTp = short ? 'ST' : 'LT'
         const tagSl = short ? 'SSL' : 'LSL'
         const beLocked = Boolean(tr.be_moved)
-        const stopColor = beLocked ? '#f0b429' : '#f85149'
-        const stopTitle = beLocked
-          ? `BE ${tagSl} @ ${fmt2(tr.stop)}`
-          : `${tagSl} @ ${fmt2(tr.stop)}`
+        const path = Array.isArray(tr.trail_path) ? tr.trail_path : []
+        const hasTrail = path.length >= 2
+        const initStop = Number(tr.stop_init ?? path[0]?.stop ?? tr.stop)
+        const stopPx = hasTrail ? initStop : Number(tr.stop)
+        const stopColor = !hasTrail && beLocked ? '#f0b429' : '#f85149'
+        const stopTitle =
+          !hasTrail && beLocked
+            ? `BE ${tagSl} @ ${fmt2(stopPx)}`
+            : `${tagSl} @ ${fmt2(stopPx)}`
 
         addRay(t0, t1, tr.entry_price, '#f0b429', LineStyle.Solid, 2, `${tagIn} @ ${fmt2(tr.entry_price)}`)
-        addRay(t0, t1, tr.target, '#3fb950', LineStyle.Dashed, 1, `${tagTp} @ ${fmt2(tr.target)}`)
-        addRay(t0, t1, tr.stop, stopColor, LineStyle.Dashed, beLocked ? 2 : 1, stopTitle)
+        const far = (px: number) => !Number.isFinite(px) || Math.abs(px) >= 1e8
+        if (!far(tr.target)) {
+          addRay(t0, t1, tr.target, '#3fb950', LineStyle.Dashed, 1, `${tagTp} @ ${fmt2(tr.target)}`)
+        }
+        if (!far(stopPx)) {
+          addRay(t0, t1, stopPx, stopColor, LineStyle.Dashed, !hasTrail && beLocked ? 2 : 1, stopTitle)
+        }
+
+        if (hasTrail) {
+          const stairs = staircaseFromStops(
+            path.map((p) => ({ time: snap(p.time), value: Number(p.stop) })),
+          )
+          if (stairs.length >= 2) {
+            const trail = chart.addSeries(LineSeries, {
+              color: TRAIL_CYAN,
+              lineWidth: 1,
+              lineStyle: TRAIL_DOTTED,
+              lastValueVisible: false,
+              priceLineVisible: false,
+            })
+            trail.setData(stairs.map((p) => ({ time: p.time as never, value: p.value })))
+          }
+        }
 
         const exitPin = chart.addSeries(LineSeries, {
           color: '#a371f7',
@@ -367,13 +442,30 @@ export function ChartsTab({ data, visible = true, proMode = false }: Props) {
       })
     }
 
-    const markers: Array<{
-      time: never
-      position: 'aboveBar' | 'belowBar'
-      color: string
-      shape: 'arrowDown' | 'arrowUp' | 'circle'
-      text?: string
-    }> = []
+    // Pro-MTF: HTF invalidator levels drawn on the LTF chart (horizontal segments)
+    if (proMtfMode && showMtfLevels && data.mtf_bias?.length && barTimes.length) {
+      const events = data.mtf_bias
+      const lastT = barTimes[barTimes.length - 1]
+      for (let i = 0; i < events.length; i++) {
+        const e = events[i]
+        let t0 = snap(e.time)
+        let t1 = i + 1 < events.length ? snap(events[i + 1].time) : lastT
+        if (t1 < t0) t1 = t0
+        if (t1 === t0) {
+          const idx = barTimes.indexOf(t0)
+          t1 = idx >= 0 && idx + 1 < barTimes.length ? barTimes[idx + 1] : t0 + tfSec
+        }
+        const bull = String(e.mode).toLowerCase() === 'bull'
+        const color = bull ? '#58a6ff' : '#f85149'
+        const title = bull
+          ? `HTF Buy inv ${fmt2(e.invalid)}`
+          : `HTF Sell inv ${fmt2(e.invalid)}`
+        // Axis label only for the latest (active) invalidator
+        addRay(t0, t1, Number(e.invalid), color, LineStyle.Dashed, 2, title, i === events.length - 1)
+      }
+    }
+
+    const markers: ChartMarker[] = []
     const tradeLabels: MarkerLabel[] = []
 
     if (showSignals) {
@@ -419,6 +511,7 @@ export function ChartsTab({ data, visible = true, proMode = false }: Props) {
             color,
             shape: 'circle',
             text: tag || undefined,
+            kind: 'aggr',
           })
           if (tag) {
             tradeLabels.push({
@@ -441,6 +534,7 @@ export function ChartsTab({ data, visible = true, proMode = false }: Props) {
             position: sell ? 'aboveBar' : 'belowBar',
             color: sell ? '#f85149' : '#58a6ff',
             shape: 'circle',
+            kind: 'aggr',
           })
         }
       }
@@ -460,6 +554,7 @@ export function ChartsTab({ data, visible = true, proMode = false }: Props) {
           position: entryPos,
           color: entryColor,
           shape: short ? 'arrowDown' : 'arrowUp',
+          kind: 'trade',
         })
         tradeLabels.push({
           time: tEntry,
@@ -491,6 +586,7 @@ export function ChartsTab({ data, visible = true, proMode = false }: Props) {
           position: exitPos,
           color: exitColor,
           shape: 'circle',
+          kind: 'trade',
         })
         tradeLabels.push({
           time: tExit,
@@ -504,7 +600,26 @@ export function ChartsTab({ data, visible = true, proMode = false }: Props) {
     }
 
     markers.sort((a, b) => Number(a.time) - Number(b.time))
-    if (markers.length) createSeriesMarkers(candles, markers)
+    const markerApi = markers.length ? createSeriesMarkers(candles, []) : null
+    const applyMarkerSize = () => {
+      if (!markerApi) return
+      const r = chart.timeScale().getVisibleLogicalRange()
+      if (!r) return
+      const barPx = Math.max(1, (el.clientWidth - 56) / Math.max(1, r.to - r.from))
+      const showAggr = barPx >= AGGR_MIN_BAR_PX
+      markerApi.setMarkers(
+        markers
+          .filter((m) => m.kind !== 'aggr' || showAggr)
+          .map((m) => {
+            const { kind, text, ...rest } = m
+            return {
+              ...rest,
+              size: markerSizeFromBarPx(barPx, kind),
+              text: barPx >= 12 ? text : undefined,
+            }
+          }),
+      )
+    }
     const detachLabels = attachMarkerLabels(el, chart, candles, tradeLabels)
 
     const volPane = chart.addPane({ height: 90, minHeight: 28 })
@@ -595,6 +710,7 @@ export function ChartsTab({ data, visible = true, proMode = false }: Props) {
     const onRange = () => {
       const r = chart.timeScale().getVisibleLogicalRange()
       if (r) saveChartRange({ from: r.from, to: r.to })
+      applyMarkerSize()
     }
     chart.timeScale().subscribeVisibleLogicalRangeChange(onRange)
 
@@ -618,6 +734,7 @@ export function ChartsTab({ data, visible = true, proMode = false }: Props) {
       chart.timeScale().fitContent()
       padRightLogical(14)
     }
+    applyMarkerSize()
 
     const onResize = () => {
       chart.applyOptions({ width: el.clientWidth, height: el.clientHeight })
@@ -650,7 +767,9 @@ export function ChartsTab({ data, visible = true, proMode = false }: Props) {
     showSignals,
     showTrades,
     showVwap,
+    showMtfLevels,
     proMode,
+    proMtfMode,
     vwapSeries,
     vwapByTime,
     vwapSettings,
@@ -808,6 +927,19 @@ export function ChartsTab({ data, visible = true, proMode = false }: Props) {
             />
             Trades
           </label>
+          {proMtfMode && (
+            <label
+              className={`ov-toggle ${showMtfLevels ? 'on' : ''}`}
+              title="Base TF bias invalidator levels on this chart"
+            >
+              <input
+                type="checkbox"
+                checked={showMtfLevels}
+                onChange={(e) => setShowMtfLevels(e.target.checked)}
+              />
+              HTF Invalid
+            </label>
+          )}
           <label className={`ov-toggle ${showVwap ? 'on' : ''}`} title="Session VWAP ± std-dev bands">
             <input
               type="checkbox"
@@ -868,6 +1000,9 @@ export function ChartsTab({ data, visible = true, proMode = false }: Props) {
               <span className="lg">
                 <i style={{ background: '#f85149' }} /> Stop
               </span>
+              <span className="lg" title="Trail stop path when Trail is on">
+                <i style={{ background: TRAIL_CYAN }} /> Trail
+              </span>
             </>
           )}
           {showSignals &&
@@ -896,6 +1031,16 @@ export function ChartsTab({ data, visible = true, proMode = false }: Props) {
                 </span>
               </>
             ))}
+          {proMtfMode && showMtfLevels && (
+            <>
+              <span className="lg" title="Base TF Buy AGGR invalid (low)">
+                <i style={{ background: '#58a6ff', height: 2, width: 14 }} /> HTF Buy inv
+              </span>
+              <span className="lg" title="Base TF Sell AGGR invalid (high)">
+                <i style={{ background: '#f85149', height: 2, width: 14 }} /> HTF Sell inv
+              </span>
+            </>
+          )}
           {showVwap && (
             <>
               <span className="lg">

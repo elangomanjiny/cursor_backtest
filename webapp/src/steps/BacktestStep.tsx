@@ -37,6 +37,20 @@ function clampCostPct(n: number): number {
   return Math.min(5, Math.max(0.001, n))
 }
 
+const DIST_UNITS = ['range', 'tick', 'points', 'pct'] as const
+type DistUnit = (typeof DIST_UNITS)[number]
+
+function asDistUnit(raw: string): DistUnit | null {
+  return DIST_UNITS.includes(raw as DistUnit) ? (raw as DistUnit) : null
+}
+
+function unitLabel(u: DistUnit, rangeText: string): string {
+  if (u === 'range') return rangeText
+  if (u === 'tick') return 'Tick'
+  if (u === 'points') return 'Points'
+  return '%'
+}
+
 export function BacktestStep({
   params,
   onParams,
@@ -73,7 +87,16 @@ export function BacktestStep({
             <select
               value={params.tf}
               disabled={busy}
-              onChange={(e) => set('tf', Number(e.target.value))}
+              onChange={(e) => {
+                const tf = Number(e.target.value)
+                if (params.pro_mtf_mode && params.base_tf <= tf) {
+                  const nextBase =
+                    ([15, 30, 60] as const).find((x) => x > tf) ?? Math.max(tf * 2, 15)
+                  setMany({ tf, base_tf: nextBase })
+                } else {
+                  set('tf', tf)
+                }
+              }}
             >
               {[1, 3, 5, 15, 30, 60].map((tf) => (
                 <option key={tf} value={tf}>
@@ -99,82 +122,95 @@ export function BacktestStep({
               onChange={(e) => set('threshold', Number(e.target.value))}
             />
           </label>
-          <label title="How stop & target are measured from entry (Range = AGGR high/low × RR)">
-            SL/TP
-            <select
-              value={params.sl_tp_unit}
-              onChange={(e) => {
-                const u = e.target.value as StrategyParams['sl_tp_unit']
-                if (u === 'range' || u === 'tick' || u === 'points' || u === 'pct') {
-                  set('sl_tp_unit', u)
-                }
-              }}
-            >
-              <option value="range">Range×RR</option>
-              <option value="tick">Tick</option>
-              <option value="points">Points</option>
-              <option value="pct">%</option>
-            </select>
+          <label
+            className="check"
+            title="When off: no LSL/SSL or LT/ST from this box. Trail and BreakEven still work independently."
+          >
+            <input
+              type="checkbox"
+              checked={params.risk_on === 1}
+              onChange={(e) => set('risk_on', e.target.checked ? 1 : 0)}
+            />
+            Risk
           </label>
-          {params.sl_tp_unit === 'range' ? (
-            <label>
-              RR
-              <input
-                className="num-plain"
-                type="number"
-                inputMode="decimal"
-                step="0.01"
-                value={params.rr}
-                onChange={(e) => set('rr', Number(e.target.value))}
-              />
-            </label>
-          ) : (
+          {params.risk_on === 1 && (
             <>
-              <label
-                title={
-                  params.sl_tp_unit === 'tick'
-                    ? 'Stop loss in ticks'
-                    : params.sl_tp_unit === 'points'
-                      ? 'Stop loss in price points'
-                      : 'Stop loss as % of entry price'
-                }
-              >
-                SL
-                <input
-                  className="num-plain"
-                  type="number"
-                  inputMode="decimal"
-                  step={params.sl_tp_unit === 'pct' ? '0.01' : '1'}
-                  min={0}
-                  value={params.stop_loss}
-                  onChange={(e) => set('stop_loss', Number(e.target.value))}
-                />
+              <label title="How stop & target are measured from entry (Range = AGGR high/low × RR)">
+                SL/TP
+                <select
+                  value={params.sl_tp_unit}
+                  onChange={(e) => {
+                    const u = asDistUnit(e.target.value)
+                    if (u) set('sl_tp_unit', u)
+                  }}
+                >
+                  <option value="range">Range×RR</option>
+                  <option value="tick">Tick</option>
+                  <option value="points">Points</option>
+                  <option value="pct">%</option>
+                </select>
               </label>
-              <label
-                title={
-                  params.sl_tp_unit === 'tick'
-                    ? 'Take profit in ticks'
-                    : params.sl_tp_unit === 'points'
-                      ? 'Take profit in price points'
-                      : 'Take profit as % of entry price'
-                }
-              >
-                TP
-                <input
-                  className="num-plain"
-                  type="number"
-                  inputMode="decimal"
-                  step={params.sl_tp_unit === 'pct' ? '0.01' : '1'}
-                  min={0}
-                  value={params.take_profit}
-                  onChange={(e) => set('take_profit', Number(e.target.value))}
-                />
-              </label>
+              {params.sl_tp_unit === 'range' ? (
+                <label>
+                  RR
+                  <input
+                    className="num-plain"
+                    type="number"
+                    inputMode="decimal"
+                    step="0.01"
+                    value={params.rr}
+                    onChange={(e) => set('rr', Number(e.target.value))}
+                  />
+                </label>
+              ) : (
+                <>
+                  <label
+                    title={
+                      params.sl_tp_unit === 'tick'
+                        ? 'Stop loss in ticks'
+                        : params.sl_tp_unit === 'points'
+                          ? 'Stop loss in price points'
+                          : 'Stop loss as % of entry price'
+                    }
+                  >
+                    SL
+                    <input
+                      className="num-plain"
+                      type="number"
+                      inputMode="decimal"
+                      step={params.sl_tp_unit === 'pct' ? '0.01' : '1'}
+                      min={0}
+                      value={params.stop_loss}
+                      onChange={(e) => set('stop_loss', Number(e.target.value))}
+                    />
+                  </label>
+                  <label
+                    title={
+                      params.sl_tp_unit === 'tick'
+                        ? 'Take profit in ticks'
+                        : params.sl_tp_unit === 'points'
+                          ? 'Take profit in price points'
+                          : 'Take profit as % of entry price'
+                    }
+                  >
+                    TP
+                    <input
+                      className="num-plain"
+                      type="number"
+                      inputMode="decimal"
+                      step={params.sl_tp_unit === 'pct' ? '0.01' : '1'}
+                      min={0}
+                      value={params.take_profit}
+                      onChange={(e) => set('take_profit', Number(e.target.value))}
+                    />
+                  </label>
+                </>
+              )}
             </>
           )}
           <label
             className="check"
-            title="Trail stop by the SL distance as price moves in your favor"
+            title="Trail a stop by Trail distance as price moves in your favor. Independent of Risk."
           >
             <input
               type="checkbox"
@@ -183,6 +219,39 @@ export function BacktestStep({
             />
             Trail
           </label>
+          {params.trail_stop === 1 && (
+            <>
+              <label title="Trail offset unit. Range = AGGR high/low gap.">
+                Trail unit
+                <select
+                  value={params.trail_unit}
+                  onChange={(e) => {
+                    const u = asDistUnit(e.target.value)
+                    if (u) set('trail_unit', u)
+                  }}
+                >
+                  <option value="range">Range</option>
+                  <option value="tick">Tick</option>
+                  <option value="points">Points</option>
+                  <option value="pct">%</option>
+                </select>
+              </label>
+              {params.trail_unit !== 'range' && (
+                <label title={`Trail distance in ${unitLabel(params.trail_unit, 'Range')}`}>
+                  Trail
+                  <input
+                    className="num-plain"
+                    type="number"
+                    inputMode="decimal"
+                    step={params.trail_unit === 'pct' ? '0.01' : '1'}
+                    min={0}
+                    value={params.trail_value}
+                    onChange={(e) => set('trail_value', Number(e.target.value))}
+                  />
+                </label>
+              )}
+            </>
+          )}
           <label>
             Vol
             <input
@@ -224,35 +293,76 @@ export function BacktestStep({
               title="Fee as % of notional per side (entry + exit). Example: 0.04 = 0.04%"
             />
           </label>
-          <label title="Directional = baseline. Non-Directional = ORB+reverse. Pro = Lo/Sh/Se/Co + VWAP±Nσ.">
+          <label title="Directional = baseline. Non-Directional = ORB+reverse. Pro = VWAP tags. Pro-MTF = HTF bias + LTF Directional.">
             Strategy
             <select
               value={
-                params.pro_mode
-                  ? 'pro'
-                  : params.wait_and_trade
-                    ? 'non_directional'
-                    : 'directional'
+                params.pro_mtf_mode
+                  ? 'pro_mtf'
+                  : params.pro_mode
+                    ? 'pro'
+                    : params.wait_and_trade
+                      ? 'non_directional'
+                      : 'directional'
               }
               onChange={(e) => {
                 const v = e.target.value
                 const nd = v === 'non_directional'
                 const pro = v === 'pro'
+                const mtf = v === 'pro_mtf'
                 setMany({
                   wait_and_trade: nd,
                   pro_mode: pro,
+                  pro_mtf_mode: mtf,
                   re_entry: 0,
                   stop_to_be: 0,
-                  ...(nd ? { break_even: 0 } : {}),
+                  ...(mtf && params.base_tf <= params.tf
+                    ? {
+                        base_tf: ([15, 30, 60] as const).find((x) => x > params.tf) ?? 15,
+                      }
+                    : {}),
                 })
               }}
             >
               <option value="directional">Directional</option>
               <option value="non_directional">Non-Directional</option>
               <option value="pro">Pro</option>
+              <option value="pro_mtf">Pro-MTF</option>
             </select>
           </label>
-          {params.pro_mode && (
+          {params.pro_mtf_mode && (
+            <>
+              <label title="Higher timeframe for bull/bear AGGR bias (must be > chart TF)">
+                Base TF
+                <select
+                  value={params.base_tf}
+                  disabled={busy}
+                  onChange={(e) => set('base_tf', Number(e.target.value))}
+                >
+                  {[3, 5, 15, 30, 60]
+                    .filter((m) => m > params.tf)
+                    .map((m) => (
+                      <option key={m} value={m}>
+                        {m}m
+                      </option>
+                    ))}
+                </select>
+              </label>
+              <label title="AGGR |Δ%| threshold on the base timeframe">
+                Base Thr%
+                <input
+                  className="num-plain"
+                  type="number"
+                  inputMode="decimal"
+                  step="1"
+                  min={0}
+                  value={params.base_threshold}
+                  onChange={(e) => set('base_threshold', Number(e.target.value))}
+                />
+              </label>
+            </>
+          )}
+          {params.pro_mode && !params.pro_mtf_mode && (
             <label title="Pro qualifier: AGGR candle must be outside Binance VWAP ±Nσ (05:30 IST)">
               VWAP σ
               <select
@@ -266,39 +376,66 @@ export function BacktestStep({
               </select>
             </label>
           )}
-          {!params.wait_and_trade && (
+          <label
+            title="Arm when price travels BE value from entry; lock stop at BE% of that distance. Independent of Risk. Hit after lock = LB/SB."
+          >
+            <input
+              type="checkbox"
+              checked={params.break_even === 1}
+              onChange={(e) => set('break_even', e.target.checked ? 1 : 0)}
+            />
+            BreakEven
+          </label>
+          {params.break_even === 1 && (
             <>
-              <label
-                title="Arm at 1× range from entry; move stop once to BE% × range (lock). TP still closes as LT/ST."
-              >
-                <input
-                  type="checkbox"
-                  checked={params.break_even === 1}
-                  onChange={(e) => set('break_even', e.target.checked ? 1 : 0)}
-                />
-                BreakEven
+              <label title="BE arm-distance unit. Range = AGGR gap (1R).">
+                BE unit
+                <select
+                  value={params.be_unit}
+                  onChange={(e) => {
+                    const u = asDistUnit(e.target.value)
+                    if (u) set('be_unit', u)
+                  }}
+                >
+                  <option value="range">Range</option>
+                  <option value="tick">Tick</option>
+                  <option value="points">Points</option>
+                  <option value="pct">%</option>
+                </select>
               </label>
-              {params.break_even === 1 && (
-                <label title="BE lock as % of signal range from entry (default 50)">
-                  BE%
+              {params.be_unit !== 'range' && (
+                <label title="Distance from entry that arms BreakEven">
+                  BE
                   <input
-                    className="num-plain cost"
+                    className="num-plain"
                     type="number"
                     inputMode="decimal"
-                    min={1}
-                    max={100}
-                    step={5}
-                    value={params.break_even_pct}
-                    onChange={(e) => set('break_even_pct', Number(e.target.value))}
-                    onBlur={() =>
-                      set(
-                        'break_even_pct',
-                        Math.min(100, Math.max(1, Number(params.break_even_pct) || 50)),
-                      )
-                    }
+                    step={params.be_unit === 'pct' ? '0.01' : '1'}
+                    min={0}
+                    value={params.be_value}
+                    onChange={(e) => set('be_value', Number(e.target.value))}
                   />
                 </label>
               )}
+              <label title="BE lock as % of arm distance from entry (default 50)">
+                BE%
+                <input
+                  className="num-plain cost"
+                  type="number"
+                  inputMode="decimal"
+                  min={1}
+                  max={100}
+                  step={5}
+                  value={params.break_even_pct}
+                  onChange={(e) => set('break_even_pct', Number(e.target.value))}
+                  onBlur={() =>
+                    set(
+                      'break_even_pct',
+                      Math.min(100, Math.max(1, Number(params.break_even_pct) || 50)),
+                    )
+                  }
+                />
+              </label>
             </>
           )}
           <label title="Long / Short / Both sides allowed">
@@ -389,7 +526,12 @@ export function BacktestStep({
           )}
         </div>
         <div className="chart-fill">
-          <ChartsTab data={data} visible={view === 'charts'} proMode={Boolean(params.pro_mode)} />
+          <ChartsTab
+            data={data}
+            visible={view === 'charts'}
+            proMode={Boolean(params.pro_mode)}
+            proMtfMode={Boolean(params.pro_mtf_mode)}
+          />
           {view === 'trades' && <TradesTab data={data} onOpenOnChart={() => onView('charts')} />}
           <EquityTab data={data} visible={view === 'equity'} />
           <PerformanceTab data={data} visible={view === 'performance'} />

@@ -16,6 +16,8 @@ PARQUET = ROOT / "data" / "parquet"
 LOGS = ROOT / "logs"
 
 ENGINE_ID = "volume_delta_hybrid"
+# Placeholder SL/TP when Risk is off (never plotted / never filled unless Trail/BE arms a real stop)
+FAR_LEVEL = 1e12
 
 
 @dataclass
@@ -43,6 +45,10 @@ class Trade:
     entry_tag: str = "LE"
     # Directional BreakEven: stop was moved to 0.5R lock
     be_moved: bool = False
+    # Initial stop at entry (before trail / BE)
+    stop_init: float = 0.0
+    # Compact trail staircase [{time, stop}] when Trail is on
+    trail_path: list | None = None
 
 
 def _excursions(active: dict[str, Any], h: float, l: float) -> None:
@@ -98,6 +104,29 @@ def _offset_from_entry(entry: float, value: float, unit: str, tick_size: float) 
     if unit == "pct":
         return abs(float(entry)) * (v / 100.0)
     return 0.0
+
+
+def _unit_offset(
+    entry: float,
+    value: float,
+    unit: str,
+    tick_size: float,
+    *,
+    range_: float = 0.0,
+    range_stop: float | None = None,
+) -> float:
+    """Distance in price for Risk / Trail / BE (Range = AGGR gap or candle range)."""
+    u = _normalize_sl_tp_unit(unit)
+    ts = max(float(tick_size), 1e-12)
+    if u == "range":
+        if range_stop is not None:
+            d = abs(float(entry) - float(range_stop))
+            if d > ts * 0.5:
+                return d
+        rng = abs(float(range_))
+        return rng if rng > ts * 0.5 else ts
+    d = _offset_from_entry(entry, value, u, ts)
+    return d if d > 0 else ts
 
 
 def resolve_stop_target(
@@ -181,6 +210,8 @@ def _make_trade(
         fee=fee,
         entry_tag=tag,
         be_moved=bool(active.get("be_moved")),
+        stop_init=float(active.get("stop_init") or active.get("stop") or 0.0),
+        trail_path=_finalize_trail_path(active, ot),
     )
 
 
@@ -221,6 +252,68 @@ class BacktestResult:
     break_even_pct: float = 50.0
     pro_mode: int = 0
     pro_vwap_sigma: float = 2.0
+    pro_mtf_mode: int = 0
+    base_tf_minutes: int = 0
+    base_threshold: float = 0.0
+    # Pro-MTF: HTF bias timeline for chart overlay (time ISO IST, mode, invalid)
+    mtf_bias: list[dict[str, Any]] | None = None
+
+
+def _as_utc_ts(ts: datetime | pd.Timestamp) -> pd.Timestamp:
+    t = pd.Timestamp(ts)
+    if t.tzinfo is None:
+        return t.tz_localize("UTC")
+    return t.tz_convert("UTC")
+
+
+def build_mtf_bias_events(
+    base_bars: pd.DataFrame,
+    *,
+    base_tf_minutes: int,
+    base_threshold: float,
+) -> list[tuple[pd.Timestamp, str, float]]:
+    """
+    HTF AGGR → bias timeline.
+    Each event (active_from_utc, mode, invalid) becomes active at the *close*
+    of the HTF bar (open + base_tf). mode is 'bull' or 'bear'; invalid is
+    AGGR low (bull) or high (bear). Bias persists until the next opposite/same
+    refresh (latest same-side AGGR refreshes invalid).
+    """
+    if base_bars is None or base_bars.empty:
+        return []
+    df = base_bars.copy()
+    df["open_time"] = pd.to_datetime(df["open_time"], utc=True)
+    df = df.sort_values("open_time")
+    thr = abs(float(base_threshold))
+    tf_delta = timedelta(minutes=int(base_tf_minutes))
+    out: list[tuple[pd.Timestamp, str, float]] = []
+    for _, row in df.iterrows():
+        dlt = float(row.get("delta_pct", 0.0) or 0.0)
+        ot = _as_utc_ts(row["open_time"])
+        active_from = ot + tf_delta
+        if dlt >= thr:
+            out.append((active_from, "bull", float(row["low"])))
+        elif dlt <= -thr:
+            out.append((active_from, "bear", float(row["high"])))
+    return out
+
+
+def mtf_bias_at(
+    events: list[tuple[pd.Timestamp, str, float]],
+    ts: datetime | pd.Timestamp,
+) -> tuple[str | None, float | None]:
+    """Latest HTF bias at/before ts. (None, None) if no HTF AGGR yet."""
+    if not events:
+        return None, None
+    t = _as_utc_ts(ts)
+    mode: str | None = None
+    inv: float | None = None
+    for active_from, m, level in events:
+        if active_from <= t:
+            mode, inv = m, float(level)
+        else:
+            break
+    return mode, inv
 
 
 def _to_ist(ts: pd.Timestamp | datetime) -> datetime:
@@ -455,13 +548,6 @@ def _pro_short_bias(tag: str) -> bool:
     return tag in ("Sh", "Se")
 
 
-def _as_utc_ts(ts: datetime | pd.Timestamp) -> pd.Timestamp:
-    t = pd.Timestamp(ts)
-    if t.tzinfo is None:
-        return t.tz_localize("UTC")
-    return t.tz_convert("UTC")
-
-
 class _TickIndex:
     """Sorted aggTrade stream for post-entry fill tracking."""
 
@@ -583,6 +669,60 @@ def _prepare_ticks(
     return _TickIndex(df)
 
 
+def _record_trail(active: dict[str, Any], ts: datetime | pd.Timestamp, stop: float) -> None:
+    """Append a trail vertex only when the stop actually tightens."""
+    if not active.get("trail_stop"):
+        return
+    st = float(stop)
+    if abs(st) >= FAR_LEVEL / 10.0:
+        return
+    path: list[tuple[datetime, float]] = active.setdefault("trail_path", [])
+    t = _as_utc_ts(ts).to_pydatetime()
+    if path:
+        last_t, last_p = path[-1]
+        if abs(st - last_p) < 1e-9:
+            return
+        if int(t.timestamp()) == int(_as_utc_ts(last_t).timestamp()):
+            path[-1] = (t, st)
+            return
+    path.append((t, st))
+
+
+def _finalize_trail_path(
+    active: dict[str, Any], exit_ts: datetime
+) -> list[dict[str, Any]] | None:
+    if not active.get("trail_stop"):
+        return None
+    _record_trail(active, exit_ts, float(active.get("stop") or 0.0))
+    raw: list[tuple[datetime, float]] = list(active.get("trail_path") or [])
+    if not raw:
+        return None
+    if len(raw) == 1:
+        raw.append((_as_utc_ts(exit_ts).to_pydatetime(), float(raw[0][1])))
+    tf_sec = max(int(active.get("trail_tf_sec") or 60), 1)
+    origin = int(_as_utc_ts(active["entry_time"]).timestamp())
+    buckets: dict[int, float] = {}
+    order: list[int] = []
+    for t, p in raw:
+        ts = int(_as_utc_ts(t).timestamp())
+        b = origin + ((ts - origin) // tf_sec) * tf_sec
+        if b not in buckets:
+            order.append(b)
+        buckets[b] = float(p)
+    last_ts = int(_as_utc_ts(exit_ts).timestamp())
+    last_p = float(active.get("stop") or 0.0)
+    if last_ts not in buckets:
+        order.append(last_ts)
+    buckets[last_ts] = last_p
+    return [
+        {
+            "time": _to_ist(datetime.fromtimestamp(b, tz=timezone.utc)).isoformat(),
+            "stop": round(float(buckets[b]), 4),
+        }
+        for b in order
+    ]
+
+
 def _scan_ticks_until(
     book: _TickIndex,
     i: int,
@@ -638,13 +778,26 @@ def _scan_ticks_until(
                 if trailed > stop:
                     active["stop"] = trailed
                     stop = trailed
+                    active["use_stop"] = True
+                    _record_trail(active, ts, stop)
             else:
                 trailed = px + off
                 if trailed < stop:
                     active["stop"] = trailed
                     stop = trailed
+                    active["use_stop"] = True
+                    _record_trail(active, ts, stop)
 
-        # Directional BE: arm at +1R / -1R, lock stop at BE%×R (once)
+        # Pro-MTF: force flat if price trades through HTF invalid level
+        mtf_inv = active.get("mtf_invalid")
+        if mtf_inv is not None:
+            inv = float(mtf_inv)
+            if is_long and px <= inv:
+                return i + 1, ts, inv, "LMTF"
+            if (not is_long) and px >= inv:
+                return i + 1, ts, inv, "SMTF"
+
+        # BreakEven: arm at be_offset, lock at BE% × that distance (once)
         if active.get("be_enabled") and not active.get("be_moved"):
             arm = float(active["be_arm"])
             lock = float(active["be_lock"])
@@ -652,29 +805,34 @@ def _scan_ticks_until(
             if armed:
                 active["stop"] = lock
                 active["be_moved"] = True
+                active["use_stop"] = True
                 pe = active.setdefault("pending_events", [])
                 pe.append(f"BE@{lock:.2f}")
                 stop = lock
+                _record_trail(active, ts, stop)
+
+        use_stop = bool(active.get("use_stop"))
+        use_target = bool(active.get("use_target"))
+        flip_px = active.get("flip_px")
 
         if is_long:
-            if px <= stop:
-                if active.get("reverse_on_stop", True):
-                    return i + 1, ts, stop, "LR"  # reversing the long
-                # After BreakEven lock, stop fill is LB (not a hard LSL)
+            if use_stop and px <= stop:
                 if active.get("be_moved"):
                     return i + 1, ts, stop, "LB"
                 return i + 1, ts, stop, "LSL"
-            if px >= target:
+            if use_target and px >= target:
                 return i + 1, ts, target, "LT"
+            if flip_px is not None and px <= float(flip_px):
+                return i + 1, ts, float(flip_px), "LR"
         else:
-            if px >= stop:
-                if active.get("reverse_on_stop", True):
-                    return i + 1, ts, stop, "SR"  # reversing the short
+            if use_stop and px >= stop:
                 if active.get("be_moved"):
                     return i + 1, ts, stop, "SB"
                 return i + 1, ts, stop, "SSL"
-            if px <= target:
+            if use_target and px <= target:
                 return i + 1, ts, target, "ST"
+            if flip_px is not None and px >= float(flip_px):
+                return i + 1, ts, float(flip_px), "SR"
         i += 1
 
     return i, None, None, None
@@ -708,6 +866,15 @@ def run_backtest(
     stop_loss: float = 50.0,
     take_profit: float = 100.0,
     trail_stop: int = 0,
+    risk_on: int = 1,
+    trail_unit: str = "range",
+    trail_value: float = 0.0,
+    be_unit: str = "range",
+    be_value: float = 0.0,
+    pro_mtf_mode: bool = False,
+    base_tf_minutes: int = 15,
+    base_threshold: float = 30.0,
+    base_bars: pd.DataFrame | None = None,
 ) -> BacktestResult:
     """
     Hybrid engine: bar AGGR/entry levels + tick SL/TP/session fills.
@@ -723,25 +890,30 @@ def run_backtest(
 
     Directional (wait_and_trade=False, pro_mode=False) — Baseline:
       Buy AGGR → long only; Sell AGGR → short only; next-bar open
-      SL/TP: Range×RR (legacy) or fixed Tick / Points / % from entry
-      Optional trailing stop; optional BreakEven (range mode)
-      No reverse / AGGR trail / re-entry
+      SL/TP optional (Risk On/Off). Trail and BreakEven have independent units.
+      Opposite AGGR reverses: next-bar open. Tags: LR = long reversed → short.
 
-    Non-Directional (wait_and_trade=True) — ORB + Reverse:
-      Any AGGR → shared range; strict crossover of high/low for LE/SE
-      (prev below high then px≥high, or prev above low then px≤low).
-      SL/TP same units as Directional; optional trail; stop hit → LR/SR reverse
-      (AGGR stop-tighten only in range mode when trail is off)
+    Non-Directional (wait_and_trade=True) — ORB first entry + opposite-AGGR reverse:
+      Any AGGR → shared range; crossover of high/low for LE/SE.
+      Reverse on opposite AGGR high/low fill (not on stop). Stop is a hard LSL/SSL.
 
     Pro (pro_mode=True; wait_and_trade ignored/forced off):
       Classify AGGR as Lo/Sh/Se/Co vs prior close (LTP).
       Qualifier: candle must be outside Binance VWAP ±Nσ (05:30 IST session; N=1/2/3).
       Long entries from Lo|Co; Short from Sh|Se; next-bar open (Directional-style).
       Optional BreakEven; no reverse / ORB trail.
+
+    Pro-MTF (pro_mtf_mode=True):
+      Base TF AGGR sets bull/bear bias + invalid level (low/high); persists across days.
+      Exec TF (chart) runs Directional entries only with the bias (bull→long, bear→short).
+      Through invalid → cancel pending + force-exit (LMTF/SMTF). No VWAP.
     """
-    pro = bool(pro_mode)
-    if pro:
+    mtf = bool(pro_mtf_mode)
+    pro = bool(pro_mode) and not mtf
+    if pro or mtf:
         wait_and_trade = False
+    if mtf:
+        pro = False
     sigma_n = float(pro_vwap_sigma) if float(pro_vwap_sigma or 0) > 0 else 2.0
     if sigma_n not in (1.0, 2.0, 3.0):
         # snap to nearest of 1/2/3
@@ -754,19 +926,41 @@ def run_backtest(
     # Pro features: forced off for now
     re_en = 0
     stobe = 0
-    allow_reverse = bool(wait_and_trade) and not pro
+    # Stop is a hard exit. Reverse is opposite-AGGR (Dir + Non-Dir only).
+    allow_reverse = False
     sl_unit = _normalize_sl_tp_unit(sl_tp_unit)
     tick_sz = symbol_tick_size(symbol)
     trail_on = 1 if int(trail_stop or 0) else 0
+    risk_live = 1 if int(risk_on if risk_on is not None else 1) else 0
+    trail_u = _normalize_sl_tp_unit(trail_unit)
+    trail_val = float(trail_value if trail_value is not None else 0.0)
+    be_u = _normalize_sl_tp_unit(be_unit)
+    be_val = float(be_value if be_value is not None else 0.0)
     sl_val = float(stop_loss if stop_loss is not None else 50.0)
     tp_val = float(take_profit if take_profit is not None else 100.0)
-    # AGGR trail only for Non-Di range mode without optional trail-stop
-    allow_trail = bool(wait_and_trade) and not pro and sl_unit == "range" and not trail_on
-    # BreakEven: Directional + Pro; meaningful for range (1R) or fixed (1×SL)
-    be_on = (pro or not wait_and_trade) and (1 if int(break_even or 0) else 0)
+    allow_trail = False
+    aggr_reverse = (not pro) and (not mtf)
+    # BreakEven: all modes; distance from be_unit / be_value (Range = AGGR)
+    be_on = 1 if int(break_even or 0) else 0
     be_frac = max(0.01, min(1.0, float(break_even_pct if break_even_pct is not None else 50) / 100.0))
     tf_delta = timedelta(minutes=int(tf_minutes))
     hour_set = _parse_allowed_hours(allowed_entry_hours)
+
+    base_tf = int(base_tf_minutes or 15)
+    base_thr = float(base_threshold if base_threshold is not None else 30.0)
+    mtf_events: list[tuple[pd.Timestamp, str, float]] = []
+    if mtf:
+        if base_tf <= int(tf_minutes):
+            raise ValueError(
+                f"Pro-MTF requires Base TF ({base_tf}m) strictly greater than chart TF ({tf_minutes}m)."
+            )
+        if base_bars is None or getattr(base_bars, "empty", True):
+            raise ValueError(
+                f"Pro-MTF needs base_bars for {base_tf}m. Load/build that timeframe first."
+            )
+        mtf_events = build_mtf_bias_events(
+            base_bars, base_tf_minutes=base_tf, base_threshold=base_thr
+        )
 
     df = bars.copy()
     df["open_time"] = pd.to_datetime(df["open_time"], utc=True)
@@ -802,6 +996,7 @@ def run_backtest(
     short_setup = None
     orb: dict[str, Any] | None = None  # Wait=true shared ORB range
     pending_reentry: dict[str, Any] | None = None
+    aggr_flip: dict[str, Any] | None = None  # Directional: reverse at next bar open
     active = None
     trades: list[Trade] = []
     aggressive: list[Aggressive] = []
@@ -903,17 +1098,23 @@ def run_backtest(
     ) -> dict[str, Any]:
         entry = _apply_slip(raw, is_long=is_long, is_entry=True, slip_pct=slip)
         rng = float(range_)
-        # R distance for BreakEven: prefer stop distance, else AGGR range
-        r_dist = abs(float(raw) - float(stop))
-        if r_dist <= 0:
-            r_dist = abs(rng) if rng > 0 else tick_sz
+        range_stop = float(signal_low if is_long else signal_high)
+        be_off = _unit_offset(
+            raw, be_val, be_u, tick_sz, range_=rng, range_stop=range_stop
+        )
         if is_long:
-            be_arm = float(raw) + r_dist
-            be_lock = float(raw) + be_frac * r_dist
+            be_arm = float(raw) + be_off
+            be_lock = float(raw) + be_frac * be_off
         else:
-            be_arm = float(raw) - r_dist
-            be_lock = float(raw) - be_frac * r_dist
-        toff = float(trail_offset) if trail_offset > 0 else r_dist
+            be_arm = float(raw) - be_off
+            be_lock = float(raw) - be_frac * be_off
+        toff = float(trail_offset) if float(trail_offset or 0) > 0 else (
+            _unit_offset(raw, trail_val, trail_u, tick_sz, range_=rng, range_stop=range_stop)
+            if trail_on
+            else 0.0
+        )
+        use_stop = bool(risk_live or (trail_on and toff > 0))
+        use_target = bool(risk_live)
         return {
             "is_long": is_long,
             "entry": entry,
@@ -929,19 +1130,30 @@ def run_backtest(
             "signal_low": float(signal_low),
             "signal_delta_pct": float(signal_delta_pct),
             "range": rng,
-            "reverse_on_stop": allow_reverse,
+            "reverse_on_stop": False,
             "rev_high": float(signal_high),
             "rev_low": float(signal_low),
             "rev_range": rng,
             "rev_signal_time": signal_time,
             "rev_delta_pct": float(signal_delta_pct),
             "rev_side": rev_side,
-            "be_enabled": bool(be_on),
+            "be_enabled": bool(be_on) and be_off > 0,
             "be_moved": False,
             "be_arm": be_arm,
             "be_lock": be_lock,
             "trail_stop": bool(trail_on),
             "trail_offset": toff,
+            "trail_tf_sec": max(int(tf_minutes), 1) * 60,
+            "stop_init": float(stop),
+            "trail_path": (
+                [(entry_time, float(stop))]
+                if trail_on and abs(float(stop)) < FAR_LEVEL / 10.0
+                else []
+            ),
+            "use_stop": use_stop,
+            "use_target": use_target,
+            "flip_px": None,
+            "mtf_invalid": None,
             "pending_events": [],
         }
 
@@ -952,17 +1164,34 @@ def run_backtest(
         range_: float,
         range_stop: float | None,
     ) -> tuple[float, float, float]:
-        return resolve_stop_target(
-            raw_entry=raw,
-            is_long=is_long,
-            unit=sl_unit,
-            stop_loss=sl_val,
-            take_profit=tp_val,
-            rr=rr,
-            range_=range_,
-            range_stop=range_stop,
-            tick_size=tick_sz,
+        far = FAR_LEVEL
+        toff = (
+            _unit_offset(
+                raw, trail_val, trail_u, tick_sz, range_=range_, range_stop=range_stop
+            )
+            if trail_on
+            else 0.0
         )
+        if risk_live:
+            stop, target, sl_off = resolve_stop_target(
+                raw_entry=raw,
+                is_long=is_long,
+                unit=sl_unit,
+                stop_loss=sl_val,
+                take_profit=tp_val,
+                rr=rr,
+                range_=range_,
+                range_stop=range_stop,
+                tick_size=tick_sz,
+            )
+            return stop, target, toff if trail_on else sl_off
+        if trail_on and toff > 0:
+            if is_long:
+                return raw - toff, raw + far, toff
+            return raw + toff, raw - far, toff
+        if is_long:
+            return raw - far, raw + far, toff
+        return raw + far, raw - far, toff
 
     def _open_from_orb(
         *,
@@ -1040,6 +1269,54 @@ def run_backtest(
         )
         pending_reentry = None
         events.append(f"{tag}@{active['entry']:.2f}")
+
+    def _stamp_rev_aggr(
+        hi: float,
+        lo: float,
+        rng: float,
+        sig_t: datetime,
+        dlt: float,
+        side: str,
+    ) -> None:
+        if active is None:
+            return
+        active["rev_high"] = float(hi)
+        active["rev_low"] = float(lo)
+        active["rev_range"] = float(rng)
+        active["rev_signal_time"] = sig_t
+        active["rev_delta_pct"] = float(dlt)
+        active["rev_side"] = side
+
+    def _arm_flip_from_aggr(
+        side: str,
+        hi: float,
+        lo: float,
+        rng: float,
+        sig_t: datetime,
+        dlt: float,
+        events: list[str],
+    ) -> None:
+        """Dir: reverse at next bar open. Non-Dir: fill when price takes opposite AGGR H/L."""
+        nonlocal aggr_flip, active
+        if active is None or not aggr_reverse:
+            return
+        is_long = bool(active["is_long"])
+        opposite = (is_long and side == "Sell") or ((not is_long) and side == "Buy")
+        if opposite:
+            _stamp_rev_aggr(hi, lo, rng, sig_t, dlt, side)
+            if wait_and_trade:
+                active["flip_px"] = float(lo) if is_long else float(hi)
+                events.append(f"FLIP-ARM@{active['flip_px']:.2f}")
+            else:
+                aggr_flip = {"reason": "LR" if is_long else "SR"}
+                events.append("FLIP-ARM-NEXT-OPEN")
+            return
+        if wait_and_trade and active.get("flip_px") is not None:
+            events.append("FLIP-CANCEL")
+            active["flip_px"] = None
+        if aggr_flip is not None:
+            events.append("FLIP-CANCEL")
+            aggr_flip = None
 
     def _handle_exit(
         x_ts: datetime,
@@ -1138,8 +1415,38 @@ def run_backtest(
         events: list[str] = []
         closed_this_bar = False
 
+        mtf_mode, mtf_inv = (None, None)
+        if mtf:
+            mtf_mode, mtf_inv = mtf_bias_at(mtf_events, ot)
+            if active is not None:
+                active["mtf_invalid"] = mtf_inv
+                # Bias flipped against the open side → force flat at bar open
+                if active["is_long"] and mtf_mode != "bull":
+                    closed_this_bar = _handle_exit(ot, o, "LMTF", events, until=bar_end)
+                elif (not active["is_long"]) and mtf_mode != "bear":
+                    closed_this_bar = _handle_exit(ot, o, "SMTF", events, until=bar_end)
+
+        in_win = _in_session(ot, entry_after, entry_before, hour_set)
+        tick_managed = False
+        # Directional: opposite-AGGR reverse fills at this bar's open (same as LE/SE)
+        if (
+            aggr_reverse
+            and not wait_and_trade
+            and aggr_flip is not None
+            and active is not None
+        ):
+            want = str(aggr_flip.get("reason") or "")
+            side_ok = (want == "LR" and active["is_long"]) or (
+                want == "SR" and not active["is_long"]
+            )
+            if side_ok and in_win:
+                tick_i = book.seek(ot, tick_i)
+                closed_this_bar = _handle_exit(ot, o, want, events, until=bar_end)
+                tick_managed = True
+            aggr_flip = None
+
         # --- manage open on ticks through this bar ---
-        if active is not None:
+        if active is not None and not tick_managed:
             tick_i, x_ts, x_px, reason = _scan_ticks_until(
                 book,
                 tick_i,
@@ -1154,7 +1461,6 @@ def run_backtest(
                 _flush_be_events(events)
 
         entered = False
-        in_win = _in_session(ot, entry_after, entry_before, hour_set)
 
         if wait_and_trade:
             # ORB: advance eligibility; try re-entry then dual-side break
@@ -1248,33 +1554,56 @@ def run_backtest(
                         )
                         entered = True
         else:
-            # Directional Wait=false: next eligible bar open (skip if ticks already used this bar)
+            # Directional / Pro-MTF: next eligible bar open
+            mtf_long_ok = (not mtf) or (mtf_mode == "bull")
+            mtf_short_ok = (not mtf) or (mtf_mode == "bear")
+
             if active is None:
-                # Age setups; range-mode only: drop if price already traded through AGGR stop
-                if sl_unit == "range":
-                    if long_setup is not None and long_setup["signal_time"] < ot:
-                        long_setup["bars"] += 1
-                        stop_lvl = float(long_setup["low"])
-                        if o <= stop_lvl or l <= stop_lvl:
-                            events.append(f"LE-SETUP-INVALID@{stop_lvl:.2f}")
-                            long_setup = None
-                    if short_setup is not None and short_setup["signal_time"] < ot:
-                        short_setup["bars"] += 1
-                        stop_lvl = float(short_setup["high"])
-                        if o >= stop_lvl or h >= stop_lvl:
-                            events.append(f"SE-SETUP-INVALID@{stop_lvl:.2f}")
-                            short_setup = None
-                else:
-                    if long_setup is not None and long_setup["signal_time"] < ot:
-                        long_setup["bars"] += 1
-                    if short_setup is not None and short_setup["signal_time"] < ot:
-                        short_setup["bars"] += 1
+                # Age setups; drop if price traded through AGGR stop and/or HTF invalid
+                if long_setup is not None and long_setup["signal_time"] < ot:
+                    long_setup["bars"] += 1
+                    stop_lvl = float(long_setup["low"])
+                    hit_setup = (
+                        bool(risk_live)
+                        and sl_unit == "range"
+                        and (o <= stop_lvl or l <= stop_lvl)
+                    )
+                    hit_mtf = mtf and mtf_inv is not None and (o <= float(mtf_inv) or l <= float(mtf_inv))
+                    if hit_setup or hit_mtf:
+                        lvl = float(mtf_inv) if hit_mtf and mtf_inv is not None else stop_lvl
+                        events.append(f"LE-SETUP-INVALID@{lvl:.2f}")
+                        long_setup = None
+                    if mtf and not mtf_long_ok:
+                        events.append("LE-SETUP-CANCEL-MTF")
+                        long_setup = None
+                if short_setup is not None and short_setup["signal_time"] < ot:
+                    short_setup["bars"] += 1
+                    stop_lvl = float(short_setup["high"])
+                    hit_setup = (
+                        bool(risk_live)
+                        and sl_unit == "range"
+                        and (o >= stop_lvl or h >= stop_lvl)
+                    )
+                    hit_mtf = mtf and mtf_inv is not None and (o >= float(mtf_inv) or h >= float(mtf_inv))
+                    if hit_setup or hit_mtf:
+                        lvl = float(mtf_inv) if hit_mtf and mtf_inv is not None else stop_lvl
+                        events.append(f"SE-SETUP-INVALID@{lvl:.2f}")
+                        short_setup = None
+                    if mtf and not mtf_short_ok:
+                        events.append("SE-SETUP-CANCEL-MTF")
+                        short_setup = None
 
             if active is None and in_win:
                 bar_tick_start = book.seek(ot, 0)
                 # Flat since bar open only — avoids entry_time < prior mid-bar exit
                 if tick_i <= bar_tick_start:
-                    if allow_long and long_setup and int(long_setup["bars"]) >= 1 and active is None:
+                    if (
+                        allow_long
+                        and mtf_long_ok
+                        and long_setup
+                        and int(long_setup["bars"]) >= 1
+                        and active is None
+                    ):
                         raw = o
                         range_stop = float(long_setup["low"])
                         stop, target, toff = _levels(
@@ -1283,8 +1612,8 @@ def run_backtest(
                             range_=float(long_setup["range"]),
                             range_stop=range_stop,
                         )
-                        # Long stop must be strictly below entry
-                        if stop >= raw:
+                        # Long stop must be strictly below entry (Risk On only)
+                        if risk_live and stop >= raw:
                             events.append(f"LE-SKIP-BADSTOP@{stop:.2f}>={raw:.2f}")
                             long_setup = None
                         else:
@@ -1305,11 +1634,18 @@ def run_backtest(
                                 rev_side="Buy",
                                 trail_offset=toff,
                             )
+                            active["mtf_invalid"] = mtf_inv
                             long_setup = short_setup = None
                             entered = True
                             events.append(f"{tag}@{active['entry']:.2f}")
 
-                    if allow_short and short_setup and int(short_setup["bars"]) >= 1 and active is None:
+                    if (
+                        allow_short
+                        and mtf_short_ok
+                        and short_setup
+                        and int(short_setup["bars"]) >= 1
+                        and active is None
+                    ):
                         raw = o
                         range_stop = float(short_setup["high"])
                         stop, target, toff = _levels(
@@ -1318,8 +1654,8 @@ def run_backtest(
                             range_=float(short_setup["range"]),
                             range_stop=range_stop,
                         )
-                        # Short stop must be strictly above entry
-                        if stop <= raw:
+                        # Short stop must be strictly above entry (Risk On only)
+                        if risk_live and stop <= raw:
                             events.append(f"SE-SKIP-BADSTOP@{stop:.2f}<={raw:.2f}")
                             short_setup = None
                         else:
@@ -1340,6 +1676,7 @@ def run_backtest(
                                 rev_side="Sell",
                                 trail_offset=toff,
                             )
+                            active["mtf_invalid"] = mtf_inv
                             long_setup = short_setup = None
                             entered = True
                             events.append(f"{tag}@{active['entry']:.2f} TP={target:.2f}")
@@ -1406,6 +1743,9 @@ def run_backtest(
             if allow_trail and active is not None:
                 _tighten_from_aggr(h, l, rng, ot, dlt, side)
 
+            if aggr_reverse and active is not None:
+                _arm_flip_from_aggr(side, h, l, rng, ot, dlt, events)
+
             if wait_and_trade:
                 # Any AGGR → shared ORB range (both sides), cancel stop re-entry wait
                 if allow_long or allow_short:
@@ -1422,68 +1762,72 @@ def run_backtest(
                     }
                     pending_reentry = None
             elif pro:
-                # Pro: only arm when VWAP±Nσ qualifier + Lo/Sh/Se/Co tag
-                if pro_tag and _pro_long_bias(pro_tag) and allow_long:
-                    long_setup = {
-                        "signal_time": ot,
-                        "high": h,
-                        "low": l,
-                        "range": rng,
-                        "bars": 0,
-                        "signal_high": h,
-                        "signal_low": l,
-                        "signal_delta_pct": dlt,
-                        "pro_tag": pro_tag,
-                    }
-                    if short_setup is not None:
-                        events.append("SE-SETUP-CANCEL")
-                        short_setup = None
-                elif pro_tag and _pro_short_bias(pro_tag) and allow_short:
-                    short_setup = {
-                        "signal_time": ot,
-                        "high": h,
-                        "low": l,
-                        "range": rng,
-                        "bars": 0,
-                        "signal_high": h,
-                        "signal_low": l,
-                        "signal_delta_pct": dlt,
-                        "pro_tag": pro_tag,
-                    }
-                    if long_setup is not None:
-                        events.append("LE-SETUP-CANCEL")
-                        long_setup = None
+                # Pro: arm only when flat — AGGR during an open trade must not queue
+                # a next entry after LT/ST (avoids "LE with no post-exit AGGR").
+                if active is None:
+                    if pro_tag and _pro_long_bias(pro_tag) and allow_long:
+                        long_setup = {
+                            "signal_time": ot,
+                            "high": h,
+                            "low": l,
+                            "range": rng,
+                            "bars": 0,
+                            "signal_high": h,
+                            "signal_low": l,
+                            "signal_delta_pct": dlt,
+                            "pro_tag": pro_tag,
+                        }
+                        if short_setup is not None:
+                            events.append("SE-SETUP-CANCEL")
+                            short_setup = None
+                    elif pro_tag and _pro_short_bias(pro_tag) and allow_short:
+                        short_setup = {
+                            "signal_time": ot,
+                            "high": h,
+                            "low": l,
+                            "range": rng,
+                            "bars": 0,
+                            "signal_high": h,
+                            "signal_low": l,
+                            "signal_delta_pct": dlt,
+                            "pro_tag": pro_tag,
+                        }
+                        if long_setup is not None:
+                            events.append("LE-SETUP-CANCEL")
+                            long_setup = None
             else:
-                # Directional: opposite AGGR cancels a pending same-side wait
-                # (avoids entering long after later sells already invalidated the range).
-                if dlt >= threshold and allow_long:
-                    long_setup = {
-                        "signal_time": ot,
-                        "high": h,
-                        "low": l,
-                        "range": rng,
-                        "bars": 0,
-                        "signal_high": h,
-                        "signal_low": l,
-                        "signal_delta_pct": dlt,
-                    }
-                    if short_setup is not None:
-                        events.append("SE-SETUP-CANCEL")
-                        short_setup = None
-                if dlt <= -threshold and allow_short:
-                    short_setup = {
-                        "signal_time": ot,
-                        "high": h,
-                        "low": l,
-                        "range": rng,
-                        "bars": 0,
-                        "signal_high": h,
-                        "signal_low": l,
-                        "signal_delta_pct": dlt,
-                    }
-                    if long_setup is not None:
-                        events.append("LE-SETUP-CANCEL")
-                        long_setup = None
+                # Directional / Pro-MTF: arm only when flat; Pro-MTF also needs HTF bias
+                if active is None:
+                    can_long = allow_long and ((not mtf) or mtf_mode == "bull")
+                    can_short = allow_short and ((not mtf) or mtf_mode == "bear")
+                    if dlt >= threshold and can_long:
+                        long_setup = {
+                            "signal_time": ot,
+                            "high": h,
+                            "low": l,
+                            "range": rng,
+                            "bars": 0,
+                            "signal_high": h,
+                            "signal_low": l,
+                            "signal_delta_pct": dlt,
+                        }
+                        if short_setup is not None:
+                            events.append("SE-SETUP-CANCEL")
+                            short_setup = None
+                    if dlt <= -threshold and can_short:
+                        short_setup = {
+                            "signal_time": ot,
+                            "high": h,
+                            "low": l,
+                            "range": rng,
+                            "bars": 0,
+                            "signal_high": h,
+                            "signal_low": l,
+                            "signal_delta_pct": dlt,
+                        }
+                        if long_setup is not None:
+                            events.append("LE-SETUP-CANCEL")
+                            long_setup = None
 
         prev_close = c
 
@@ -1562,14 +1906,24 @@ def run_backtest(
         "break_even": int(be_on),
         "break_even_pct": round(be_frac * 100.0, 2),
         "strategy_mode": (
-            "pro" if pro else ("non_directional" if wait_and_trade else "directional")
+            "pro_mtf"
+            if mtf
+            else ("pro" if pro else ("non_directional" if wait_and_trade else "directional"))
         ),
         "pro_mode": int(pro),
+        "pro_mtf_mode": int(mtf),
+        "base_tf_minutes": int(base_tf) if mtf else 0,
+        "base_threshold": float(base_thr) if mtf else 0.0,
         "pro_vwap_sigma": sigma_n,
         "sl_tp_unit": sl_unit,
         "stop_loss": sl_val,
         "take_profit": tp_val,
         "trail_stop": int(trail_on),
+        "risk_on": int(risk_live),
+        "trail_unit": trail_u,
+        "trail_value": trail_val,
+        "be_unit": be_u,
+        "be_value": be_val,
         "tick_session_slice": {
             "after_min": int(entry_after),
             "before_min": int(entry_before),
@@ -1589,6 +1943,18 @@ def run_backtest(
     }
     if categories is not None:
         stats["categories"] = categories
+
+    mtf_bias_rows: list[dict[str, Any]] = []
+    if mtf and mtf_events:
+        for active_from, mode, inv in mtf_events:
+            mtf_bias_rows.append(
+                {
+                    "time": _to_ist(active_from.to_pydatetime()).isoformat(),
+                    "mode": mode,
+                    "invalid": round(float(inv), 2),
+                }
+            )
+
     return BacktestResult(
         symbol=symbol,
         tf_minutes=tf_minutes,
@@ -1607,6 +1973,10 @@ def run_backtest(
         break_even_pct=round(be_frac * 100.0, 2),
         pro_mode=int(pro),
         pro_vwap_sigma=sigma_n,
+        pro_mtf_mode=int(mtf),
+        base_tf_minutes=int(base_tf) if mtf else 0,
+        base_threshold=float(base_thr) if mtf else 0.0,
+        mtf_bias=mtf_bias_rows if mtf else [],
     )
 
 
@@ -1666,6 +2036,11 @@ def result_to_jsonable(r: BacktestResult) -> dict[str, Any]:
         "symbol": r.symbol,
         "tf_minutes": r.tf_minutes,
         "wait_and_trade": r.wait_and_trade,
+        "pro_mode": int(r.pro_mode),
+        "pro_mtf_mode": int(r.pro_mtf_mode),
+        "base_tf_minutes": int(r.base_tf_minutes),
+        "base_threshold": round(float(r.base_threshold), 2),
+        "pro_vwap_sigma": round(float(r.pro_vwap_sigma), 2),
         "rr": round(float(r.rr), 2),
         "volume": round(float(r.volume), 2),
         "threshold": round(float(r.threshold), 2),
@@ -1678,6 +2053,14 @@ def result_to_jsonable(r: BacktestResult) -> dict[str, Any]:
         "aggressive": [ser_agg(a) for a in r.aggressive],
         "bars": [ser_bar(b) for b in r.bars],
         "equity": [{"time": e["time"], "equity": round(float(e["equity"]), 2)} for e in r.equity],
+        "mtf_bias": [
+            {
+                "time": e["time"],
+                "mode": e["mode"],
+                "invalid": round(float(e["invalid"]), 2),
+            }
+            for e in (r.mtf_bias or [])
+        ],
         "engine": ENGINE_ID,
     }
 

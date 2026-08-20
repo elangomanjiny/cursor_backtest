@@ -45,7 +45,9 @@ export function attachMarkerLabels(
 
     const logical = chart.timeScale().getVisibleLogicalRange()
     const visibleBars = logical ? Math.max(1, logical.to - logical.from) : 40
-    const barPx = Math.max(6, (w - 64) / visibleBars)
+    const barPx = Math.max(1, (w - 64) / visibleBars)
+    // Labels collide into a solid band when zoomed out — skip them.
+    if (barPx < 7) return
     const maxTextW = Math.max(36, Math.min(120, barPx * 2.4))
 
     for (const lab of labels) {
