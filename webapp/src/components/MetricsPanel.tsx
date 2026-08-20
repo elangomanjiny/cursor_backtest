@@ -29,6 +29,8 @@ const CATEGORIES: { name: string; keys: { key: string; label: string; suffix?: s
     name: 'Money',
     keys: [
       { key: 'net_pnl', label: 'Net PnL' },
+      { key: 'total_slippage', label: 'Slip' },
+      { key: 'total_fees', label: 'Fees' },
       { key: 'profit_factor', label: 'PF' },
       { key: 'gross_profit', label: 'Gross+' },
       { key: 'gross_loss', label: 'Gross−' },

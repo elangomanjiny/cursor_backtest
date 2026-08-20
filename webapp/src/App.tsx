@@ -133,6 +133,10 @@ const DEFAULTS: StrategyParams = {
   pro_vwap_sigma: 2,
   rr: 1,
   sl_tp_unit: 'range',
+  sl_on: 1,
+  tp_on: 1,
+  sl_unit: 'range',
+  tp_unit: 'range',
   stop_loss: 50,
   take_profit: 100,
   risk_on: 1,
@@ -335,6 +339,16 @@ export default function App() {
     // View DOW filter for post-filter; engine dayofweek only when optimize used common.
     const viewDow = viewFilter?.dayofweek?.trim() || undefined
     const hours = viewFilter?.allowed_entry_hours?.trim() || undefined
+    const slOn = Number(
+      (b as { sl_on?: number }).sl_on ?? (b as { risk_on?: number }).risk_on ?? params.sl_on ?? 1,
+    )
+      ? 1
+      : 0
+    const tpOn = Number(
+      (b as { tp_on?: number }).tp_on ?? (b as { risk_on?: number }).risk_on ?? params.tp_on ?? 1,
+    )
+      ? 1
+      : 0
     const next: StrategyParams = {
       ...params,
       tf: Number(opt?.tf_minutes ?? params.tf),
@@ -376,6 +390,16 @@ export default function App() {
       )
         ? String((b as { sl_tp_unit?: string }).sl_tp_unit || params.sl_tp_unit)
         : params.sl_tp_unit) as StrategyParams['sl_tp_unit'],
+      sl_unit: (['range', 'tick', 'points', 'pct'].includes(
+        String((b as { sl_unit?: string }).sl_unit || (b as { sl_tp_unit?: string }).sl_tp_unit || params.sl_unit),
+      )
+        ? String((b as { sl_unit?: string }).sl_unit || (b as { sl_tp_unit?: string }).sl_tp_unit || params.sl_unit)
+        : params.sl_unit) as StrategyParams['sl_unit'],
+      tp_unit: (['range', 'tick', 'points', 'pct'].includes(
+        String((b as { tp_unit?: string }).tp_unit || (b as { sl_tp_unit?: string }).sl_tp_unit || params.tp_unit),
+      )
+        ? String((b as { tp_unit?: string }).tp_unit || (b as { sl_tp_unit?: string }).sl_tp_unit || params.tp_unit)
+        : params.tp_unit) as StrategyParams['tp_unit'],
       stop_loss: Number(
         (b as { stop_loss?: number }).stop_loss ?? params.stop_loss ?? 50,
       ),
@@ -383,7 +407,9 @@ export default function App() {
         (b as { take_profit?: number }).take_profit ?? params.take_profit ?? 100,
       ),
       trail_stop: Number((b as { trail_stop?: number }).trail_stop ?? 0) ? 1 : 0,
-      risk_on: Number((b as { risk_on?: number }).risk_on ?? params.risk_on ?? 1) ? 1 : 0,
+      sl_on: slOn,
+      tp_on: tpOn,
+      risk_on: slOn || tpOn ? 1 : 0,
       trail_unit: (['range', 'tick', 'points', 'pct'].includes(
         String((b as { trail_unit?: string }).trail_unit || params.trail_unit),
       )
@@ -396,7 +422,13 @@ export default function App() {
       dayofweek: opt?.common_optimizer ? dowFromOpt : undefined,
       allowed_entry_hours: undefined,
     }
-    const beLab = next.break_even ? `BE On ${next.break_even_pct}%` : 'BE Off'
+    const beLab = next.break_even
+      ? next.be_unit === 'range'
+        ? 'BE On Range'
+        : next.be_unit === 'pct'
+          ? `BE On ${next.be_value}%`
+          : `BE On ${next.be_value} ${next.be_unit}`
+      : 'BE Off'
     const expectTrades = Number(b.trades ?? 0)
     const expectNet = Number(b.net_pnl ?? 0)
     const filterNote = hours

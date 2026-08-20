@@ -542,6 +542,10 @@ def _worker_eval(job: dict[str, Any]) -> dict[str, Any]:
         take_profit=float(job.get("take_profit") if job.get("take_profit") is not None else 100),
         trail_stop=1 if int(job.get("trail_stop") or 0) else 0,
         risk_on=1 if int(job.get("risk_on") if job.get("risk_on") is not None else 1) else 0,
+        sl_on=job.get("sl_on"),
+        tp_on=job.get("tp_on"),
+        sl_unit=job.get("sl_unit"),
+        tp_unit=job.get("tp_unit"),
         trail_unit=str(job.get("trail_unit") or "range"),
         trail_value=float(job.get("trail_value") if job.get("trail_value") is not None else 0),
         be_unit=str(job.get("be_unit") or "range"),
@@ -571,6 +575,10 @@ def _worker_eval(job: dict[str, Any]) -> dict[str, Any]:
         "break_even": be,
         "break_even_pct": float(job["break_even_pct"]) if be else 0.0,
         "sl_tp_unit": str(job.get("sl_tp_unit") or "range"),
+        "sl_on": 1 if int(job.get("sl_on") if job.get("sl_on") is not None else job.get("risk_on") or 1) else 0,
+        "tp_on": 1 if int(job.get("tp_on") if job.get("tp_on") is not None else job.get("risk_on") or 1) else 0,
+        "sl_unit": str(job.get("sl_unit") or job.get("sl_tp_unit") or "range"),
+        "tp_unit": str(job.get("tp_unit") or job.get("sl_tp_unit") or "range"),
         "stop_loss": float(job.get("stop_loss") or 0),
         "take_profit": float(job.get("take_profit") or 0),
         "trail_stop": 1 if int(job.get("trail_stop") or 0) else 0,
@@ -687,10 +695,14 @@ def _iter_grid(
     break_even_flags: str | list[int] | None = "0,1",
     break_even_pcts: str | list[float] | None = "50",
     sl_tp_unit: str = "range",
+    sl_unit: str | None = None,
+    tp_unit: str | None = None,
     stop_losses: str | list[float] | None = "50",
     take_profits: str | list[float] | None = "100",
     trail_stop_flags: str | list[int] | None = "0",
     risk_on_flags: str | list[int] | None = "1",
+    sl_on_flags: str | list[int] | None = None,
+    tp_on_flags: str | list[int] | None = None,
     trail_unit: str = "range",
     trail_value: float = 0.0,
     be_unit: str = "range",
@@ -707,27 +719,36 @@ def _iter_grid(
     re_list = _parse_re_entry_flags(re_entry_flags)
     stobe_list = _parse_re_entry_flags(stop_to_be_flags)
     be_list = _parse_re_entry_flags(break_even_flags)
-    be_pct_raw = _parse_floats(break_even_pcts) if break_even_pcts not in (None, "") else [50.0]
-    be_pct_list = [max(1.0, min(100.0, float(p))) for p in (be_pct_raw or [50.0])]
+    # BreakEven lock is derived from be_unit / be_value (no BE% grid axis)
+    be_pct_list = [50.0]
     slip_list = _parse_cost_pcts(slippage_pcts, slippage_pct)
     fee_list = _parse_cost_pcts(fee_pcts, fee_pct)
-    sl_unit = _normalize_sl_tp_unit(sl_tp_unit)
+    sl_u = _normalize_sl_tp_unit(sl_unit or sl_tp_unit)
+    tp_u = _normalize_sl_tp_unit(tp_unit or sl_tp_unit)
     trail_list = _parse_re_entry_flags(trail_stop_flags if trail_stop_flags is not None else "0")
-    risk_list = _parse_re_entry_flags(risk_on_flags if risk_on_flags is not None else "1") or [1]
+    risk_fallback = _parse_re_entry_flags(risk_on_flags if risk_on_flags is not None else "1") or [1]
+    sl_on_list = _parse_re_entry_flags(sl_on_flags if sl_on_flags is not None else risk_fallback) or [1]
+    tp_on_list = _parse_re_entry_flags(tp_on_flags if tp_on_flags is not None else risk_fallback) or [1]
     trail_u = _normalize_sl_tp_unit(trail_unit)
     trail_v = float(trail_value if trail_value is not None else 0.0)
     be_u = _normalize_sl_tp_unit(be_unit)
     be_v = float(be_value if be_value is not None else 0.0)
     vol_raw = _parse_floats(volumes) if volumes not in (None, "") else []
     vol_list = [max(1e-8, float(v)) for v in vol_raw] or [max(1e-8, float(volume or 0.01))]
-    if sl_unit == "range":
-        rr_list = _parse_floats(rrs)
-        sl_list = [50.0]
-        tp_list = [100.0]
-    else:
-        rr_list = [1.0]
-        sl_list = _parse_floats(stop_losses if stop_losses not in (None, "") else "50") or [50.0]
-        tp_list = _parse_floats(take_profits if take_profits not in (None, "") else "100") or [100.0]
+    sweep_sl = sl_u != "range" and any(int(x) for x in sl_on_list)
+    sweep_tp = tp_u != "range" and any(int(x) for x in tp_on_list)
+    sweep_rr = tp_u == "range" and any(int(x) for x in tp_on_list)
+    rr_list = _parse_floats(rrs) if sweep_rr else [1.0]
+    sl_list = (
+        (_parse_floats(stop_losses if stop_losses not in (None, "") else "50") or [50.0])
+        if sweep_sl
+        else [50.0]
+    )
+    tp_list = (
+        (_parse_floats(take_profits if take_profits not in (None, "") else "100") or [100.0])
+        if sweep_tp
+        else [100.0]
+    )
     if not th_list or not rr_list or not strat_list:
         raise ValueError("thresholds, rrs/SL-TP, and wait_flags must be non-empty")
     if time_optimizer and common_optimizer and int(time_step_minutes) not in ALLOWED_TIME_STEPS:
@@ -784,7 +805,7 @@ def _iter_grid(
 
     # re_entry only when WaitAndTrade=true (ORB); Wait=false / Pro / Pro-MTF forces 0
     # BreakEven is available in all modes (independent of Risk)
-    # BE% only multiplies the grid when BreakEven is on
+    # Lock comes from be_unit / be_value (Range=50% of R, %=typed, tick/points=entry)
     # Pro-MTF extra axes: Base TF / Base Thr%
     wants_mtf = any(mtf for _, _, mtf in strat_list)
     sigma_list = _parse_sigmas(pro_vwap_sigmas, float(pro_vwap_sigma or 2))
@@ -824,7 +845,8 @@ def _iter_grid(
         be: int,
         be_pct: float,
         vol: float,
-        risk: int,
+        sl_flag: int,
+        tp_flag: int,
     ) -> None:
         btf_iter: Iterable[int] = base_tf_list if mtf else (0,)
         bthr_iter: Iterable[float] = base_thr_list if mtf else (0.0,)
@@ -838,38 +860,30 @@ def _iter_grid(
                         (
                             th, rr, sl, tp, wt, pro, mtf, slip, fee, trail, sess,
                             re, stobe, be, be_pct, int(btf), float(bthr), float(sig),
-                            float(vol), int(risk),
+                            float(vol), int(sl_flag), int(tp_flag),
                         )
                     )
 
-    if sl_unit == "range":
-        for th, rr, (wt, pro, mtf), slip, fee, trail, vol, sess in product(
-            th_list, rr_list, strat_list, slip_list, fee_list, trail_list, vol_list, sessions
-        ):
-            for re in re_list if wt else (0,):
-                for stobe in stobe_list:
-                    for be in be_list:
-                        pct_iter = be_pct_list if be else (be_pct_list[0],)
-                        for be_pct in pct_iter:
-                            for risk in risk_list:
-                                _append(
-                                    th, rr, 50.0, 100.0, wt, pro, mtf, slip, fee, trail,
-                                    sess, re, stobe, be, be_pct, vol, risk,
-                                )
-    else:
-        for th, sl, tp, (wt, pro, mtf), slip, fee, trail, vol, sess in product(
-            th_list, sl_list, tp_list, strat_list, slip_list, fee_list, trail_list, vol_list, sessions
-        ):
-            for re in re_list if wt else (0,):
-                for stobe in stobe_list:
-                    for be in be_list:
-                        pct_iter = be_pct_list if be else (be_pct_list[0],)
-                        for be_pct in pct_iter:
-                            for risk in risk_list:
-                                _append(
-                                    th, 1.0, sl, tp, wt, pro, mtf, slip, fee, trail,
-                                    sess, re, stobe, be, be_pct, vol, risk,
-                                )
+    for th, (wt, pro, mtf), slip, fee, trail, vol, sess in product(
+        th_list, strat_list, slip_list, fee_list, trail_list, vol_list, sessions
+    ):
+        for re in re_list if wt else (0,):
+            for stobe in stobe_list:
+                for be in be_list:
+                    pct_iter = be_pct_list if be else (be_pct_list[0],)
+                    for be_pct in pct_iter:
+                        for sl_flag in sl_on_list:
+                            sls = sl_list if (int(sl_flag) and sweep_sl) else (sl_list[0],)
+                            for sl in sls:
+                                for tp_flag in tp_on_list:
+                                    tps = tp_list if (int(tp_flag) and sweep_tp) else (tp_list[0],)
+                                    rrs_iter = rr_list if (int(tp_flag) and sweep_rr) else (rr_list[0],)
+                                    for tp in tps:
+                                        for rr in rrs_iter:
+                                            _append(
+                                                th, rr, sl, tp, wt, pro, mtf, slip, fee, trail,
+                                                sess, re, stobe, be, be_pct, vol, sl_flag, tp_flag,
+                                            )
     if wants_mtf and not any(c[6] for c in combos):
         raise ValueError(
             f"Pro-MTF produced no combos — Base TF must be > chart TF ({tf_minutes}m)."
@@ -886,7 +900,7 @@ def _iter_grid(
     if sigma_n not in (1.0, 2.0, 3.0):
         sigma_n = min((1.0, 2.0, 3.0), key=lambda x: abs(x - sigma_n))
     jobs: list[dict[str, Any]] = []
-    for th, rr, sl, tp, wt, pro, mtf, slip, fee, trail, sess, re, stobe, be, be_pct, btf, bthr, sig, vol, risk in combos:
+    for th, rr, sl, tp, wt, pro, mtf, slip, fee, trail, sess, re, stobe, be, be_pct, btf, bthr, sig, vol, sl_flag, tp_flag in combos:
         ea, eb, et = sess
         jobs.append(
             {
@@ -908,11 +922,15 @@ def _iter_grid(
                 "stop_to_be": int(stobe),
                 "break_even": int(be),
                 "break_even_pct": float(be_pct),
-                "sl_tp_unit": sl_unit,
+                "sl_tp_unit": sl_u if sl_u == tp_u else f"{sl_u}/{tp_u}",
                 "stop_loss": float(sl),
                 "take_profit": float(tp),
                 "trail_stop": 1 if int(trail) else 0,
-                "risk_on": 1 if int(risk) else 0,
+                "risk_on": 1 if (int(sl_flag) or int(tp_flag)) else 0,
+                "sl_on": 1 if int(sl_flag) else 0,
+                "tp_on": 1 if int(tp_flag) else 0,
+                "sl_unit": sl_u,
+                "tp_unit": tp_u,
                 "trail_unit": trail_u,
                 "trail_value": trail_v,
                 "be_unit": be_u,

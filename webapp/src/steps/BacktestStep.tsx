@@ -124,24 +124,90 @@ export function BacktestStep({
           </label>
           <label
             className="check"
-            title="When off: no LSL/SSL or LT/ST from this box. Trail and BreakEven still work independently."
+            title="When off: no LSL/SSL from this box. Trail and BreakEven still work independently."
           >
             <input
               type="checkbox"
-              checked={params.risk_on === 1}
-              onChange={(e) => set('risk_on', e.target.checked ? 1 : 0)}
+              checked={params.sl_on === 1}
+              onChange={(e) => {
+                const on = e.target.checked
+                onParams((prev) => ({
+                  ...prev,
+                  sl_on: on ? 1 : 0,
+                  risk_on: on || prev.tp_on === 1 ? 1 : 0,
+                }))
+              }}
             />
-            Risk
+            Stoploss
           </label>
-          {params.risk_on === 1 && (
+          {params.sl_on === 1 && (
             <>
-              <label title="How stop & target are measured from entry (Range = AGGR high/low × RR)">
-                SL/TP
+              <label title="How the stop is measured from entry (Range = AGGR high/low)">
+                SL mode
                 <select
-                  value={params.sl_tp_unit}
+                  value={params.sl_unit}
                   onChange={(e) => {
                     const u = asDistUnit(e.target.value)
-                    if (u) set('sl_tp_unit', u)
+                    if (u) set('sl_unit', u)
+                  }}
+                >
+                  <option value="range">Range</option>
+                  <option value="tick">Tick</option>
+                  <option value="points">Points</option>
+                  <option value="pct">%</option>
+                </select>
+              </label>
+              {params.sl_unit !== 'range' && (
+                <label
+                  title={
+                    params.sl_unit === 'tick'
+                      ? 'Stop loss in ticks'
+                      : params.sl_unit === 'points'
+                        ? 'Stop loss in price points'
+                        : 'Stop loss as % of entry price'
+                  }
+                >
+                  SL
+                  <input
+                    className="num-plain"
+                    type="number"
+                    inputMode="decimal"
+                    step={params.sl_unit === 'pct' ? '0.01' : '1'}
+                    min={0}
+                    value={params.stop_loss}
+                    onChange={(e) => set('stop_loss', Number(e.target.value))}
+                  />
+                </label>
+              )}
+            </>
+          )}
+          <label
+            className="check"
+            title="When off: no LT/ST from this box. Stoploss, Trail and BreakEven still work independently."
+          >
+            <input
+              type="checkbox"
+              checked={params.tp_on === 1}
+              onChange={(e) => {
+                const on = e.target.checked
+                onParams((prev) => ({
+                  ...prev,
+                  tp_on: on ? 1 : 0,
+                  risk_on: on || prev.sl_on === 1 ? 1 : 0,
+                }))
+              }}
+            />
+            Target
+          </label>
+          {params.tp_on === 1 && (
+            <>
+              <label title="How the target is measured from entry (Range = AGGR range × RR)">
+                TP mode
+                <select
+                  value={params.tp_unit}
+                  onChange={(e) => {
+                    const u = asDistUnit(e.target.value)
+                    if (u) set('tp_unit', u)
                   }}
                 >
                   <option value="range">Range×RR</option>
@@ -150,7 +216,7 @@ export function BacktestStep({
                   <option value="pct">%</option>
                 </select>
               </label>
-              {params.sl_tp_unit === 'range' ? (
+              {params.tp_unit === 'range' ? (
                 <label>
                   RR
                   <input
@@ -163,54 +229,32 @@ export function BacktestStep({
                   />
                 </label>
               ) : (
-                <>
-                  <label
-                    title={
-                      params.sl_tp_unit === 'tick'
-                        ? 'Stop loss in ticks'
-                        : params.sl_tp_unit === 'points'
-                          ? 'Stop loss in price points'
-                          : 'Stop loss as % of entry price'
-                    }
-                  >
-                    SL
-                    <input
-                      className="num-plain"
-                      type="number"
-                      inputMode="decimal"
-                      step={params.sl_tp_unit === 'pct' ? '0.01' : '1'}
-                      min={0}
-                      value={params.stop_loss}
-                      onChange={(e) => set('stop_loss', Number(e.target.value))}
-                    />
-                  </label>
-                  <label
-                    title={
-                      params.sl_tp_unit === 'tick'
-                        ? 'Take profit in ticks'
-                        : params.sl_tp_unit === 'points'
-                          ? 'Take profit in price points'
-                          : 'Take profit as % of entry price'
-                    }
-                  >
-                    TP
-                    <input
-                      className="num-plain"
-                      type="number"
-                      inputMode="decimal"
-                      step={params.sl_tp_unit === 'pct' ? '0.01' : '1'}
-                      min={0}
-                      value={params.take_profit}
-                      onChange={(e) => set('take_profit', Number(e.target.value))}
-                    />
-                  </label>
-                </>
+                <label
+                  title={
+                    params.tp_unit === 'tick'
+                      ? 'Take profit in ticks'
+                      : params.tp_unit === 'points'
+                        ? 'Take profit in price points'
+                        : 'Take profit as % of entry price'
+                  }
+                >
+                  TP
+                  <input
+                    className="num-plain"
+                    type="number"
+                    inputMode="decimal"
+                    step={params.tp_unit === 'pct' ? '0.01' : '1'}
+                    min={0}
+                    value={params.take_profit}
+                    onChange={(e) => set('take_profit', Number(e.target.value))}
+                  />
+                </label>
               )}
             </>
           )}
           <label
             className="check"
-            title="Trail a stop by Trail distance as price moves in your favor. Independent of Risk."
+            title="Trail a stop by Trail distance as price moves in your favor. Independent of Stoploss and Target."
           >
             <input
               type="checkbox"
@@ -377,7 +421,7 @@ export function BacktestStep({
             </label>
           )}
           <label
-            title="Arm when price travels BE value from entry; lock stop at BE% of that distance. Independent of Risk. Hit after lock = LB/SB."
+            title="On: after price reaches the arm, move stop once. Range/% = old method (arm at AGGR 1R). Tick/Points = arm at the typed distance, lock at entry. Independent of Stoploss and Target. Hit after lock = LB/SB."
           >
             <input
               type="checkbox"
@@ -388,7 +432,7 @@ export function BacktestStep({
           </label>
           {params.break_even === 1 && (
             <>
-              <label title="BE arm-distance unit. Range = AGGR gap (1R).">
+              <label title="Range/%: old method, arm at AGGR 1R. Tick/Points: arm at BE input, lock at entry.">
                 BE unit
                 <select
                   value={params.be_unit}
@@ -404,38 +448,36 @@ export function BacktestStep({
                 </select>
               </label>
               {params.be_unit !== 'range' && (
-                <label title="Distance from entry that arms BreakEven">
+                <label
+                  title={
+                    params.be_unit === 'pct'
+                      ? 'Old BE%: lock this % of AGGR range (arms at 1R). 50 = halfway.'
+                      : params.be_unit === 'tick'
+                        ? 'Arm after this many ticks of profit, then move stop to entry'
+                        : 'Arm after this many points of profit, then move stop to entry'
+                  }
+                >
                   BE
                   <input
                     className="num-plain"
                     type="number"
                     inputMode="decimal"
-                    step={params.be_unit === 'pct' ? '0.01' : '1'}
-                    min={0}
+                    step={params.be_unit === 'pct' ? '1' : '1'}
+                    min={params.be_unit === 'pct' ? 1 : 0}
+                    max={params.be_unit === 'pct' ? 100 : undefined}
                     value={params.be_value}
                     onChange={(e) => set('be_value', Number(e.target.value))}
+                    onBlur={() => {
+                      if (params.be_unit === 'pct') {
+                        set(
+                          'be_value',
+                          Math.min(100, Math.max(1, Number(params.be_value) || 50)),
+                        )
+                      }
+                    }}
                   />
                 </label>
               )}
-              <label title="BE lock as % of arm distance from entry (default 50)">
-                BE%
-                <input
-                  className="num-plain cost"
-                  type="number"
-                  inputMode="decimal"
-                  min={1}
-                  max={100}
-                  step={5}
-                  value={params.break_even_pct}
-                  onChange={(e) => set('break_even_pct', Number(e.target.value))}
-                  onBlur={() =>
-                    set(
-                      'break_even_pct',
-                      Math.min(100, Math.max(1, Number(params.break_even_pct) || 50)),
-                    )
-                  }
-                />
-              </label>
             </>
           )}
           <label title="Long / Short / Both sides allowed">

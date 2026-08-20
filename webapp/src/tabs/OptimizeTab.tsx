@@ -95,6 +95,12 @@ function strategyToken(p: {
   return 'false'
 }
 
+type DistUnit = 'range' | 'tick' | 'points' | 'pct'
+
+function asOptUnit(raw: unknown, fallback: DistUnit = 'range'): DistUnit {
+  return raw === 'tick' || raw === 'points' || raw === 'pct' || raw === 'range' ? raw : fallback
+}
+
 export type OptimizeGrid = {
   tf: number
   thresholds: string
@@ -104,11 +110,15 @@ export type OptimizeGrid = {
   stop_to_be_flags: string
   break_even_flags: string
   break_even_pcts: string
-  sl_tp_unit: 'range' | 'tick' | 'points' | 'pct'
+  sl_tp_unit: DistUnit
+  sl_unit: DistUnit
+  tp_unit: DistUnit
   stop_losses: string
   take_profits: string
   trail_stop_flags: string
   risk_on_flags: string
+  sl_on_flags: string
+  tp_on_flags: string
   trail_unit: 'range' | 'tick' | 'points' | 'pct'
   trail_value: number
   be_unit: 'range' | 'tick' | 'points' | 'pct'
@@ -281,7 +291,6 @@ export function OptimizeTab({
   const dRr = Number(defaults?.rr ?? 1)
   const dSl = Number(defaults?.stop_loss ?? 50)
   const dTp = Number(defaults?.take_profit ?? 100)
-  const dBePct = Number(defaults?.break_even_pct ?? 50)
   const dBaseTf = Number(defaults?.base_tf ?? 15)
   const dBaseThr = Number(defaults?.base_threshold ?? 30)
   const dSlip = Number(defaults?.slippage_pct ?? defaultSlip)
@@ -336,13 +345,6 @@ export function OptimizeTab({
     max: dVol > 0 ? dVol : 0.01,
     step: 0.01,
   })
-  const [bePctRange, setBePctRange] = useState<SweepNum>({
-    on: false,
-    def: dBePct,
-    min: 50,
-    max: 50,
-    step: 10,
-  })
   const [baseTfRange, setBaseTfRange] = useState<SweepNum>({
     on: false,
     def: dBaseTf,
@@ -357,34 +359,31 @@ export function OptimizeTab({
     max: 40,
     step: 10,
   })
-  const [slTpUnit, setSlTpUnit] = useState<'range' | 'tick' | 'points' | 'pct'>(
-    defaults?.sl_tp_unit === 'tick' ||
-      defaults?.sl_tp_unit === 'points' ||
-      defaults?.sl_tp_unit === 'pct'
-      ? defaults.sl_tp_unit
-      : 'range',
+  const [slUnit, setSlUnit] = useState<DistUnit>(
+    asOptUnit(defaults?.sl_unit ?? defaults?.sl_tp_unit),
+  )
+  const [tpUnit, setTpUnit] = useState<DistUnit>(
+    asOptUnit(defaults?.tp_unit ?? defaults?.sl_tp_unit),
   )
   const [trailSweep, setTrailSweep] = useState(false)
   const [trailOff, setTrailOff] = useState(true)
   const [trailOn, setTrailOn] = useState(Boolean(defaults?.trail_stop))
   const [trailDefault, setTrailDefault] = useState(Boolean(defaults?.trail_stop))
-  const [trailUnit, setTrailUnit] = useState<'range' | 'tick' | 'points' | 'pct'>(
-    defaults?.trail_unit === 'tick' ||
-      defaults?.trail_unit === 'points' ||
-      defaults?.trail_unit === 'pct'
-      ? defaults.trail_unit
-      : 'range',
-  )
+  const [trailUnit, setTrailUnit] = useState<DistUnit>(asOptUnit(defaults?.trail_unit))
   const [trailValue, setTrailValue] = useState(Number(defaults?.trail_value ?? 50))
-  const [riskSweep, setRiskSweep] = useState(false)
-  const [riskOff, setRiskOff] = useState(false)
-  const [riskOnFlag, setRiskOnFlag] = useState(true)
-  const [riskDefault, setRiskDefault] = useState(defaults?.risk_on !== 0)
-  const [beUnit, setBeUnit] = useState<'range' | 'tick' | 'points' | 'pct'>(
-    defaults?.be_unit === 'tick' || defaults?.be_unit === 'points' || defaults?.be_unit === 'pct'
-      ? defaults.be_unit
-      : 'range',
+  const [slSweep, setSlSweep] = useState(false)
+  const [slOff, setSlOff] = useState(false)
+  const [slOnFlag, setSlOnFlag] = useState(true)
+  const [slDefault, setSlDefault] = useState(
+    Number(defaults?.sl_on ?? defaults?.risk_on ?? 1) !== 0,
   )
+  const [tpSweep, setTpSweep] = useState(false)
+  const [tpOff, setTpOff] = useState(false)
+  const [tpOnFlag, setTpOnFlag] = useState(true)
+  const [tpDefault, setTpDefault] = useState(
+    Number(defaults?.tp_on ?? defaults?.risk_on ?? 1) !== 0,
+  )
+  const [beUnit, setBeUnit] = useState<DistUnit>(asOptUnit(defaults?.be_unit))
   const [beValue, setBeValue] = useState(Number(defaults?.be_value ?? 50))
   const [stratSweep, setStratSweep] = useState(false)
   const [stratDefault, setStratDefault] = useState(strategyToken(defaults || {}))
@@ -466,13 +465,24 @@ export function OptimizeTab({
     return parts.join(',') || '0'
   }, [trailSweep, trailDefault, trailOff, trailOn])
 
-  const riskOnFlags = useMemo(() => {
-    if (!riskSweep) return riskDefault ? '1' : '0'
+  const slOnFlags = useMemo(() => {
+    if (!slSweep) return slDefault ? '1' : '0'
     const parts: string[] = []
-    if (riskOff) parts.push('0')
-    if (riskOnFlag) parts.push('1')
+    if (slOff) parts.push('0')
+    if (slOnFlag) parts.push('1')
     return parts.join(',') || '1'
-  }, [riskSweep, riskDefault, riskOff, riskOnFlag])
+  }, [slSweep, slDefault, slOff, slOnFlag])
+
+  const tpOnFlags = useMemo(() => {
+    if (!tpSweep) return tpDefault ? '1' : '0'
+    const parts: string[] = []
+    if (tpOff) parts.push('0')
+    if (tpOnFlag) parts.push('1')
+    return parts.join(',') || '1'
+  }, [tpSweep, tpDefault, tpOff, tpOnFlag])
+
+  const slLive = slSweep ? slOnFlag : slDefault
+  const tpLive = tpSweep ? tpOnFlag : tpDefault
 
   const stepMins = timeStep === 60 ? 60 : 30
   /** When Time opt is on: sweep entry-start from After … (Before − Step); Before & Flat stay fixed. */
@@ -489,29 +499,32 @@ export function OptimizeTab({
 
   const estParamCombos = useMemo(() => {
     const nTh = countSweep(thrRange)
-    const nExit =
-      slTpUnit === 'range' ? countSweep(rrRange) : countSweep(slRange) * countSweep(tpRange)
+    const nSlFlag = slSweep ? (slOff ? 1 : 0) + (slOnFlag ? 1 : 0) || 1 : 1
+    const nTpFlag = tpSweep ? (tpOff ? 1 : 0) + (tpOnFlag ? 1 : 0) || 1 : 1
+    const nSl = slLive && slUnit !== 'range' ? countSweep(slRange) : 1
+    const nTp = tpLive && tpUnit !== 'range' ? countSweep(tpRange) : 1
+    const nRr = tpLive && tpUnit === 'range' ? countSweep(rrRange) : 1
     const nTrail = trailSweep ? (trailOff ? 1 : 0) + (trailOn ? 1 : 0) || 1 : 1
-    const nRisk = riskSweep ? (riskOff ? 1 : 0) + (riskOnFlag ? 1 : 0) || 1 : 1
     const nSlip = countSweep(slipRange)
     const nFee = countSweep(feeRange)
     const nVol = countSweep(volRange)
     const nBe = beSweep ? (beOff ? 1 : 0) + (beOn ? 1 : 0) || 1 : 1
-    const nBePct = (beSweep ? beOn : beDefault) ? countSweep(bePctRange) : 1
     const nStrat = Math.max(1, waitFlags.split(',').filter(Boolean).length)
     const nBase =
       includesMtf ? countSweep(baseTfRange) * countSweep(baseThrRange) : 1
     const nSigma = includesPro ? countSweep(sigmaRange) : 1
     return (
       nTh *
-      nExit *
+      nSlFlag *
+      nTpFlag *
+      nSl *
+      nTp *
+      nRr *
       nTrail *
-      nRisk *
       nSlip *
       nFee *
       nVol *
       nBe *
-      nBePct *
       nStrat *
       nBase *
       nSigma *
@@ -522,13 +535,19 @@ export function OptimizeTab({
     rrRange,
     slRange,
     tpRange,
-    slTpUnit,
+    slUnit,
+    tpUnit,
+    slSweep,
+    slOff,
+    slOnFlag,
+    slLive,
+    tpSweep,
+    tpOff,
+    tpOnFlag,
+    tpLive,
     trailSweep,
     trailOff,
     trailOn,
-    riskSweep,
-    riskOff,
-    riskOnFlag,
     slipRange,
     feeRange,
     volRange,
@@ -536,7 +555,6 @@ export function OptimizeTab({
     beOff,
     beOn,
     beDefault,
-    bePctRange,
     waitFlags,
     includesMtf,
     includesPro,
@@ -554,12 +572,16 @@ export function OptimizeTab({
     re_entry_flags: '0',
     stop_to_be_flags: '0',
     break_even_flags: breakEvenFlags,
-    break_even_pcts: expandSweep(bePctRange),
-    sl_tp_unit: slTpUnit,
+    break_even_pcts: '50',
+    sl_tp_unit: slUnit,
+    sl_unit: slUnit,
+    tp_unit: tpUnit,
     stop_losses: expandSweep(slRange),
     take_profits: expandSweep(tpRange),
     trail_stop_flags: trailStopFlags,
-    risk_on_flags: riskOnFlags,
+    risk_on_flags: slOnFlags.includes('1') || tpOnFlags.includes('1') ? '1' : '0',
+    sl_on_flags: slOnFlags,
+    tp_on_flags: tpOnFlags,
     trail_unit: trailUnit,
     trail_value: trailValue,
     be_unit: beUnit,
@@ -1025,22 +1047,22 @@ export function OptimizeTab({
               <div className="opt-flag-row">
                 <button
                   type="button"
-                  className={`opt-sweep-btn${riskSweep ? ' on' : ''}`}
-                  onClick={() => setRiskSweep((v) => !v)}
+                  className={`opt-sweep-btn${slSweep ? ' on' : ''}`}
+                  onClick={() => setSlSweep((v) => !v)}
                 >
-                  {riskSweep ? 'On' : 'Off'}
+                  {slSweep ? 'On' : 'Off'}
                 </button>
-                <span className="opt-range-lab">Risk</span>
-                {riskSweep ? (
+                <span className="opt-range-lab">Stoploss</span>
+                {slSweep ? (
                   <div className="be-opt-flags">
                     <label className="check">
                       <input
                         type="checkbox"
-                        checked={riskOff}
+                        checked={slOff}
                         onChange={(e) => {
                           const on = e.target.checked
-                          if (!on && !riskOnFlag) return
-                          setRiskOff(on)
+                          if (!on && !slOnFlag) return
+                          setSlOff(on)
                         }}
                       />
                       Off
@@ -1048,11 +1070,11 @@ export function OptimizeTab({
                     <label className="check">
                       <input
                         type="checkbox"
-                        checked={riskOnFlag}
+                        checked={slOnFlag}
                         onChange={(e) => {
                           const on = e.target.checked
-                          if (!on && !riskOff) return
-                          setRiskOnFlag(on)
+                          if (!on && !slOff) return
+                          setSlOnFlag(on)
                         }}
                       />
                       On
@@ -1060,56 +1082,120 @@ export function OptimizeTab({
                   </div>
                 ) : (
                   <select
-                    value={riskDefault ? '1' : '0'}
-                    onChange={(e) => setRiskDefault(e.target.value === '1')}
-                    aria-label="Risk default"
+                    value={slDefault ? '1' : '0'}
+                    onChange={(e) => setSlDefault(e.target.value === '1')}
+                    aria-label="Stoploss default"
                   >
                     <option value="0">Default Off</option>
                     <option value="1">Default On</option>
                   </select>
                 )}
               </div>
-              <label title="How stop & target are sized">
-                SL/TP unit
-                <select
-                  value={slTpUnit}
-                  onChange={(e) => {
-                    const u = e.target.value
-                    if (u === 'range' || u === 'tick' || u === 'points' || u === 'pct') {
-                      setSlTpUnit(u)
-                    }
-                  }}
-                >
-                  <option value="range">Range×RR</option>
-                  <option value="tick">Tick</option>
-                  <option value="points">Points</option>
-                  <option value="pct">%</option>
-                </select>
-              </label>
-              {slTpUnit === 'range' ? (
-                <SweepRow
-                  label="RR"
-                  title="Reward:risk multiple of AGGR range"
-                  value={rrRange}
-                  onChange={setRrRange}
-                  stepHint="0.1"
-                />
-              ) : (
+              {slLive && (
                 <>
-                  <SweepRow
-                    label="SL"
-                    title={`Stop loss in ${slTpUnit}`}
-                    value={slRange}
-                    onChange={setSlRange}
-                    stepHint={slTpUnit === 'pct' ? '0.1' : '1'}
-                  />
-                  <SweepRow
-                    label="TP"
-                    title={`Take profit in ${slTpUnit}`}
-                    value={tpRange}
-                    onChange={setTpRange}
-                    stepHint={slTpUnit === 'pct' ? '0.1' : '1'}
-                  />
+                  <div className="opt-flag-row">
+                    <span className="opt-range-lab">SL mode</span>
+                    <select
+                      value={slUnit}
+                      onChange={(e) => setSlUnit(asOptUnit(e.target.value, slUnit))}
+                      aria-label="Stoploss mode"
+                    >
+                      <option value="range">Range</option>
+                      <option value="tick">Tick</option>
+                      <option value="points">Points</option>
+                      <option value="pct">%</option>
+                    </select>
+                  </div>
+                  {slUnit !== 'range' && (
+                    <SweepRow
+                      label="SL"
+                      title={`Stop loss in ${slUnit}`}
+                      value={slRange}
+                      onChange={setSlRange}
+                      stepHint={slUnit === 'pct' ? '0.1' : '1'}
+                    />
+                  )}
+                </>
+              )}
+              <div className="opt-flag-row">
+                <button
+                  type="button"
+                  className={`opt-sweep-btn${tpSweep ? ' on' : ''}`}
+                  onClick={() => setTpSweep((v) => !v)}
+                >
+                  {tpSweep ? 'On' : 'Off'}
+                </button>
+                <span className="opt-range-lab">Target</span>
+                {tpSweep ? (
+                  <div className="be-opt-flags">
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={tpOff}
+                        onChange={(e) => {
+                          const on = e.target.checked
+                          if (!on && !tpOnFlag) return
+                          setTpOff(on)
+                        }}
+                      />
+                      Off
+                    </label>
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={tpOnFlag}
+                        onChange={(e) => {
+                          const on = e.target.checked
+                          if (!on && !tpOff) return
+                          setTpOnFlag(on)
+                        }}
+                      />
+                      On
+                    </label>
+                  </div>
+                ) : (
+                  <select
+                    value={tpDefault ? '1' : '0'}
+                    onChange={(e) => setTpDefault(e.target.value === '1')}
+                    aria-label="Target default"
+                  >
+                    <option value="0">Default Off</option>
+                    <option value="1">Default On</option>
+                  </select>
+                )}
+              </div>
+              {tpLive && (
+                <>
+                  <div className="opt-flag-row">
+                    <span className="opt-range-lab">TP mode</span>
+                    <select
+                      value={tpUnit}
+                      onChange={(e) => setTpUnit(asOptUnit(e.target.value, tpUnit))}
+                      aria-label="Target mode"
+                    >
+                      <option value="range">Range×RR</option>
+                      <option value="tick">Tick</option>
+                      <option value="points">Points</option>
+                      <option value="pct">%</option>
+                    </select>
+                  </div>
+                  {tpUnit === 'range' ? (
+                    <SweepRow
+                      label="RR"
+                      title="Reward:risk multiple of AGGR range"
+                      value={rrRange}
+                      onChange={setRrRange}
+                      stepHint="0.1"
+                    />
+                  ) : (
+                    <SweepRow
+                      label="TP"
+                      title={`Take profit in ${tpUnit}`}
+                      value={tpRange}
+                      onChange={setTpRange}
+                      stepHint={tpUnit === 'pct' ? '0.1' : '1'}
+                    />
+                  )}
                 </>
               )}
               <div className="opt-flag-row">
@@ -1344,28 +1430,20 @@ export function OptimizeTab({
                   </select>
                   {beUnit !== 'range' && (
                     <label>
-                      Dist
+                      {beUnit === 'pct' ? '%' : 'Dist'}
                       <input
                         className="num-plain"
                         type="number"
                         inputMode="decimal"
-                        min={0}
-                        step={beUnit === 'pct' ? '0.01' : '1'}
+                        min={beUnit === 'pct' ? 1 : 0}
+                        max={beUnit === 'pct' ? 100 : undefined}
+                        step={beUnit === 'pct' ? '1' : '1'}
                         value={beValue}
                         onChange={(e) => setBeValue(Number(e.target.value))}
                       />
                     </label>
                   )}
                 </div>
-              )}
-              {(beSweep ? beOn : beDefault) && (
-                <SweepRow
-                  label="BE%"
-                  title="BreakEven lock % of R"
-                  value={bePctRange}
-                  onChange={setBePctRange}
-                  stepHint="5"
-                />
               )}
               <SweepRow
                 label="Vol"
@@ -1743,12 +1821,22 @@ export function OptimizeTab({
                         BE{' '}
                         <b>
                           {Number(overview.break_even)
-                            ? `On ${fmt2(Number(overview.break_even_pct ?? 0))}%`
+                            ? String(overview.be_unit) === 'range'
+                              ? 'On Range'
+                              : String(overview.be_unit) === 'pct'
+                                ? `On ${fmt2(Number(overview.be_value ?? overview.break_even_pct ?? 0))}%`
+                                : `On ${fmt2(Number(overview.be_value ?? 0))} ${String(overview.be_unit || '')}`
                             : 'Off'}
                         </b>
                       </span>
                       <span className={Number(overview.net_pnl) >= 0 ? 'pos' : 'neg'}>
                         net <b>{fmt2(overview.net_pnl)}</b>
+                      </span>
+                      <span className="neg">
+                        slip <b>{fmt2(Number(overview.total_slippage ?? 0))}</b>
+                      </span>
+                      <span className="neg">
+                        fees <b>{fmt2(Number(overview.total_fees ?? 0))}</b>
                       </span>
                       <span>
                         sharpe <b>{fmt2(overview.sharpe)}</b>

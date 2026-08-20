@@ -14,13 +14,19 @@ export type StrategyParams = {
   /** Pro VWAP band multiplier: 1, 2, or 3 (default 2). */
   pro_vwap_sigma: number
   rr: number
-  /** SL/TP sizing: range (AGGR×RR) | tick | points | pct */
+  /** Legacy shared SL/TP unit; used if sl_unit/tp_unit omitted. */
   sl_tp_unit: 'range' | 'tick' | 'points' | 'pct'
-  /** Stop distance when unit is tick / points / pct */
+  /** Stop on/off (LSL/SSL). Independent of Target. */
+  sl_on: number
+  /** Target on/off (LT/ST). Independent of Stop. */
+  tp_on: number
+  sl_unit: 'range' | 'tick' | 'points' | 'pct'
+  tp_unit: 'range' | 'tick' | 'points' | 'pct'
+  /** Stop distance when SL unit is tick / points / pct */
   stop_loss: number
-  /** Target distance when unit is tick / points / pct */
+  /** Target distance when TP unit is tick / points / pct */
   take_profit: number
-  /** 1 = Risk box live (LSL/SSL + LT/ST). 0 = no Risk SL/TP. */
+  /** Legacy: 1 if SL or TP on. */
   risk_on: number
   /** 1 = trail stop as price moves favorably */
   trail_stop: number
@@ -44,13 +50,13 @@ export type StrategyParams = {
   re_entry: number
   /** 1 = move stop to new AGGR extreme only if past entry (BE+); 0 = always tighten. */
   stop_to_be: number
-  /** 1 = arm at BE value → lock stop at BE% of that distance once; 0 = off. */
+  /** 1 = BreakEven on; 0 = off. */
   break_even: number
-  /** BreakEven lock as % of arm distance (default 50). */
+  /** Legacy lock % (ignored). Range locks 50% of R; % mode uses be_value. */
   break_even_pct: number
-  /** BreakEven arm-distance unit (independent of Risk). Range = AGGR gap. */
+  /** Range/% = old 1R arm. Tick/Points = arm at be_value. */
   be_unit: 'range' | 'tick' | 'points' | 'pct'
-  /** BreakEven arm distance when unit is tick / points / pct */
+  /** % = old BE% lock of R. Tick/Points = arm distance. Unused for Range. */
   be_value: number
   start: string
   end: string
@@ -269,6 +275,10 @@ export type OptimizePoint = {
   break_even?: number
   break_even_pct?: number
   sl_tp_unit?: string
+  sl_on?: number
+  tp_on?: number
+  sl_unit?: string
+  tp_unit?: string
   stop_loss?: number
   take_profit?: number
   trail_stop?: number
@@ -445,10 +455,14 @@ export async function fetchOptimize(
     break_even_flags?: string
     break_even_pcts?: string
     sl_tp_unit?: string
+    sl_unit?: string
+    tp_unit?: string
     stop_losses?: string
     take_profits?: string
     trail_stop_flags?: string
     risk_on_flags?: string
+    sl_on_flags?: string
+    tp_on_flags?: string
     trail_unit?: string
     trail_value?: number
     be_unit?: string

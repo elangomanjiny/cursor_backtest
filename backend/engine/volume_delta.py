@@ -129,6 +129,37 @@ def _unit_offset(
     return d if d > 0 else ts
 
 
+def _price_level(
+    *,
+    raw_entry: float,
+    is_long: bool,
+    unit: str,
+    value: float,
+    rr: float,
+    range_: float,
+    range_stop: float | None,
+    tick_size: float,
+    is_stop: bool,
+) -> float:
+    """Stop or target price from an independent unit (Range / tick / points / %)."""
+    u = _normalize_sl_tp_unit(unit)
+    entry = float(raw_entry)
+    if u == "range":
+        rng = abs(float(range_))
+        if is_stop:
+            if range_stop is None:
+                raise ValueError("range stop requires range_stop")
+            return float(range_stop)
+        return entry + rng * float(rr) if is_long else entry - rng * float(rr)
+    off = _offset_from_entry(entry, value, u, tick_size)
+    ts = max(float(tick_size), 1e-12)
+    if off <= 0:
+        off = ts
+    if is_stop:
+        return entry - off if is_long else entry + off
+    return entry + off if is_long else entry - off
+
+
 def resolve_stop_target(
     *,
     raw_entry: float,
@@ -736,7 +767,7 @@ def _scan_ticks_until(
     Walk ticks from i while ts < until.
     Returns (next_i, exit_ts, exit_px, reason). reason None => still open.
     Stop/target fills use level price; session/time-stop/EOD use trade price.
-    Directional BreakEven: when arm touched once, move stop to BE% lock (no exit).
+    BreakEven: when arm touched once, move stop to lock (no exit).
     """
     if book.n == 0 or i >= book.n:
         return i, None, None, None
@@ -797,7 +828,7 @@ def _scan_ticks_until(
             if (not is_long) and px >= inv:
                 return i + 1, ts, inv, "SMTF"
 
-        # BreakEven: arm at be_offset, lock at BE% × that distance (once)
+        # BreakEven: arm at be_offset, lock at be_frac × that distance (once)
         if active.get("be_enabled") and not active.get("be_moved"):
             arm = float(active["be_arm"])
             lock = float(active["be_lock"])
@@ -866,7 +897,11 @@ def run_backtest(
     stop_loss: float = 50.0,
     take_profit: float = 100.0,
     trail_stop: int = 0,
-    risk_on: int = 1,
+    risk_on: int | None = 1,
+    sl_on: int | None = None,
+    tp_on: int | None = None,
+    sl_unit: str | None = None,
+    tp_unit: str | None = None,
     trail_unit: str = "range",
     trail_value: float = 0.0,
     be_unit: str = "range",
@@ -928,10 +963,14 @@ def run_backtest(
     stobe = 0
     # Stop is a hard exit. Reverse is opposite-AGGR (Dir + Non-Dir only).
     allow_reverse = False
-    sl_unit = _normalize_sl_tp_unit(sl_tp_unit)
+    sl_u = _normalize_sl_tp_unit(sl_unit or sl_tp_unit)
+    tp_u = _normalize_sl_tp_unit(tp_unit or sl_tp_unit)
     tick_sz = symbol_tick_size(symbol)
     trail_on = 1 if int(trail_stop or 0) else 0
-    risk_live = 1 if int(risk_on if risk_on is not None else 1) else 0
+    risk_fallback = 1 if int(risk_on if risk_on is not None else 1) else 0
+    sl_live = 1 if int(sl_on if sl_on is not None else risk_fallback) else 0
+    tp_live = 1 if int(tp_on if tp_on is not None else risk_fallback) else 0
+    risk_live = 1 if (sl_live or tp_live) else 0
     trail_u = _normalize_sl_tp_unit(trail_unit)
     trail_val = float(trail_value if trail_value is not None else 0.0)
     be_u = _normalize_sl_tp_unit(be_unit)
@@ -940,9 +979,16 @@ def run_backtest(
     tp_val = float(take_profit if take_profit is not None else 100.0)
     allow_trail = False
     aggr_reverse = (not pro) and (not mtf)
-    # BreakEven: all modes; distance from be_unit / be_value (Range = AGGR)
+    # BreakEven: unit + one input. Range/% = old method (arm at AGGR 1R).
+    #   range → lock 50% of R; pct → lock be_value% of R; tick/points → arm at
+    #   typed distance, lock at entry. break_even_pct is ignored (legacy).
     be_on = 1 if int(break_even or 0) else 0
-    be_frac = max(0.01, min(1.0, float(break_even_pct if break_even_pct is not None else 50) / 100.0))
+    if be_u == "range":
+        be_frac = 0.5
+    elif be_u == "pct":
+        be_frac = max(0.01, min(1.0, (be_val if be_val > 0 else 50.0) / 100.0))
+    else:
+        be_frac = 0.0  # tick/points: stop moves to entry
     tf_delta = timedelta(minutes=int(tf_minutes))
     hour_set = _parse_allowed_hours(allowed_entry_hours)
 
@@ -1099,9 +1145,15 @@ def run_backtest(
         entry = _apply_slip(raw, is_long=is_long, is_entry=True, slip_pct=slip)
         rng = float(range_)
         range_stop = float(signal_low if is_long else signal_high)
-        be_off = _unit_offset(
-            raw, be_val, be_u, tick_sz, range_=rng, range_stop=range_stop
+        range_off = _unit_offset(
+            raw, 0.0, "range", tick_sz, range_=rng, range_stop=range_stop
         )
+        if be_u in ("range", "pct"):
+            be_off = range_off
+        else:
+            be_off = _unit_offset(
+                raw, be_val, be_u, tick_sz, range_=rng, range_stop=range_stop
+            )
         if is_long:
             be_arm = float(raw) + be_off
             be_lock = float(raw) + be_frac * be_off
@@ -1113,8 +1165,8 @@ def run_backtest(
             if trail_on
             else 0.0
         )
-        use_stop = bool(risk_live or (trail_on and toff > 0))
-        use_target = bool(risk_live)
+        use_stop = bool(sl_live or (trail_on and toff > 0))
+        use_target = bool(tp_live)
         return {
             "is_long": is_long,
             "entry": entry,
@@ -1172,26 +1224,37 @@ def run_backtest(
             if trail_on
             else 0.0
         )
-        if risk_live:
-            stop, target, sl_off = resolve_stop_target(
+        if sl_live:
+            stop = _price_level(
                 raw_entry=raw,
                 is_long=is_long,
-                unit=sl_unit,
-                stop_loss=sl_val,
-                take_profit=tp_val,
+                unit=sl_u,
+                value=sl_val,
                 rr=rr,
                 range_=range_,
                 range_stop=range_stop,
                 tick_size=tick_sz,
+                is_stop=True,
             )
-            return stop, target, toff if trail_on else sl_off
-        if trail_on and toff > 0:
-            if is_long:
-                return raw - toff, raw + far, toff
-            return raw + toff, raw - far, toff
-        if is_long:
-            return raw - far, raw + far, toff
-        return raw + far, raw - far, toff
+        elif trail_on and toff > 0:
+            stop = raw - toff if is_long else raw + toff
+        else:
+            stop = raw - far if is_long else raw + far
+        if tp_live:
+            target = _price_level(
+                raw_entry=raw,
+                is_long=is_long,
+                unit=tp_u,
+                value=tp_val,
+                rr=rr,
+                range_=range_,
+                range_stop=range_stop,
+                tick_size=tick_sz,
+                is_stop=False,
+            )
+        else:
+            target = raw + far if is_long else raw - far
+        return stop, target, toff
 
     def _open_from_orb(
         *,
@@ -1564,8 +1627,8 @@ def run_backtest(
                     long_setup["bars"] += 1
                     stop_lvl = float(long_setup["low"])
                     hit_setup = (
-                        bool(risk_live)
-                        and sl_unit == "range"
+                        bool(sl_live)
+                        and sl_u == "range"
                         and (o <= stop_lvl or l <= stop_lvl)
                     )
                     hit_mtf = mtf and mtf_inv is not None and (o <= float(mtf_inv) or l <= float(mtf_inv))
@@ -1580,8 +1643,8 @@ def run_backtest(
                     short_setup["bars"] += 1
                     stop_lvl = float(short_setup["high"])
                     hit_setup = (
-                        bool(risk_live)
-                        and sl_unit == "range"
+                        bool(sl_live)
+                        and sl_u == "range"
                         and (o >= stop_lvl or h >= stop_lvl)
                     )
                     hit_mtf = mtf and mtf_inv is not None and (o >= float(mtf_inv) or h >= float(mtf_inv))
@@ -1613,7 +1676,7 @@ def run_backtest(
                             range_stop=range_stop,
                         )
                         # Long stop must be strictly below entry (Risk On only)
-                        if risk_live and stop >= raw:
+                        if sl_live and stop >= raw:
                             events.append(f"LE-SKIP-BADSTOP@{stop:.2f}>={raw:.2f}")
                             long_setup = None
                         else:
@@ -1655,7 +1718,7 @@ def run_backtest(
                             range_stop=range_stop,
                         )
                         # Short stop must be strictly above entry (Risk On only)
-                        if risk_live and stop <= raw:
+                        if sl_live and stop <= raw:
                             events.append(f"SE-SKIP-BADSTOP@{stop:.2f}<={raw:.2f}")
                             short_setup = None
                         else:
@@ -1915,7 +1978,11 @@ def run_backtest(
         "base_tf_minutes": int(base_tf) if mtf else 0,
         "base_threshold": float(base_thr) if mtf else 0.0,
         "pro_vwap_sigma": sigma_n,
-        "sl_tp_unit": sl_unit,
+        "sl_tp_unit": sl_u if sl_u == tp_u else f"{sl_u}/{tp_u}",
+        "sl_on": int(sl_live),
+        "tp_on": int(tp_live),
+        "sl_unit": sl_u,
+        "tp_unit": tp_u,
         "stop_loss": sl_val,
         "take_profit": tp_val,
         "trail_stop": int(trail_on),

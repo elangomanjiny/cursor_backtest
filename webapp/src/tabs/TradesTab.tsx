@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from 'react'
 import type { AggressiveRow, BacktestResult, BarRow, TradeRow } from '../api'
-import { fmt2, fmtPct } from '../format'
+import { fmt2 } from '../format'
 import { selectTrade, useChartStudy } from '../chartStudyStore'
 import { SortTh, useSortable } from '../useSortable'
 
@@ -71,10 +71,6 @@ type TradeView = {
   exitTag: string
   slip: number
   fee: number
-  /** Realized slip as % of entry notional */
-  slipPct: number
-  /** Realized fee as % of round-trip notional */
-  feePct: number
   pnl: number
   cumPnl: number
   mfeTicks: number
@@ -151,11 +147,6 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
       const eRatio = maeAbs > 1e-12 ? mfe / maeAbs : mfe > 0 ? 999 : 0
       const slip = Number(t.slippage ?? 0)
       const fee = Number(t.fee ?? 0)
-      const entryNotional = Math.abs(Number(t.entry_price)) * lots
-      const rtNotional =
-        (Math.abs(Number(t.entry_price)) + Math.abs(Number(t.exit_price))) * lots
-      const slipPct = entryNotional > 1e-12 ? (slip / entryNotional) * 100 : 0
-      const feePct = rtNotional > 1e-12 ? (fee / rtNotional) * 100 : 0
       return {
         idx: i,
         date: sigDT.date,
@@ -181,8 +172,6 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
         exitTag: t.exit_reason,
         slip,
         fee,
-        slipPct,
-        feePct,
         pnl: t.pnl,
         cumPnl: run,
         mfeTicks,
@@ -317,20 +306,20 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
                     Exit Tag
                   </SortTh>
                   <SortTh
-                    col="slipPct"
+                    col="slip"
                     sort={tradesSort.sort}
                     onSort={tradesSort.toggle}
-                    title="Realized slippage as % of entry notional"
+                    title="Quote cost from worse fills on BOTH legs: entry and exit each slip Slip% of price × lots. Slip% 0.01 on a ~1864 fill is ~0.19 per side, ~0.37 round-trip — not 0.02%."
                   >
-                    Slip%
+                    Slip
                   </SortTh>
                   <SortTh
-                    col="feePct"
+                    col="fee"
                     sort={tradesSort.sort}
                     onSort={tradesSort.toggle}
-                    title="Realized fee as % of round-trip notional"
+                    title="Quote fee on BOTH legs: (entry + exit) × lots × Fee%/100. Fee% 0.01 is 0.01% of each fill, not of the mid once. ~0.37 on this ETH size-1 trade."
                   >
-                    Fee%
+                    Fee
                   </SortTh>
                   <SortTh col="pnl" sort={tradesSort.sort} onSort={tradesSort.toggle}>
                     PnL
@@ -394,11 +383,17 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
                       <td>{fmt2(r.lots)}</td>
                       <td>{r.entryTag}</td>
                       <td>{r.exitTag}</td>
-                      <td title={`$${fmt2(r.slip)} absolute`}>
-                        {fmtPct(r.slipPct, 3)}
+                      <td
+                        className="neg"
+                        title={`Entry and exit each worsened by Slip% of price × lots`}
+                      >
+                        {fmt2(r.slip)}
                       </td>
-                      <td title={`$${fmt2(r.fee)} absolute`}>
-                        {fmtPct(r.feePct, 3)}
+                      <td
+                        className="neg"
+                        title={`(entry + exit) × lots × Fee%/100`}
+                      >
+                        {fmt2(r.fee)}
                       </td>
                       <td className={r.pnl >= 0 ? 'pos' : 'neg'}>{fmt2(r.pnl)}</td>
                       <td className={r.cumPnl >= 0 ? 'pos' : 'neg'}>{fmt2(r.cumPnl)}</td>

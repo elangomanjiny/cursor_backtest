@@ -40,6 +40,10 @@ export function comboKey(r: {
   fee_pct?: number
   volume?: number
   trail_stop?: number
+  sl_on?: number
+  tp_on?: number
+  sl_unit?: string
+  tp_unit?: string
   risk_on?: number
   trail_unit?: string
   trail_value?: number
@@ -71,9 +75,12 @@ export function comboKey(r: {
     n(r.fee_pct),
     n(r.volume),
     n(r.trail_stop),
-    n(r.risk_on),
+    n(r.sl_on ?? r.risk_on),
+    n(r.tp_on ?? r.risk_on),
     n(r.stop_loss),
     n(r.take_profit),
+    String(r.sl_unit ?? r.sl_tp_unit ?? ''),
+    String(r.tp_unit ?? r.sl_tp_unit ?? ''),
     String(r.sl_tp_unit ?? ''),
     String(r.trail_unit ?? ''),
     n(r.trail_value),
