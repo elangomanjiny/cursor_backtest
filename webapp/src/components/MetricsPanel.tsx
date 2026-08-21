@@ -1,4 +1,4 @@
-import { fmt2 } from '../format'
+import { fmt2, fmtCost } from '../format'
 import type { BacktestStats } from '../api'
 
 const CATEGORIES: { name: string; keys: { key: string; label: string; suffix?: string }[] }[] = [
@@ -75,11 +75,12 @@ export function MetricsPanel({ stats }: Props) {
           <div className="cat-items">
             {cat.keys.map(({ key, label, suffix }) => {
               const v = Number(stats[key] ?? 0)
+              const cost = key === 'total_slippage' || key === 'total_fees'
               return (
                 <span className="m-item" key={key} title={key}>
                   <em>{label}</em>{' '}
                   <b className={v < 0 && key !== 'max_drawdown' && key !== 'gross_loss' ? 'neg' : ''}>
-                    {fmt2(v)}
+                    {cost ? fmtCost(v) : fmt2(v)}
                     {suffix || ''}
                   </b>
                 </span>

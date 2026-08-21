@@ -60,7 +60,7 @@ export type OptReportCol = {
   section: 'param' | 'equity' | 'metric'
   sortKey?: string
   get?: (r: Record<string, unknown>) => unknown
-  format?: 'text' | 'num' | 'time' | 'spark' | 'robust'
+  format?: 'text' | 'num' | 'time' | 'spark' | 'robust' | 'cost'
 }
 
 function strategyLabel(r: Record<string, unknown>): string {
@@ -166,21 +166,57 @@ export const OPTIMIZE_REPORT_COLUMNS: OptReportCol[] = [
   { key: 'volume', header: 'volume', label: 'Vol', section: 'param', format: 'num' },
   { key: 'equity', header: 'equity_spark', label: 'Equity', section: 'equity', format: 'spark' },
   { key: 'trades', header: 'trades', label: 'Trades', section: 'metric', format: 'num' },
-  { key: 'net_pnl', header: 'net_pnl', label: 'Net PnL', section: 'metric', format: 'num' },
   {
     key: 'total_slippage',
     header: 'total_slippage',
-    label: 'Slip',
+    label: 'Slip $',
     section: 'metric',
-    format: 'num',
+    format: 'cost',
   },
   {
     key: 'total_fees',
     header: 'total_fees',
-    label: 'Fees',
+    label: 'Fee $',
+    section: 'metric',
+    format: 'cost',
+  },
+  {
+    key: 'total_cost',
+    header: 'total_cost',
+    label: 'Total Cost',
+    section: 'metric',
+    format: 'cost',
+    get: (r) => {
+      if (r.total_cost != null && r.total_cost !== '') return Number(r.total_cost)
+      return Number(r.total_slippage ?? 0) + Number(r.total_fees ?? 0)
+    },
+  },
+  {
+    key: 'gross_profit',
+    header: 'gross_profit',
+    label: 'Gross+',
     section: 'metric',
     format: 'num',
   },
+  {
+    key: 'gross_loss',
+    header: 'gross_loss',
+    label: 'Gross−',
+    section: 'metric',
+    format: 'num',
+  },
+  {
+    key: 'gross_pnl',
+    header: 'gross_pnl',
+    label: 'Gross PnL',
+    section: 'metric',
+    format: 'num',
+    get: (r) => {
+      if (r.gross_pnl != null && r.gross_pnl !== '') return Number(r.gross_pnl)
+      return Number(r.net_pnl ?? 0) + Number(r.total_fees ?? 0)
+    },
+  },
+  { key: 'net_pnl', header: 'net_pnl', label: 'Net PnL', section: 'metric', format: 'num' },
   { key: 'sharpe', header: 'sharpe', label: 'Sharpe', section: 'metric', format: 'num' },
   { key: 'sortino', header: 'sortino', label: 'Sortino', section: 'metric', format: 'num' },
   { key: 'calmar', header: 'calmar', label: 'Calmar', section: 'metric', format: 'num' },
@@ -251,14 +287,6 @@ export const OPTIMIZE_REPORT_COLUMNS: OptReportCol[] = [
     format: 'num',
   },
   {
-    key: 'gross_profit',
-    header: 'gross_profit',
-    label: 'Gross Profit',
-    section: 'metric',
-    format: 'num',
-  },
-  { key: 'gross_loss', header: 'gross_loss', label: 'Gross Loss', section: 'metric', format: 'num' },
-  {
     key: 'robustness',
     header: 'robustness_score',
     label: 'Robustness Score',
@@ -267,6 +295,109 @@ export const OPTIMIZE_REPORT_COLUMNS: OptReportCol[] = [
     format: 'robust',
   },
 ]
+
+function numish(r: Record<string, unknown>, key: string, fallback = 0): number {
+  const v = r[key]
+  if (v === undefined || v === null || v === '') return fallback
+  const n = Number(v)
+  return Number.isFinite(n) ? n : fallback
+}
+
+function slOnRow(r: Record<string, unknown>): boolean {
+  return numish(r, 'sl_on', numish(r, 'risk_on', 1)) !== 0
+}
+
+function tpOnRow(r: Record<string, unknown>): boolean {
+  return numish(r, 'tp_on', numish(r, 'risk_on', 1)) !== 0
+}
+
+function unitOf(r: Record<string, unknown>, key: string): string {
+  return String(r[key] ?? r.sl_tp_unit ?? 'range')
+}
+
+function varied<T>(vals: T[]): boolean {
+  return new Set(vals.map((v) => String(v))).size > 1
+}
+
+/**
+ * Hide unused optimize-result columns for the current run.
+ * Off for every row → drop that feature's mode/unit/value columns.
+ * On but unused (e.g. SL=range → no SL distance) → drop the unused value.
+ */
+export function visibleOptimizeColumns(
+  rows: Record<string, unknown>[],
+): OptReportCol[] {
+  if (!rows.length) return OPTIMIZE_REPORT_COLUMNS
+  const hide = new Set<string>(['sl_tp_unit', 'risk_on'])
+
+  const slLive = rows.some(slOnRow)
+  const tpLive = rows.some(tpOnRow)
+  const trailLive = rows.some((r) => numish(r, 'trail_stop') !== 0)
+  const beLive = rows.some((r) => numish(r, 'break_even') !== 0)
+  const anyPro = rows.some(
+    (r) => numish(r, 'pro_mode') !== 0 && numish(r, 'pro_mtf_mode') === 0,
+  )
+  const anyMtf = rows.some((r) => numish(r, 'pro_mtf_mode') !== 0)
+
+  if (!slLive) {
+    hide.add('sl_on')
+    hide.add('sl_unit')
+    hide.add('stop_loss')
+  } else {
+    if (!varied(rows.map((r) => (slOnRow(r) ? 1 : 0)))) hide.add('sl_on')
+    const anyDist = rows.some((r) => slOnRow(r) && unitOf(r, 'sl_unit') !== 'range')
+    if (!anyDist) hide.add('stop_loss')
+  }
+
+  if (!tpLive) {
+    hide.add('tp_on')
+    hide.add('tp_unit')
+    hide.add('take_profit')
+    hide.add('rr')
+  } else {
+    if (!varied(rows.map((r) => (tpOnRow(r) ? 1 : 0)))) hide.add('tp_on')
+    const anyRange = rows.some((r) => tpOnRow(r) && unitOf(r, 'tp_unit') === 'range')
+    const anyDist = rows.some((r) => tpOnRow(r) && unitOf(r, 'tp_unit') !== 'range')
+    if (!anyRange) hide.add('rr')
+    if (!anyDist) hide.add('take_profit')
+  }
+
+  if (!trailLive) {
+    hide.add('trail_stop')
+    hide.add('trail_unit')
+    hide.add('trail_value')
+  } else {
+    if (!varied(rows.map((r) => numish(r, 'trail_stop')))) hide.add('trail_stop')
+    const anyDist = rows.some(
+      (r) => numish(r, 'trail_stop') !== 0 && String(r.trail_unit ?? 'range') !== 'range',
+    )
+    if (!anyDist) hide.add('trail_value')
+  }
+
+  if (!beLive) {
+    hide.add('be')
+    hide.add('break_even_pct')
+    hide.add('be_unit')
+    hide.add('be_value')
+  } else {
+    if (!varied(rows.map((r) => numish(r, 'break_even')))) hide.add('be')
+    hide.add('break_even_pct')
+    const anyDist = rows.some((r) => {
+      if (numish(r, 'break_even') === 0) return false
+      const u = String(r.be_unit ?? 'range')
+      return u === 'tick' || u === 'points' || u === 'pct'
+    })
+    if (!anyDist) hide.add('be_value')
+  }
+
+  if (!anyPro) hide.add('pro_vwap_sigma')
+  if (!anyMtf) {
+    hide.add('base_tf')
+    hide.add('base_threshold')
+  }
+
+  return OPTIMIZE_REPORT_COLUMNS.filter((c) => !hide.has(c.key))
+}
 
 function escapeCsv(v: unknown): string {
   const s = String(v ?? '')
@@ -290,7 +421,7 @@ export function downloadOptimizeCsv(
   filename = 'optimize-results.csv',
 ) {
   if (!rows.length) return
-  const cols = OPTIMIZE_REPORT_COLUMNS.filter((c) => c.format !== 'spark')
+  const cols = visibleOptimizeColumns(rows).filter((c) => c.format !== 'spark')
   const headers = cols.map((c) => c.header)
   const lines = [
     headers.join(','),
@@ -321,6 +452,7 @@ type TradeLiteRow = {
   mae?: number
   slippage?: number
   fee?: number
+  volume?: number
   entry_tag?: string
   exit_reason?: string
   be_moved?: boolean
@@ -339,11 +471,14 @@ const TRADE_CSV_HEADERS = [
   'Stop',
   'Target',
   'Points',
+  'Lots',
+  'Slip',
+  'Fee',
+  'TotalCost',
+  'GrossPnL',
   'PnL',
   'MFE',
   'MAE',
-  'Slip',
-  'Fee',
   'EntryTag',
   'ExitTag',
   'BE_Moved',
@@ -359,7 +494,7 @@ export function downloadComboDetailCsv(
   const lines: string[] = []
   lines.push('PARAMETERS_AND_METRICS')
   lines.push('key,value')
-  for (const c of OPTIMIZE_REPORT_COLUMNS) {
+  for (const c of visibleOptimizeColumns([row])) {
     if (c.format === 'spark') continue
     if (c.format === 'robust') {
       lines.push([escapeCsv(c.header), escapeCsv(row._robust ?? row.robustness_score ?? '')].join(','))
@@ -381,7 +516,12 @@ export function downloadComboDetailCsv(
       const entry = Number(t.entry_price ?? 0)
       const exit = Number(t.exit_price ?? 0)
       const side = String(t.side ?? '')
+      const lots = Number(row.volume ?? t.volume ?? 1)
       const points = side.toLowerCase().includes('short') ? entry - exit : exit - entry
+      const net = Number(t.pnl ?? 0)
+      const slip = Number(t.slippage ?? 0)
+      const fee = Number(t.fee ?? 0)
+      const gross = net + fee
       lines.push(
         [
           i + 1,
@@ -394,11 +534,14 @@ export function downloadComboDetailCsv(
           t.stop ?? '',
           t.target ?? '',
           points,
-          t.pnl ?? '',
+          lots,
+          slip,
+          fee,
+          slip + fee,
+          gross,
+          net,
           t.mfe ?? '',
           t.mae ?? '',
-          t.slippage ?? '',
-          t.fee ?? '',
           t.entry_tag ?? '',
           t.exit_reason ?? '',
           t.be_moved ? 1 : 0,

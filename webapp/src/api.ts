@@ -40,9 +40,9 @@ export type StrategyParams = {
   entry_before: number
   exit_time: number
   trade_mode: number
-  /** Slippage as % of price (worsens fills). */
+  /** Slippage as % of price on both fills (long entry + / exit −; short opposite). */
   slippage_pct: number
-  /** Fee as % of notional per side (entry + exit). */
+  /** Fee as % of slipped notional on both legs (entry + exit = 2 × avg). */
   fee_pct: number
   /** Max minutes in trade before market scratch (0 = off). */
   time_stop_minutes: number
@@ -291,6 +291,8 @@ export type OptimizePoint = {
   trades: number
   entry_tags?: Record<string, number>
   net_pnl: number
+  /** Fill gross = Net + Fees (slip already in Entry/Exit). */
+  gross_pnl?: number
   win_rate: number
   sharpe: number
   sortino: number
@@ -312,6 +314,7 @@ export type OptimizePoint = {
   kelly_fraction?: number
   total_slippage?: number
   total_fees?: number
+  total_cost?: number
   slippage_pct?: number
   fee_pct?: number
   entry_after?: number

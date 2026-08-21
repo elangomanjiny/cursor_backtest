@@ -72,6 +72,8 @@ _METRIC_COLUMNS = [
     "ulcer_index",
     "total_slippage",
     "total_fees",
+    "total_cost",
+    "gross_pnl",
     "trades",
 ]
 
@@ -594,6 +596,19 @@ def _worker_eval(job: dict[str, Any]) -> dict[str, Any]:
         "time_stop_minutes": float(c["time_stop_minutes"]),
         "total_slippage": float(result.stats.get("total_slippage") or 0),
         "total_fees": float(result.stats.get("total_fees") or 0),
+        "total_cost": float(
+            result.stats.get("total_cost")
+            if result.stats.get("total_cost") is not None
+            else (
+                float(result.stats.get("total_slippage") or 0)
+                + float(result.stats.get("total_fees") or 0)
+            )
+        ),
+        "gross_pnl": float(
+            result.stats.get("gross_pnl")
+            if result.stats.get("gross_pnl") is not None
+            else (float(result.stats.get("net_pnl") or 0) + float(result.stats.get("total_fees") or 0))
+        ),
         "slippage_pct": float(job["slippage_pct"]),
         "fee_pct": float(job["fee_pct"]),
         "entry_hours": _entry_hour_hist(result.trades),

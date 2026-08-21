@@ -62,7 +62,7 @@ def _excursions(active: dict[str, Any], h: float, l: float) -> None:
 
 
 def _apply_slip(px: float, *, is_long: bool, is_entry: bool, slip_pct: float) -> float:
-    """Worsen fill by slip_pct (% of price)."""
+    """Worsen fill by slip_pct (% of price). Long entry + / short entry −; opposite on exit."""
     if slip_pct <= 0:
         return px
     f = slip_pct / 100.0
@@ -210,13 +210,15 @@ def _make_trade(
     fee_pct: float = 0.0,
 ) -> Trade:
     is_long = bool(active["is_long"])
-    entry = float(active["entry"])
+    entry = float(active["entry"])  # already slipped at entry
     raw_entry = float(active.get("raw_entry", entry))
     exit_px = _apply_slip(px, is_long=is_long, is_entry=False, slip_pct=slip_pct)
     pnl = (exit_px - entry) * volume if is_long else (entry - exit_px) * volume
     slip_cost = (abs(entry - raw_entry) + abs(exit_px - px)) * volume
     fee = 0.0
     if fee_pct > 0:
+        # After slippage, both legs: (entry + exit) × lots × Fee%/100
+        # = 2 × avg(entry, exit) × lots × Fee%/100
         fee = (abs(entry) + abs(exit_px)) * volume * (fee_pct / 100.0)
         pnl -= fee
     tag = str(active.get("entry_tag") or ("LE" if is_long else "SE"))
@@ -355,10 +357,29 @@ def _to_ist(ts: pd.Timestamp | datetime) -> datetime:
     return ts.astimezone(IST)
 
 
-def _in_window(ts: datetime, after_min: int, before_min: int) -> bool:
+def _ist_tod_minutes(ts: datetime) -> int:
     ist = _to_ist(ts)
-    tod = ist.hour * 60 + ist.minute
+    return ist.hour * 60 + ist.minute
+
+
+def _in_window(ts: datetime, after_min: int, before_min: int) -> bool:
+    tod = _ist_tod_minutes(ts)
     return after_min <= tod < before_min
+
+
+def _past_session_flat(ts: datetime, exit_time: int) -> bool:
+    """True when IST clock has reached Flatten (same test as LTX/STX)."""
+    return _ist_tod_minutes(ts) >= int(exit_time)
+
+
+def _bar_overlaps_flat(ot: datetime, bar_end: datetime, exit_time: int) -> bool:
+    """True if any instant in [ot, bar_end) is at/after Flatten."""
+    if _past_session_flat(ot, exit_time):
+        return True
+    last = bar_end - timedelta(microseconds=1)
+    if last <= ot:
+        return False
+    return _past_session_flat(last, exit_time)
 
 
 def _parse_allowed_hours(raw: str | None) -> set[int] | None:
@@ -792,8 +813,7 @@ def _scan_ticks_until(
             active["mfe"] = max(float(active.get("mfe", 0.0)), entry - px)
             active["mae"] = max(float(active.get("mae", 0.0)), px - entry)
 
-        ist = _to_ist(ts)
-        if ist.hour * 60 + ist.minute >= exit_time:
+        if _past_session_flat(ts, exit_time):
             return i + 1, ts, px, ("LTX" if is_long else "STX")
 
         if tstop > 0:
@@ -917,6 +937,9 @@ def run_backtest(
     Session (IST, entry_after…entry_before, default 05:30–21:00):
       Only bars inside this window can form Aggressive candles / arm setups.
       Entries also require the entry bar open to fall inside the window.
+      Flatten (exit_time) closes an open trade (LTX/STX) and drops pending ORB /
+      next-bar setups / reverse-at-open so the next session cannot fill
+      yesterday's range. New AGGRs after After-time still arm.
 
     Performance:
       Session indicators (VWAP ±σ, …) are precomputed on *full* bars.
@@ -1381,6 +1404,28 @@ def run_backtest(
             events.append("FLIP-CANCEL")
             aggr_flip = None
 
+    def _cancel_stale_setups(events: list[str], why: str) -> None:
+        """Drop pending ORB / Directional setups / reverse so Flatten cannot fill next session."""
+        nonlocal orb, pending_reentry, aggr_flip, long_setup, short_setup
+        parts: list[str] = []
+        if orb is not None:
+            parts.append("orb")
+            orb = None
+        if pending_reentry is not None:
+            parts.append("reentry")
+            pending_reentry = None
+        if aggr_flip is not None:
+            parts.append("flip")
+            aggr_flip = None
+        if long_setup is not None:
+            parts.append("LE-setup")
+            long_setup = None
+        if short_setup is not None:
+            parts.append("SE-setup")
+            short_setup = None
+        if parts:
+            events.append(f"FLAT-CANCEL-{why}:{'+'.join(parts)}")
+
     def _handle_exit(
         x_ts: datetime,
         x_px: float,
@@ -1449,6 +1494,8 @@ def run_backtest(
             return True
 
         _close(x_ts, x_px, final, events)
+        if reason in ("LTX", "STX"):
+            _cancel_stale_setups(events, reason)
         if reason in ("LSL", "SSL") and re_en == 1:
             pending_reentry = {
                 "is_long": is_long,
@@ -1477,6 +1524,9 @@ def run_backtest(
         delta_b = float(row.get("delta_base", 0.0))
         events: list[str] = []
         closed_this_bar = False
+        session_flat = _bar_overlaps_flat(ot, bar_end, exit_time)
+        if session_flat:
+            _cancel_stale_setups(events, "clock")
 
         mtf_mode, mtf_inv = (None, None)
         if mtf:
@@ -1502,7 +1552,7 @@ def run_backtest(
             side_ok = (want == "LR" and active["is_long"]) or (
                 want == "SR" and not active["is_long"]
             )
-            if side_ok and in_win:
+            if side_ok and in_win and not session_flat:
                 tick_i = book.seek(ot, tick_i)
                 closed_this_bar = _handle_exit(ot, o, want, events, until=bar_end)
                 tick_managed = True
@@ -1530,7 +1580,7 @@ def run_backtest(
             if orb is not None and orb["signal_time"] < ot:
                 orb["bars"] = int(orb.get("bars", 0)) + 1
 
-            if active is None and in_win:
+            if active is None and in_win and not session_flat:
                 # If ticks were already consumed this bar (e.g. stop then flat),
                 # never fall back to bar-open OHLC — that would timestamp before the exit.
                 bar_tick_start = book.seek(ot, 0)
@@ -1656,7 +1706,7 @@ def run_backtest(
                         events.append("SE-SETUP-CANCEL-MTF")
                         short_setup = None
 
-            if active is None and in_win:
+            if active is None and in_win and not session_flat:
                 bar_tick_start = book.seek(ot, 0)
                 # Flat since bar open only — avoids entry_time < prior mid-bar exit
                 if tick_i <= bar_tick_start:
@@ -1809,7 +1859,9 @@ def run_backtest(
             if aggr_reverse and active is not None:
                 _arm_flip_from_aggr(side, h, l, rng, ot, dlt, events)
 
-            if wait_and_trade:
+            if session_flat:
+                events.append("AGGR-SKIP-FLAT")
+            elif wait_and_trade:
                 # Any AGGR → shared ORB range (both sides), cancel stop re-entry wait
                 if allow_long or allow_short:
                     orb = {
@@ -1964,6 +2016,8 @@ def run_backtest(
         "win_rate": round(wins / len(trades) * 100, 2) if trades else 0.0,
         "total_slippage": round(total_slip, 6),
         "total_fees": round(total_fee, 6),
+        "gross_pnl": round(sum(float(t.pnl) + float(t.fee) for t in trades), 6) if trades else 0.0,
+        "total_cost": round(total_slip + total_fee, 6),
         "re_entry": re_en,
         "stop_to_be": stobe,
         "break_even": int(be_on),

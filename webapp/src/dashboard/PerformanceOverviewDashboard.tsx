@@ -7,7 +7,7 @@ import {
 } from './computeDashboard'
 import { MetricRow, StreakBars, WinRateGauge } from './widgets'
 import { FT } from './theme'
-import { fmt2, fmtPct } from '../format'
+import { fmt2, fmtCost, fmtPct } from '../format'
 
 type Props = {
   data: BacktestResult
@@ -15,25 +15,6 @@ type Props = {
 }
 
 type SideFilter = 'all' | 'long' | 'short'
-
-function fmtDur(hours: number): string {
-  if (!Number.isFinite(hours) || hours <= 0) return '—'
-  if (hours < 24) return `${fmt2(hours)}h`
-  return `${fmt2(hours / 24)}d`
-}
-
-function fmtIsoShort(iso: string): string {
-  const d = new Date(iso)
-  if (!Number.isFinite(d.getTime())) return '—'
-  return d.toLocaleString('en-GB', {
-    timeZone: 'Asia/Kolkata',
-    month: 'short',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23',
-  })
-}
 
 function safeNum(n: number, digits = true): string {
   if (!Number.isFinite(n)) return '—'
@@ -43,17 +24,19 @@ function safeNum(n: number, digits = true): string {
 function SideCell({
   value,
   tone,
+  active,
 }: {
   value: string
   tone?: 'pos' | 'neg' | 'long' | 'short' | ''
+  active?: boolean
 }) {
-  const cls =
-    tone === 'pos' || tone === 'long'
-      ? 'pos'
-      : tone === 'neg' || tone === 'short'
-        ? 'neg'
-        : ''
-  return <td className={cls}>{value}</td>
+  const cls = [
+    tone === 'pos' || tone === 'long' ? 'pos' : tone === 'neg' || tone === 'short' ? 'neg' : '',
+    active ? 'active-col' : '',
+  ]
+    .filter(Boolean)
+    .join(' ')
+  return <td className={cls || undefined}>{value}</td>
 }
 
 function sideTone(n: number): 'pos' | 'neg' | '' {
@@ -67,7 +50,6 @@ export function PerformanceOverviewDashboard({ data, visible = true }: Props) {
   const { all, long, short } = model.bySide
   const [rf, setRf] = useState(0)
   const [sideFilter, setSideFilter] = useState<SideFilter>('all')
-  const [tradeSort, setTradeSort] = useState<'idx' | 'pnl' | 'duration'>('idx')
 
   const adjSharpe = useMemo(
     () => sharpeWithRiskFree(model.stepReturns, model.stepsPerYear, rf),
@@ -77,20 +59,45 @@ export function PerformanceOverviewDashboard({ data, visible = true }: Props) {
   const filteredBucket: SideBucketStats =
     sideFilter === 'long' ? long : sideFilter === 'short' ? short : all
 
-  const recentSorted = useMemo(() => {
-    let rows = [...model.allTradeRows]
-    if (sideFilter === 'long') {
-      rows = rows.filter((t) => t.type.toLowerCase().includes('long'))
-    } else if (sideFilter === 'short') {
-      rows = rows.filter((t) => t.type.toLowerCase().includes('short'))
-    }
-    if (tradeSort === 'pnl') rows.sort((a, b) => b.pnl - a.pnl)
-    else if (tradeSort === 'duration') rows.sort((a, b) => b.durationHours - a.durationHours)
-    else rows.sort((a, b) => b.idx - a.idx)
-    return rows.slice(0, 40)
-  }, [model.allTradeRows, tradeSort, sideFilter])
-
   const cagrDisplay = Number.isFinite(m.cagrPct) ? `${fmtPct(m.cagrPct)}%` : 'N/A'
+
+  const sideAdjSharpe = useMemo(
+    () =>
+      sideFilter === 'all'
+        ? adjSharpe
+        : sharpeWithRiskFree(filteredBucket.stepReturns, filteredBucket.stepsPerYear, rf),
+    [sideFilter, adjSharpe, filteredBucket.stepReturns, filteredBucket.stepsPerYear, rf],
+  )
+
+  const risk =
+    sideFilter === 'all'
+      ? {
+          cagr: cagrDisplay,
+          sharpe: adjSharpe,
+          maxDdPct: m.maxDrawdownPct,
+          maxDdAbs: m.maxDrawdownAbs,
+          ddDur: `${fmt2(m.maxDdDurationDays)}d · ${m.maxDdDurationBars} bars`,
+          sortino: m.sortino,
+          calmar: m.calmar,
+          recovery: m.recoveryFactor,
+          vol: m.volatilityAnnPct,
+          equitySpark: m.equitySpark,
+          ddSpark: m.ddRawSpark,
+        }
+      : {
+          cagr: 'N/A',
+          sharpe: sideAdjSharpe,
+          maxDdPct: filteredBucket.maxDrawdownPct,
+          maxDdAbs: filteredBucket.maxDrawdownAbs,
+          ddDur: '—',
+          sortino: filteredBucket.sortino,
+          calmar: filteredBucket.calmar,
+          recovery: filteredBucket.recoveryFactor,
+          vol: filteredBucket.volatilityAnnPct,
+          equitySpark: filteredBucket.equitySpark,
+          ddSpark: filteredBucket.ddSpark,
+        }
+
   const mode =
     Number(data.pro_mtf_mode) || String(data.stats?.strategy_mode || '') === 'pro_mtf'
       ? `Pro-MTF ${Number(data.base_tf_minutes || data.stats?.base_tf_minutes || 15)}m`
@@ -136,8 +143,14 @@ export function PerformanceOverviewDashboard({ data, visible = true }: Props) {
 
       <div className="pod-perf-grid">
         <section className="glass-panel pod-stat-card pod-card-ratios">
-          <h3 className="pod-section-h">RISK &amp; RETURN RATIOS</h3>
-          <p className="pod-card-note">Portfolio equity (not side-filtered)</p>
+          <h3 className="pod-section-h">
+            RISK &amp; RETURN RATIOS{sideFilter !== 'all' ? ` (${sideFilter.toUpperCase()})` : ''}
+          </h3>
+          <p className="pod-card-note">
+            {sideFilter === 'all'
+              ? 'Portfolio equity path (all sides).'
+              : 'From this side’s trade PnL path only (not mixed-portfolio equity).'}
+          </p>
           <label className="pod-rf">
             Risk-free %
             <input
@@ -148,31 +161,27 @@ export function PerformanceOverviewDashboard({ data, visible = true }: Props) {
               title="Annual risk-free rate for Sharpe"
             />
           </label>
-          <MetricRow icon="↗" label="CAGR %" value={cagrDisplay} spark={m.equitySpark} />
+          <MetricRow icon="↗" label="CAGR %" value={risk.cagr} spark={risk.equitySpark} />
           <MetricRow
             icon="σ"
             label={`Sharpe (rf ${fmt2(rf)}%)`}
-            value={fmt2(adjSharpe)}
-            spark={m.equitySpark}
+            value={fmt2(risk.sharpe)}
+            spark={risk.equitySpark}
             sparkStroke={FT.azure}
           />
           <MetricRow
             icon="▼"
             label="Max Drawdown %"
-            value={`${fmtPct(m.maxDrawdownPct)}%`}
-            spark={m.ddRawSpark}
+            value={`${fmtPct(risk.maxDdPct)}%`}
+            spark={risk.ddSpark}
             sparkStroke={FT.crimson}
           />
-          <MetricRow icon="↓" label="Max DD $" value={fmt2(m.maxDrawdownAbs)} />
-          <MetricRow
-            icon="⏱"
-            label="DD Duration"
-            value={`${fmt2(m.maxDdDurationDays)}d · ${m.maxDdDurationBars} bars`}
-          />
-          <MetricRow icon="◇" label="Sortino" value={fmt2(m.sortino)} />
-          <MetricRow icon="▣" label="Calmar" value={fmt2(m.calmar)} />
-          <MetricRow icon="↺" label="Recovery" value={fmt2(m.recoveryFactor)} />
-          <MetricRow icon="∿" label="Vol (ann.)" value={`${fmtPct(m.volatilityAnnPct)}%`} />
+          <MetricRow icon="↓" label="Max DD $" value={fmt2(risk.maxDdAbs)} />
+          <MetricRow icon="⏱" label="DD Duration" value={risk.ddDur} />
+          <MetricRow icon="◇" label="Sortino" value={fmt2(risk.sortino)} />
+          <MetricRow icon="▣" label="Calmar" value={fmt2(risk.calmar)} />
+          <MetricRow icon="↺" label="Recovery" value={fmt2(risk.recovery)} />
+          <MetricRow icon="∿" label="Vol (ann.)" value={`${fmtPct(risk.vol)}%`} />
         </section>
 
         <section className="glass-panel pod-stat-card">
@@ -184,7 +193,7 @@ export function PerformanceOverviewDashboard({ data, visible = true }: Props) {
             <div className="pod-hero-val">{fmtPct(filteredBucket.winRate)}%</div>
             <WinRateGauge pct={filteredBucket.winRate} />
           </div>
-          <table className="pod-side-table">
+          <table className={`pod-side-table filter-${sideFilter}`}>
             <thead>
               <tr>
                 <th>Metric</th>
@@ -242,7 +251,7 @@ export function PerformanceOverviewDashboard({ data, visible = true }: Props) {
               )}
             </div>
           </div>
-          <table className="pod-side-table">
+          <table className={`pod-side-table filter-${sideFilter}`}>
             <thead>
               <tr>
                 <th>Metric</th>
@@ -336,7 +345,7 @@ export function PerformanceOverviewDashboard({ data, visible = true }: Props) {
 
         <section className="glass-panel pod-stat-card">
           <h3 className="pod-section-h">CONSECUTIVE WINS / LOSSES</h3>
-          <table className="pod-side-table">
+          <table className={`pod-side-table filter-${sideFilter}`}>
             <thead>
               <tr>
                 <th>Metric</th>
@@ -381,89 +390,131 @@ export function PerformanceOverviewDashboard({ data, visible = true }: Props) {
         </section>
 
         <section className="glass-panel pod-stat-card">
-          <h3 className="pod-section-h">EXTREME STATS</h3>
-          <MetricRow icon="✓" label="Long Win ×" value={String(long.winCount)} />
-          <MetricRow icon="✗" label="Long Loss ×" value={String(long.lossCount)} />
-          <MetricRow icon="✓" label="Short Win ×" value={String(short.winCount)} />
-          <MetricRow icon="✗" label="Short Loss ×" value={String(short.lossCount)} />
-          <MetricRow
-            icon="★"
-            label="Largest Long Win"
-            value={long.trades ? safeNum(long.largestWin) : '—'}
-          />
-          <MetricRow
-            icon="☠"
-            label="Largest Long Loss"
-            value={long.trades ? safeNum(long.largestLoss) : '—'}
-          />
-          <MetricRow
-            icon="★"
-            label="Largest Short Win"
-            value={short.trades ? safeNum(short.largestWin) : '—'}
-          />
-          <MetricRow
-            icon="☠"
-            label="Largest Short Loss"
-            value={short.trades ? safeNum(short.largestLoss) : '—'}
-          />
+          <h3 className="pod-section-h">
+            EXTREME STATS{sideFilter !== 'all' ? ` (${sideFilter.toUpperCase()})` : ''}
+          </h3>
+          {sideFilter === 'all' ? (
+            <>
+              <MetricRow icon="✓" label="Long Win ×" value={String(long.winCount)} />
+              <MetricRow icon="✗" label="Long Loss ×" value={String(long.lossCount)} />
+              <MetricRow icon="✓" label="Short Win ×" value={String(short.winCount)} />
+              <MetricRow icon="✗" label="Short Loss ×" value={String(short.lossCount)} />
+              <MetricRow
+                icon="★"
+                label="Largest Long Win"
+                value={long.trades ? safeNum(long.largestWin) : '—'}
+              />
+              <MetricRow
+                icon="☠"
+                label="Largest Long Loss"
+                value={long.trades ? safeNum(long.largestLoss) : '—'}
+              />
+              <MetricRow
+                icon="★"
+                label="Largest Short Win"
+                value={short.trades ? safeNum(short.largestWin) : '—'}
+              />
+              <MetricRow
+                icon="☠"
+                label="Largest Short Loss"
+                value={short.trades ? safeNum(short.largestLoss) : '—'}
+              />
+            </>
+          ) : (
+            <>
+              <MetricRow
+                icon="✓"
+                label={`${sideFilter === 'long' ? 'Long' : 'Short'} Win ×`}
+                value={String(filteredBucket.winCount)}
+              />
+              <MetricRow
+                icon="✗"
+                label={`${sideFilter === 'long' ? 'Long' : 'Short'} Loss ×`}
+                value={String(filteredBucket.lossCount)}
+              />
+              <MetricRow
+                icon="★"
+                label="Largest Win"
+                value={filteredBucket.trades ? safeNum(filteredBucket.largestWin) : '—'}
+              />
+              <MetricRow
+                icon="☠"
+                label="Largest Loss"
+                value={filteredBucket.trades ? safeNum(filteredBucket.largestLoss) : '—'}
+              />
+            </>
+          )}
         </section>
 
-        <section className="glass-panel pod-stat-card pod-card-trades">
-          <div className="pod-section-h row">
-            <h3>TRADE LIST SUMMARY</h3>
-            <select
-              value={tradeSort}
-              onChange={(e) => setTradeSort(e.target.value as typeof tradeSort)}
-              aria-label="Sort trades"
-            >
-              <option value="idx">Recent</option>
-              <option value="pnl">PnL</option>
-              <option value="duration">Duration</option>
-            </select>
-          </div>
-          <div className="pod-mini-table-wrap pod-trades-scroll">
-            <table className="pod-mini-table">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Date</th>
-                  <th>Type</th>
-                  <th>PnL (%)</th>
-                  <th>Dur</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recentSorted.length === 0 && (
-                  <tr>
-                    <td colSpan={5} className="pod-muted">
-                      No trades{sideFilter !== 'all' ? ` (${sideFilter})` : ''}
-                    </td>
+        <section className="glass-panel pod-stat-card pod-card-friction">
+          <h3 className="pod-section-h">
+            P&amp;L &amp; FRICTION BREAKDOWN
+            {sideFilter !== 'all' ? ` (${sideFilter.toUpperCase()})` : ''}
+          </h3>
+          <p className="pod-card-note">
+            Gross = Points × lots. Net = Gross − Fees (slip is already in Entry/Exit). Total Cost =
+            Slip + Fees — not subtracted twice, and not the same as Gross Loss (sum of losing
+            trades).
+          </p>
+          <table className={`pod-side-table filter-${sideFilter}`}>
+            <thead>
+              <tr>
+                <th>Metric</th>
+                <th>ALL</th>
+                <th className="long">LONG</th>
+                <th className="short">SHORT</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(
+                [
+                  ['Gross Profit', 'grossProfit', 'money'] as const,
+                  ['Gross Loss', 'grossLoss', 'loss'] as const,
+                  ['Gross PnL', 'grossPnl', 'signed'] as const,
+                  ['Total Slippage Paid', 'totalSlippage', 'cost'] as const,
+                  ['Total Fees Paid', 'totalFees', 'cost'] as const,
+                  ['Total Cost (Slip+Fee)', 'totalFriction', 'cost'] as const,
+                  ['Net Profit / Realized PnL', 'netPnl', 'signed'] as const,
+                  ['Fee / Profit Drag %', 'feeDragPct', 'pct'] as const,
+                ] as const
+              ).map(([label, key, kind]) => {
+                const cell = (b: SideBucketStats, tone?: 'long' | 'short') => {
+                  if (!b.trades) return <SideCell value="—" tone={tone} />
+                  const n = b[key]
+                  if (kind === 'pct') {
+                    return (
+                      <SideCell
+                        value={b.grossProfit > 1e-12 ? `${fmtPct(n)}%` : '—'}
+                        tone={tone}
+                      />
+                    )
+                  }
+                  if (kind === 'cost' || kind === 'loss') {
+                    return (
+                      <SideCell
+                        value={kind === 'cost' ? fmtCost(n) : n ? `-${fmtCost(n)}` : fmt2(0)}
+                        tone={n ? 'neg' : tone}
+                      />
+                    )
+                  }
+                  return (
+                    <SideCell
+                      value={kind === 'money' || kind === 'signed' ? fmt2(n) : safeNum(n)}
+                      tone={kind === 'signed' ? sideTone(n) : n ? 'pos' : tone}
+                    />
+                  )
+                }
+                return (
+                  <tr key={key}>
+                    <td>{label}</td>
+                    {cell(all)}
+                    {cell(long, 'long')}
+                    {cell(short, 'short')}
                   </tr>
-                )}
-                {recentSorted.map((t) => (
-                  <tr key={t.idx}>
-                    <td>{t.idx}</td>
-                    <td>{fmtIsoShort(t.date)}</td>
-                    <td
-                      className={
-                        t.type.toLowerCase().includes('long')
-                          ? 'pos'
-                          : t.type.toLowerCase().includes('short')
-                            ? 'neg'
-                            : ''
-                      }
-                    >
-                      {t.type}
-                    </td>
-                    <td className={t.pnl >= 0 ? 'pos' : 'neg'}>
-                      {fmt2(t.pnl)} ({fmtPct(t.pnlPct)}%)
-                    </td>
-                    <td>{fmtDur(t.durationHours)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                )
+              })}
+            </tbody>
+          </table>
         </section>
       </div>
     </div>

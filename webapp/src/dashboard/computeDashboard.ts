@@ -114,6 +114,28 @@ export type SideBucketStats = {
   sqn: number
   maxConsecWins: number
   maxConsecLosses: number
+  /** Gross profit of winning trades before slip+fee deductions */
+  grossProfit: number
+  /** Absolute gross loss of losing trades before deductions */
+  grossLoss: number
+  /** Gross profit − gross loss (before friction) */
+  grossPnl: number
+  totalSlippage: number
+  totalFees: number
+  totalFriction: number
+  /** (Total friction / gross profit) * 100 */
+  feeDragPct: number
+  sharpe: number
+  sortino: number
+  calmar: number
+  maxDrawdownAbs: number
+  maxDrawdownPct: number
+  recoveryFactor: number
+  volatilityAnnPct: number
+  stepReturns: number[]
+  stepsPerYear: number
+  equitySpark: number[]
+  ddSpark: number[]
 }
 
 export type DashboardModel = {
@@ -159,6 +181,24 @@ function emptySideStats(): SideBucketStats {
     sqn: 0,
     maxConsecWins: 0,
     maxConsecLosses: 0,
+    grossProfit: 0,
+    grossLoss: 0,
+    grossPnl: 0,
+    totalSlippage: 0,
+    totalFees: 0,
+    totalFriction: 0,
+    feeDragPct: 0,
+    sharpe: 0,
+    sortino: 0,
+    calmar: 0,
+    maxDrawdownAbs: 0,
+    maxDrawdownPct: 0,
+    recoveryFactor: 0,
+    volatilityAnnPct: 0,
+    stepReturns: [],
+    stepsPerYear: 0,
+    equitySpark: [],
+    ddSpark: [],
   }
 }
 
@@ -179,6 +219,58 @@ function isLongSide(side: string): boolean {
 
 function isShortSide(side: string): boolean {
   return String(side).toLowerCase().includes('short')
+}
+
+function tradeGrossPnl(t: TradeRow): number {
+  /** Fill gross = Points × lots = Net + Fee. Slip is already in Entry/Exit. */
+  return (Number(t.pnl) || 0) + (Number(t.fee ?? 0) || 0)
+}
+
+function pathRisk(pnls: number[]) {
+  const eq = [0]
+  let run = 0
+  let peak = 0
+  let maxDd = 0
+  const ddPct: number[] = [0]
+  for (const p of pnls) {
+    run += p
+    peak = Math.max(peak, run)
+    const dd = peak - run
+    maxDd = Math.max(maxDd, dd)
+    eq.push(run)
+    ddPct.push(peak > 1e-9 ? (dd / Math.max(Math.abs(peak), 1e-9)) * 100 : 0)
+  }
+  const stepReturns: number[] = []
+  for (let i = 1; i < eq.length; i++) {
+    const prev = eq[i - 1]
+    stepReturns.push((eq[i] - prev) / Math.max(Math.abs(prev), 1))
+  }
+  const n = stepReturns.length
+  const mean = n ? stepReturns.reduce((a, b) => a + b, 0) / n : 0
+  const variance =
+    n > 1 ? stepReturns.reduce((s, r) => s + (r - mean) * (r - mean), 0) / (n - 1) : 0
+  const std = Math.sqrt(Math.max(0, variance))
+  const down = stepReturns.filter((r) => r < 0)
+  const downStd = down.length
+    ? Math.sqrt(down.reduce((s, r) => s + r * r, 0) / down.length)
+    : 0
+  const sharpe = std > 1e-12 ? (mean / std) * Math.sqrt(Math.max(n, 1)) : 0
+  const sortino =
+    downStd > 1e-12 ? (mean / downStd) * Math.sqrt(Math.max(n, 1)) : mean > 0 ? 999 : 0
+  const calmar = maxDd > 1e-12 ? run / maxDd : run > 0 ? 999 : 0
+  return {
+    stepReturns,
+    stepsPerYear: n,
+    sharpe,
+    sortino,
+    calmar,
+    recoveryFactor: calmar,
+    maxDrawdownAbs: maxDd,
+    maxDrawdownPct: peak > 1e-9 ? (maxDd / Math.max(Math.abs(peak), 1e-9)) * 100 : 0,
+    volatilityAnnPct: std * Math.sqrt(Math.max(n, 1)) * 100,
+    equitySpark: downsample(eq),
+    ddSpark: downsample(ddPct),
+  }
 }
 
 function computeSideBucket(trades: TradeRow[], volume: number, notionalFallback: number): SideBucketStats {
@@ -209,6 +301,17 @@ function computeSideBucket(trades: TradeRow[], volume: number, notionalFallback:
   const avgMfe = mfes.reduce((a, b) => a + b, 0) / trades.length
   const avgMae = maes.reduce((a, b) => a + b, 0) / trades.length
   const { maxW, maxL } = streaks(pnls)
+  const grosses = trades.map(tradeGrossPnl)
+  const gWins = grosses.filter((g) => g > 0)
+  const gLosses = grosses.filter((g) => g < 0)
+  const grossProfit = gWins.reduce((a, b) => a + b, 0)
+  const grossLoss = Math.abs(gLosses.reduce((a, b) => a + b, 0))
+  const grossPnl = grosses.reduce((a, b) => a + b, 0)
+  const totalSlippage = trades.reduce((a, t) => a + (Number(t.slippage ?? 0) || 0), 0)
+  const totalFees = trades.reduce((a, t) => a + (Number(t.fee ?? 0) || 0), 0)
+  const totalFriction = totalSlippage + totalFees
+  const feeDragPct = grossProfit > 1e-12 ? (totalFriction / grossProfit) * 100 : 0
+  const risk = pathRisk(pnls)
   return {
     trades: trades.length,
     netPnl: net,
@@ -230,6 +333,14 @@ function computeSideBucket(trades: TradeRow[], volume: number, notionalFallback:
     sqn: sqnFromPnls(pnls),
     maxConsecWins: maxW,
     maxConsecLosses: maxL,
+    grossProfit,
+    grossLoss,
+    grossPnl,
+    totalSlippage,
+    totalFees,
+    totalFriction,
+    feeDragPct,
+    ...risk,
   }
 }
 

@@ -149,8 +149,8 @@ const DEFAULTS: StrategyParams = {
   entry_before: 1260,
   exit_time: 1260,
   trade_mode: 2,
-  slippage_pct: 0,
-  fee_pct: 0,
+  slippage_pct: 0.005,
+  fee_pct: 0.05,
   time_stop_minutes: 0, // always off — TStop UI removed
   re_entry: 0,
   stop_to_be: 0,

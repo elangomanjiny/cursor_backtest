@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from 'react'
 import type { AggressiveRow, BacktestResult, BarRow, TradeRow } from '../api'
-import { fmt2 } from '../format'
+import { fmt2, fmtCost } from '../format'
 import { selectTrade, useChartStudy } from '../chartStudyStore'
 import { SortTh, useSortable } from '../useSortable'
 
@@ -71,6 +71,10 @@ type TradeView = {
   exitTag: string
   slip: number
   fee: number
+  slipTip: string
+  feeTip: string
+  totalCost: number
+  grossPnl: number
   pnl: number
   cumPnl: number
   mfeTicks: number
@@ -111,6 +115,8 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
     if (!data) return [] as TradeView[]
     const lots = Number(data.volume)
     const tick = instrumentTickSize(data.symbol)
+    const slipPct = Number(data.params?.slippage_pct ?? data.stats?.slippage_pct ?? 0)
+    const feePct = Number(data.params?.fee_pct ?? data.stats?.fee_pct ?? 0)
     let run = 0
     return data.trades.map((t, i) => {
       run += Number(t.pnl) || 0
@@ -147,6 +153,13 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
       const eRatio = maeAbs > 1e-12 ? mfe / maeAbs : mfe > 0 ? 999 : 0
       const slip = Number(t.slippage ?? 0)
       const fee = Number(t.fee ?? 0)
+      const feeExpect =
+        (Math.abs(Number(t.entry_price)) + Math.abs(Number(t.exit_price))) *
+        lots *
+        (feePct / 100)
+      const avg = (Math.abs(Number(t.entry_price)) + Math.abs(Number(t.exit_price))) / 2
+      const slipTip = `Both fills: long entry + / exit −, short entry − / exit +. Slip% ${slipPct}. Quote ${fmtCost(slip)}.`
+      const feeTip = `After slip, both legs: (entry+exit)×lots×Fee%/100 = 2×avg(${fmt2(avg)})×${lots}×${feePct}/100 = ${fmtCost(feeExpect)}`
       return {
         idx: i,
         date: sigDT.date,
@@ -172,6 +185,10 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
         exitTag: t.exit_reason,
         slip,
         fee,
+        slipTip,
+        feeTip,
+        totalCost: slip + fee,
+        grossPnl: (Number(t.pnl) || 0) + fee,
         pnl: t.pnl,
         cumPnl: run,
         mfeTicks,
@@ -309,7 +326,7 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
                     col="slip"
                     sort={tradesSort.sort}
                     onSort={tradesSort.toggle}
-                    title="Quote cost from worse fills on BOTH legs: entry and exit each slip Slip% of price × lots. Slip% 0.01 on a ~1864 fill is ~0.19 per side, ~0.37 round-trip — not 0.02%."
+                    title="Both fills: |entry slip| + |exit slip| × lots. Long +/−, short −/+."
                   >
                     Slip
                   </SortTh>
@@ -317,9 +334,25 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
                     col="fee"
                     sort={tradesSort.sort}
                     onSort={tradesSort.toggle}
-                    title="Quote fee on BOTH legs: (entry + exit) × lots × Fee%/100. Fee% 0.01 is 0.01% of each fill, not of the mid once. ~0.37 on this ETH size-1 trade."
+                    title="After slip, both legs: (entry+exit)×lots×Fee%/100 = 2×avg×lots×Fee%/100."
                   >
                     Fee
+                  </SortTh>
+                  <SortTh
+                    col="totalCost"
+                    sort={tradesSort.sort}
+                    onSort={tradesSort.toggle}
+                    title="Total Cost = Slip + Fee. Informational. Net = Gross − Fee only (slip is already in Entry/Exit)."
+                  >
+                    TotalCost
+                  </SortTh>
+                  <SortTh
+                    col="grossPnl"
+                    sort={tradesSort.sort}
+                    onSort={tradesSort.toggle}
+                    title="Fill Gross = Points × Lots = Net + Fee. Slip is already in Entry/Exit; do not add it again."
+                  >
+                    Gross PnL
                   </SortTh>
                   <SortTh col="pnl" sort={tradesSort.sort} onSort={tradesSort.toggle}>
                     PnL
@@ -383,18 +416,16 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
                       <td>{fmt2(r.lots)}</td>
                       <td>{r.entryTag}</td>
                       <td>{r.exitTag}</td>
-                      <td
-                        className="neg"
-                        title={`Entry and exit each worsened by Slip% of price × lots`}
-                      >
-                        {fmt2(r.slip)}
+                      <td className="neg" title={r.slipTip}>
+                        {fmtCost(r.slip)}
                       </td>
-                      <td
-                        className="neg"
-                        title={`(entry + exit) × lots × Fee%/100`}
-                      >
-                        {fmt2(r.fee)}
+                      <td className="neg" title={r.feeTip}>
+                        {fmtCost(r.fee)}
                       </td>
+                      <td className="neg" title={`Slip ${fmtCost(r.slip)} + Fee ${fmtCost(r.fee)}`}>
+                        {fmtCost(r.totalCost)}
+                      </td>
+                      <td className={r.grossPnl >= 0 ? 'pos' : 'neg'}>{fmt2(r.grossPnl)}</td>
                       <td className={r.pnl >= 0 ? 'pos' : 'neg'}>{fmt2(r.pnl)}</td>
                       <td className={r.cumPnl >= 0 ? 'pos' : 'neg'}>{fmt2(r.cumPnl)}</td>
                       <td className="pos" title={`${fmt2(r.mfeTicks)} ticks`}>
