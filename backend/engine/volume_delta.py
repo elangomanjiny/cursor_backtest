@@ -896,7 +896,7 @@ def run_backtest(
     tf_minutes: int = 15,
     wait_and_trade: bool = False,
     rr: float = 1.0,
-    volume: float = 0.01,
+    volume: float = 0.001,
     threshold: float = 50.0,
     entry_after: int = 330,
     entry_before: int = 1260,
