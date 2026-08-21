@@ -262,7 +262,7 @@ class Aggressive:
     range: float
     # Pro classifier (Lo/Sh/Se/Co); empty when not Pro or not qualified
     pro_tag: str = ""
-    # True when AGGR is outside VWAP ±Nσ (Pro qualifier)
+    # True when whole candle is above VWAP+Nσ or below VWAP−Nσ (Pro thumb rule)
     vwap_ok: bool = False
 
 
@@ -459,11 +459,16 @@ class _BinanceVwapTracker:
 def _outside_vwap_nsigma(
     high: float, low: float, vwap: float, stdev: float, n_sigma: float = 2.0
 ) -> bool:
-    """Pro qualifier: candle must touch above +Nσ or below −Nσ."""
+    """
+    Pro thumb rule at selected Nσ: whole candle above +Nσ or whole candle below −Nσ.
+    Above: low > VWAP + Nσ. Below: high < VWAP − Nσ. Wick-touch does not qualify.
+    """
     n = float(n_sigma)
     if n <= 0 or not (stdev > 0 and np.isfinite(vwap)):
         return False
-    return high >= vwap + n * stdev or low <= vwap - n * stdev
+    upper = vwap + n * stdev
+    lower = vwap - n * stdev
+    return float(low) > upper or float(high) < lower
 
 
 def session_tod_bounds(
@@ -957,9 +962,11 @@ def run_backtest(
 
     Pro (pro_mode=True; wait_and_trade ignored/forced off):
       Classify AGGR as Lo/Sh/Se/Co vs prior close (LTP).
-      Qualifier: candle must be outside Binance VWAP ±Nσ (05:30 IST session; N=1/2/3).
+      Qualifier (thumb rule): whole candle above VWAP+Nσ (low > +Nσ) or whole
+      candle below VWAP−Nσ (high < −Nσ). Wick-touch of the band does not qualify.
       Long entries from Lo|Co; Short from Sh|Se; next-bar open (Directional-style).
-      Optional BreakEven; no reverse / ORB trail.
+      Opposite Pro tag reverses at next bar open (Lo|Co vs Sh|Se). Tags LR/SR.
+      Optional BreakEven; no ORB trail. Pro-MTF does not reverse.
 
     Pro-MTF (pro_mtf_mode=True):
       Base TF AGGR sets bull/bear bias + invalid level (low/high); persists across days.
@@ -984,7 +991,7 @@ def run_backtest(
     # Pro features: forced off for now
     re_en = 0
     stobe = 0
-    # Stop is a hard exit. Reverse is opposite-AGGR (Dir + Non-Dir only).
+    # Stop is a hard exit. Reverse is opposite-AGGR (Dir, Non-Dir, Pro). Pro-MTF: no reverse.
     allow_reverse = False
     sl_u = _normalize_sl_tp_unit(sl_unit or sl_tp_unit)
     tp_u = _normalize_sl_tp_unit(tp_unit or sl_tp_unit)
@@ -1001,7 +1008,7 @@ def run_backtest(
     sl_val = float(stop_loss if stop_loss is not None else 50.0)
     tp_val = float(take_profit if take_profit is not None else 100.0)
     allow_trail = False
-    aggr_reverse = (not pro) and (not mtf)
+    aggr_reverse = not mtf  # Dir + Non-Dir + Pro; Pro-MTF stays directional-only
     # BreakEven: unit + one input. Range/% = old method (arm at AGGR 1R).
     #   range → lock 50% of R; pct → lock be_value% of R; tick/points → arm at
     #   typed distance, lock at entry. break_even_pct is ignored (legacy).
@@ -1381,15 +1388,25 @@ def run_backtest(
         sig_t: datetime,
         dlt: float,
         events: list[str],
+        pro_tag: str = "",
     ) -> None:
-        """Dir: reverse at next bar open. Non-Dir: fill when price takes opposite AGGR H/L."""
+        """Dir/Pro: reverse at next bar open. Non-Dir: fill when price takes opposite AGGR H/L."""
         nonlocal aggr_flip, active
         if active is None or not aggr_reverse:
             return
         is_long = bool(active["is_long"])
-        opposite = (is_long and side == "Sell") or ((not is_long) and side == "Buy")
+        if pro:
+            if not pro_tag:
+                return
+            opposite = (is_long and _pro_short_bias(pro_tag)) or (
+                (not is_long) and _pro_long_bias(pro_tag)
+            )
+            stamp_side = "Buy" if _pro_long_bias(pro_tag) else "Sell"
+        else:
+            opposite = (is_long and side == "Sell") or ((not is_long) and side == "Buy")
+            stamp_side = side
         if opposite:
-            _stamp_rev_aggr(hi, lo, rng, sig_t, dlt, side)
+            _stamp_rev_aggr(hi, lo, rng, sig_t, dlt, stamp_side)
             if wait_and_trade:
                 active["flip_px"] = float(lo) if is_long else float(hi)
                 events.append(f"FLIP-ARM@{active['flip_px']:.2f}")
@@ -1435,7 +1452,7 @@ def run_backtest(
         until: datetime,
     ) -> bool:
         """Close; on LR/SR try reverse; hard LSL/SSL only if reverse blocked and loss."""
-        nonlocal active, tick_i, pending_reentry
+        nonlocal active, tick_i, pending_reentry, aggr_flip
         if active is None:
             return False
         _flush_be_events(events)
@@ -1496,6 +1513,8 @@ def run_backtest(
         _close(x_ts, x_px, final, events)
         if reason in ("LTX", "STX"):
             _cancel_stale_setups(events, reason)
+        else:
+            aggr_flip = None
         if reason in ("LSL", "SSL") and re_en == 1:
             pending_reentry = {
                 "is_long": is_long,
@@ -1541,7 +1560,7 @@ def run_backtest(
 
         in_win = _in_session(ot, entry_after, entry_before, hour_set)
         tick_managed = False
-        # Directional: opposite-AGGR reverse fills at this bar's open (same as LE/SE)
+        # Directional / Pro: opposite-AGGR reverse fills at this bar's open (same as LE/SE)
         if (
             aggr_reverse
             and not wait_and_trade
@@ -1857,7 +1876,7 @@ def run_backtest(
                 _tighten_from_aggr(h, l, rng, ot, dlt, side)
 
             if aggr_reverse and active is not None:
-                _arm_flip_from_aggr(side, h, l, rng, ot, dlt, events)
+                _arm_flip_from_aggr(side, h, l, rng, ot, dlt, events, pro_tag=pro_tag)
 
             if session_flat:
                 events.append("AGGR-SKIP-FLAT")

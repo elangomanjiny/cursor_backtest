@@ -11,7 +11,7 @@ export type StrategyParams = {
   base_tf: number
   /** Pro-MTF base TF AGGR threshold %. */
   base_threshold: number
-  /** Pro VWAP band multiplier: 1, 2, or 3 (default 2). */
+  /** Pro VWAP Nσ: whole candle above +Nσ or below −Nσ (1, 2, or 3). */
   pro_vwap_sigma: number
   rr: number
   /** Legacy shared SL/TP unit; used if sl_unit/tp_unit omitted. */

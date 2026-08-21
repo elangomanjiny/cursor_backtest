@@ -177,7 +177,9 @@ export function outsideVwapNSigma(
 ): boolean {
   const n = Number(nSigma)
   if (!(n > 0) || !(stdev > 0) || !Number.isFinite(vwap)) return false
-  return high >= vwap + n * stdev || low <= vwap - n * stdev
+  const upper = vwap + n * stdev
+  const lower = vwap - n * stdev
+  return low > upper || high < lower
 }
 
 /** @deprecated use outsideVwapNSigma */

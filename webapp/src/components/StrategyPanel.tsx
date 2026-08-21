@@ -112,7 +112,7 @@ export function StrategyPanel({ params, onChange, busy, hideDataFields }: Props)
         />
       </label>
 
-      <label title="Directional = baseline. Non-Directional = ORB+reverse. Pro = Lo/Sh/Se/Co + VWAP±Nσ.">
+      <label title="Directional = baseline. Non-Directional = ORB+reverse. Pro = VWAP tags + reverse.">
         Strategy
         <select
           value={
@@ -142,7 +142,7 @@ export function StrategyPanel({ params, onChange, busy, hideDataFields }: Props)
       </label>
 
       {params.pro_mode && (
-        <label title="Pro qualifier: AGGR candle must be outside Binance VWAP ±Nσ (05:30 IST)">
+        <label title="Pro: whole candle above VWAP+Nσ (low > +Nσ) or below VWAP−Nσ (high < −Nσ). Then Lo/Sh/Se/Co.">
           VWAP σ
           <select
             value={params.pro_vwap_sigma}

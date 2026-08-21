@@ -299,7 +299,7 @@ export function BacktestStep({
               onChange={(e) => set('threshold', Number(e.target.value))}
             />
           </label>
-          <label title="Directional = baseline. Non-Directional = ORB+reverse. Pro = VWAP tags. Pro-MTF = HTF bias + LTF Directional.">
+          <label title="Directional = baseline. Non-Directional = ORB+reverse. Pro = VWAP tags + reverse. Pro-MTF = HTF bias + LTF Directional (no reverse).">
             Strategy
             <select
               value={
@@ -369,7 +369,7 @@ export function BacktestStep({
             </>
           )}
           {params.pro_mode && !params.pro_mtf_mode && (
-            <label title="Pro qualifier: AGGR candle must be outside Binance VWAP ±Nσ (05:30 IST)">
+            <label title="Pro: whole candle above VWAP+Nσ (low > +Nσ) or below VWAP−Nσ (high < −Nσ). Then Lo/Sh/Se/Co.">
               VWAP σ
               <select
                 value={params.pro_vwap_sigma}

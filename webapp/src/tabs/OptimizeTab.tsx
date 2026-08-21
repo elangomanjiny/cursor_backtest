@@ -220,7 +220,7 @@ export type OptimizeGrid = {
   fee_pcts: string
   min_trades: number
   time_stop_minutes: number
-  /** Pro VWAP ±Nσ list (1,2,3) when Strategy includes Pro */
+  /** Pro VWAP ±Nσ list (1,2,3) when Strategy includes Pro. Whole candle above +Nσ or below −Nσ. */
   pro_vwap_sigma: number
   pro_vwap_sigmas: string
   /** Pro-MTF base timeframe minutes (comma list). */
@@ -1259,7 +1259,7 @@ export function OptimizeTab({
               {includesPro && (
                 <SweepRow
                   label="Pro σ"
-                  title="Pro VWAP band ±Nσ (1, 2, or 3)"
+                  title="Pro: whole candle above VWAP+Nσ (low > +Nσ) or below VWAP−Nσ (high < −Nσ)"
                   value={sigmaRange}
                   onChange={setSigmaRange}
                   stepHint="1"
