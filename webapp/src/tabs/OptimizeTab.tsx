@@ -200,8 +200,14 @@ export type OptimizeGrid = {
   tp_on_flags: string
   trail_unit: 'range' | 'tick' | 'points' | 'pct'
   trail_value: number
+  trail_values: string
   be_unit: 'range' | 'tick' | 'points' | 'pct'
   be_value: number
+  be_values: string
+  be_ctc: number
+  symbol: string
+  start: string
+  end: string
   /** Position size (lots). Comma list when sweeping. */
   volumes: string
   rank_by: string
@@ -232,6 +238,7 @@ export type OptimizeGrid = {
 }
 
 const TF_OPTS = [1, 3, 5, 15, 30, 60] as const
+const SYMBOL_OPTS = ['ETHUSDT', 'BTCUSDT'] as const
 
 type Props = {
   result: OptimizeResult | null
@@ -366,6 +373,11 @@ export function OptimizeTab({
 }: Props) {
   const [subTab, setSubTab] = useState<SubTab>('config')
   const [tf, setTf] = useState(defaultTf)
+  const [optSymbol, setOptSymbol] = useState(
+    String(defaults?.symbol || 'ETHUSDT').toUpperCase(),
+  )
+  const [optStart, setOptStart] = useState(String(defaults?.start || '2026-08-01'))
+  const [optEnd, setOptEnd] = useState(String(defaults?.end || '2026-08-03'))
   const dThr = Number(defaults?.threshold ?? 50)
   const dRr = Number(defaults?.rr ?? 1)
   const dSl = Number(defaults?.stop_loss ?? 50)
@@ -446,7 +458,14 @@ export function OptimizeTab({
   )
   const [trailDefault, setTrailDefault] = useState(Boolean(defaults?.trail_stop))
   const [trailUnit, setTrailUnit] = useState<DistUnit>(asOptUnit(defaults?.trail_unit))
-  const [trailValue, setTrailValue] = useState(Number(defaults?.trail_value ?? 50))
+  const dTrail = Number(defaults?.trail_value ?? 50)
+  const [trailRange, setTrailRange] = useState<SweepNum>({
+    on: false,
+    def: dTrail,
+    min: 30,
+    max: 50,
+    step: 10,
+  })
   const [slDefault, setSlDefault] = useState(
     Number(defaults?.sl_on ?? defaults?.risk_on ?? 1) !== 0,
   )
@@ -454,7 +473,15 @@ export function OptimizeTab({
     Number(defaults?.tp_on ?? defaults?.risk_on ?? 1) !== 0,
   )
   const [beUnit, setBeUnit] = useState<DistUnit>(asOptUnit(defaults?.be_unit))
-  const [beValue, setBeValue] = useState(Number(defaults?.be_value ?? 50))
+  const dBe = Number(defaults?.be_value ?? 50)
+  const [beRange, setBeRange] = useState<SweepNum>({
+    on: false,
+    def: dBe,
+    min: 20,
+    max: 50,
+    step: 10,
+  })
+  const [beCtc, setBeCtc] = useState(2)
   const [stratSweep, setStratSweep] = useState(false)
   const [stratDefault, setStratDefault] = useState(strategyToken(defaults || {}))
   const [stratDir, setStratDir] = useState(strategyToken(defaults || {}) === 'false')
@@ -548,6 +575,8 @@ export function OptimizeTab({
     const nBase =
       includesMtf ? countSweep(baseTfRange) * countSweep(baseThrRange) : 1
     const nSigma = includesPro ? countSweep(sigmaRange) : 1
+    const nTrail = trailDefault && trailUnit !== 'range' ? countCompact(trailRange) : 1
+    const nBe = beDefault && (beUnit === 'tick' || beUnit === 'points') ? countCompact(beRange) : 1
     return (
       nTh *
       nSl *
@@ -559,6 +588,8 @@ export function OptimizeTab({
       nStrat *
       nBase *
       nSigma *
+      nTrail *
+      nBe *
       estSessions
     )
   }, [
@@ -580,6 +611,12 @@ export function OptimizeTab({
     baseThrRange,
     sigmaRange,
     estSessions,
+    trailDefault,
+    trailUnit,
+    trailRange,
+    beDefault,
+    beUnit,
+    beRange,
   ])
 
   const buildGrid = (dayStr: string): OptimizeGrid => ({
@@ -601,9 +638,19 @@ export function OptimizeTab({
     sl_on_flags: slOnFlags,
     tp_on_flags: tpOnFlags,
     trail_unit: trailUnit,
-    trail_value: trailValue,
+    trail_value: trailRange.def,
+    trail_values:
+      trailDefault && trailUnit !== 'range' ? expandCompact(trailRange) : String(trailRange.def),
     be_unit: beUnit,
-    be_value: beValue,
+    be_value: beRange.def,
+    be_values:
+      beDefault && (beUnit === 'tick' || beUnit === 'points')
+        ? expandCompact(beRange)
+        : String(beRange.def),
+    be_ctc: Number.isFinite(beCtc) ? beCtc : 2,
+    symbol: optSymbol,
+    start: optStart,
+    end: optEnd,
     volumes: expandSweep(volRange),
     rank_by: rankBy,
     common_optimizer: commonOn,
@@ -1137,7 +1184,7 @@ export function OptimizeTab({
                   </>
                 )}
               </div>
-              <div className="opt-compact-row" title="Trailing stop, independent of SL/TP">
+              <div className="opt-compact-row" title="Trailing stop, independent of SL/TP. Range uses AGGR gap; otherwise Def·Min·Max·Step.">
                 <span className="opt-range-lab">Trail</span>
                 <GreenSwitch on={trailDefault} onChange={setTrailDefault} />
                 {trailDefault ? (
@@ -1146,24 +1193,21 @@ export function OptimizeTab({
                   <span className="opt-mode-slot" />
                 )}
                 {trailDefault && trailUnit !== 'range' ? (
-                  <input
-                    className="num-plain"
-                    type="number"
-                    inputMode="decimal"
-                    min={0}
-                    step={trailUnit === 'pct' ? '0.01' : '1'}
-                    value={trailValue}
-                    onChange={(e) => setTrailValue(Number(e.target.value))}
-                    aria-label="Trail distance"
+                  <CompactNums
+                    value={trailRange}
+                    onChange={setTrailRange}
+                    stepHint={trailUnit === 'pct' ? '0.01' : '1'}
                   />
                 ) : (
-                  <span />
+                  <>
+                    <span />
+                    <span />
+                    <span />
+                    <span />
+                  </>
                 )}
-                <span />
-                <span />
-                <span />
               </div>
-              <div className="opt-compact-row" title="Break-even lock. Range hides distance.">
+              <div className="opt-compact-row" title="BE target (arm). Tick/Points: Def·Min·Max·Step. After the arm, lock uses CTC (not swept).">
                 <span className="opt-range-lab">BE</span>
                 <GreenSwitch on={beDefault} onChange={setBeDefault} />
                 {beDefault ? (
@@ -1171,25 +1215,45 @@ export function OptimizeTab({
                 ) : (
                   <span className="opt-mode-slot" />
                 )}
-                {beDefault && beUnit !== 'range' ? (
+                {beDefault && (beUnit === 'tick' || beUnit === 'points') ? (
+                  <CompactNums
+                    value={beRange}
+                    onChange={setBeRange}
+                    stepHint="1"
+                  />
+                ) : (
+                  <>
+                    <span />
+                    <span />
+                    <span />
+                    <span />
+                  </>
+                )}
+              </div>
+              {beDefault && (
+                <div
+                  className="opt-compact-row"
+                  title="Cost-to-cover multiplier. Lock = (slip USDT + fee USDT) × CTC ÷ lots. Not swept."
+                >
+                  <span className="opt-range-lab">CTC</span>
+                  <span />
+                  <span className="opt-mode-slot" />
                   <input
                     className="num-plain"
                     type="number"
                     inputMode="decimal"
-                    min={beUnit === 'pct' ? 1 : 0}
-                    max={beUnit === 'pct' ? 100 : undefined}
-                    step="1"
-                    value={beValue}
-                    onChange={(e) => setBeValue(Number(e.target.value))}
-                    aria-label="BE distance"
+                    min={0}
+                    step="0.5"
+                    value={beCtc}
+                    onChange={(e) => setBeCtc(Number(e.target.value))}
+                    onBlur={() => setBeCtc(Math.max(0, Number(beCtc) || 2))}
+                    aria-label="CTC"
                   />
-                ) : (
                   <span />
-                )}
-                <span />
-                <span />
-                <span />
-              </div>
+                  <span />
+                  <span />
+                </div>
+              )}
 
               <h4 className="opt-cfg-cat">Strategy settings</h4>
               <SweepRow
@@ -1313,6 +1377,41 @@ export function OptimizeTab({
             <section className="opt-cfg-card">
               <h3>Time &amp; Session</h3>
               {!dataReady && <span className="opt-warn">Load data first</span>}
+              <label title="Symbol for this optimize run (must already be loaded)">
+                Symbol
+                <select
+                  value={optSymbol}
+                  disabled={busy}
+                  onChange={(e) => setOptSymbol(e.target.value.toUpperCase())}
+                >
+                  {!SYMBOL_OPTS.includes(optSymbol as (typeof SYMBOL_OPTS)[number]) && (
+                    <option value={optSymbol}>{optSymbol}</option>
+                  )}
+                  {SYMBOL_OPTS.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label title="Optimize start date (UTC, inclusive). Load this range in Step 1 first.">
+                Start
+                <input
+                  type="date"
+                  disabled={busy}
+                  value={optStart}
+                  onChange={(e) => setOptStart(e.target.value)}
+                />
+              </label>
+              <label title="Optimize end date (UTC, exclusive). Load this range in Step 1 first.">
+                End
+                <input
+                  type="date"
+                  disabled={busy}
+                  value={optEnd}
+                  onChange={(e) => setOptEnd(e.target.value)}
+                />
+              </label>
               <label title="Bar timeframe for this optimize run (independent of Backtest TF)">
                 TF
                 <select
@@ -1664,10 +1763,10 @@ export function OptimizeTab({
                         <b>
                           {Number(overview.break_even)
                             ? String(overview.be_unit) === 'range'
-                              ? 'On Range'
+                              ? `On Range CTC ${fmt2(Number(overview.be_ctc ?? 2))}`
                               : String(overview.be_unit) === 'pct'
-                                ? `On ${fmt2(Number(overview.be_value ?? overview.break_even_pct ?? 0))}%`
-                                : `On ${fmt2(Number(overview.be_value ?? 0))} ${String(overview.be_unit || '')}`
+                                ? `On ${fmt2(Number(overview.be_value ?? overview.break_even_pct ?? 0))}% CTC ${fmt2(Number(overview.be_ctc ?? 2))}`
+                                : `On ${fmt2(Number(overview.be_value ?? 0))} ${String(overview.be_unit || '')} CTC ${fmt2(Number(overview.be_ctc ?? 2))}`
                             : 'Off'}
                         </b>
                       </span>

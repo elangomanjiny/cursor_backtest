@@ -33,7 +33,7 @@ from backend.engine.volume_delta import (  # noqa: E402
     write_parity_report,
 )
 
-APP_VERSION = "2.1.23"
+APP_VERSION = "2.1.27"
 app = FastAPI(title="cursor_backtest", version=APP_VERSION)
 app.add_middleware(
     CORSMiddleware,
@@ -229,6 +229,7 @@ def backtest(
     trail_value: float = 0.0,
     be_unit: str = "range",
     be_value: float = 0.0,
+    be_ctc: float = 2.0,
     pro_mtf_mode: bool = False,
     base_tf: int = Query(15, alias="base_tf"),
     base_threshold: float = 30.0,
@@ -314,6 +315,7 @@ def backtest(
             trail_value=float(trail_value if trail_value is not None else 0),
             be_unit=be_unit,
             be_value=float(be_value if be_value is not None else 0),
+            be_ctc=float(be_ctc if be_ctc is not None else 2),
             pro_mtf_mode=bool(pro_mtf_mode),
             base_tf_minutes=int(base_tf),
             base_threshold=float(base_threshold),
@@ -377,6 +379,7 @@ def backtest(
             "trail_value": float(trail_value if trail_value is not None else 0),
             "be_unit": be_unit,
             "be_value": float(be_value if be_value is not None else 0),
+            "be_ctc": float(be_ctc if be_ctc is not None else 2),
             "pro_mtf_mode": bool(pro_mtf_mode),
             "base_tf": int(base_tf),
             "base_threshold": float(base_threshold),
@@ -441,8 +444,11 @@ def optimize(
     tp_on_flags: str | None = None,
     trail_unit: str = "range",
     trail_value: float = 0.0,
+    trail_values: str | None = None,
     be_unit: str = "range",
     be_value: float = 0.0,
+    be_values: str | None = None,
+    be_ctc: float = 2.0,
     stream: bool = False,
     base_tfs: str | None = None,
     base_thresholds: str | None = None,
@@ -492,8 +498,11 @@ def optimize(
         tp_on_flags=tp_on_flags,
         trail_unit=trail_unit,
         trail_value=trail_value,
+        trail_values=trail_values,
         be_unit=be_unit,
         be_value=be_value,
+        be_values=be_values,
+        be_ctc=be_ctc,
         max_runs=max_runs,
         rank_by=rank_by,
         common_optimizer=common_optimizer,

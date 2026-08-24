@@ -376,6 +376,13 @@ tr.best { background: #0d3b1e33; }
   border-right: 5px solid transparent;
   border-top: 9px solid #f85149;
 }
+.legend-row i.lg-be {
+  width: 14px;
+  height: 0;
+  border-radius: 0;
+  background: transparent;
+  border-top: 2px dotted #ffffff;
+}
 
 .unit-toggle { display: flex; gap: 6px; }
 .unit-toggle button.active {
@@ -396,9 +403,24 @@ tr.best { background: #0d3b1e33; }
   font-size: 0.75rem;
   color: var(--text);
   pointer-events: none;
-  max-width: 320px;
+  max-width: 360px;
 }
 .chart-tooltip .tt-time { color: var(--muted); margin-bottom: 4px; }
+.chart-tooltip .tt-trade {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+.chart-tooltip .tt-trade .tt-flat {
+  color: var(--muted);
+}
+.chart-tooltip .tt-be-wait {
+  color: var(--muted);
+  font-weight: 600;
+}
+.chart-tooltip .tt-trail {
+  color: #22d3ee;
+}
 
 .chart-nav {
   position: absolute;

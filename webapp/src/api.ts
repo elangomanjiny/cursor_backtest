@@ -58,6 +58,8 @@ export type StrategyParams = {
   be_unit: 'range' | 'tick' | 'points' | 'pct'
   /** % = old BE% lock of R. Tick/Points = arm distance. Unused for Range. */
   be_value: number
+  /** Cost-to-cover multiplier. Lock = (slip USDT + fee USDT) × CTC / lots. */
+  be_ctc: number
   start: string
   end: string
   /** Optional IST weekday filter for parity with optimize common filters. */
@@ -171,6 +173,12 @@ export type TradeRow = {
   entry_tag?: string
   /** Directional BreakEven moved stop to 0.5R lock */
   be_moved?: boolean
+  /** BE arm price (1R / typed distance). */
+  be_arm?: number | null
+  /** BE lock price after arm is touched. */
+  be_lock?: number | null
+  /** First time the lock was applied. */
+  be_moved_time?: string | null
   /** Initial stop at entry (before trail / BE). */
   stop_init?: number
   /** Trail staircase when Trail is on. */
@@ -213,6 +221,8 @@ export type OptimizeResult = {
   runs: number
   rank_by: string
   symbol?: string
+  start?: string
+  end?: string
   tf_minutes?: number
   volume?: number
   common_optimizer?: boolean
@@ -287,6 +297,7 @@ export type OptimizePoint = {
   trail_value?: number
   be_unit?: string
   be_value?: number
+  be_ctc?: number
   volume?: number
   trades: number
   entry_tags?: Record<string, number>
@@ -468,8 +479,11 @@ export async function fetchOptimize(
     tp_on_flags?: string
     trail_unit?: string
     trail_value?: number
+    trail_values?: string
     be_unit?: string
     be_value?: number
+    be_values?: string
+    be_ctc?: number
     volumes?: string
     base_tfs?: string
     base_thresholds?: string

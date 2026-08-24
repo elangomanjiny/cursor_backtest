@@ -134,6 +134,7 @@ export const OPTIMIZE_REPORT_COLUMNS: OptReportCol[] = [
   },
   { key: 'be_unit', header: 'be_unit', label: 'BE unit', section: 'param', format: 'text' },
   { key: 'be_value', header: 'be_value', label: 'BE dist', section: 'param', format: 'num' },
+  { key: 'be_ctc', header: 'be_ctc', label: 'CTC', section: 'param', format: 'num' },
   {
     key: 'after',
     header: 'after',
@@ -379,9 +380,11 @@ export function visibleOptimizeColumns(
     hide.add('break_even_pct')
     hide.add('be_unit')
     hide.add('be_value')
+    hide.add('be_ctc')
   } else {
     if (!varied(rows.map((r) => numish(r, 'break_even')))) hide.add('be')
     hide.add('break_even_pct')
+    if (!varied(rows.map((r) => numish(r, 'be_ctc')))) hide.add('be_ctc')
     const anyDist = rows.some((r) => {
       if (numish(r, 'break_even') === 0) return false
       const u = String(r.be_unit ?? 'range')

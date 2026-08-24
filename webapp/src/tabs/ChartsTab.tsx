@@ -11,7 +11,7 @@ import {
   type IPaneApi,
   type LineStyleValue,
 } from '@stocksharp/chart'
-import type { BacktestResult, BarRow } from '../api'
+import type { BacktestResult, BarRow, StrategyParams, TradeRow } from '../api'
 import { fmt2 } from '../format'
 import { loadChartRange, saveChartRange } from '../chartZoomStore'
 import { attachCandlePricePan, resetPriceOnly } from '../chartPricePan'
@@ -36,6 +36,7 @@ const AGGR_TAG_COLOR: Record<AggrTag, string> = {
 }
 
 const TRAIL_CYAN = '#22d3ee'
+const BE_WHITE = '#ffffff'
 const TRAIL_DOTTED: LineStyleValue =
   ((LineStyle as unknown as { Dotted?: LineStyleValue }).Dotted ?? LineStyle.Dashed)
 
@@ -91,6 +92,15 @@ function markerSizeFromBarPx(barPx: number, kind: ChartMarker['kind']): number {
   return Math.max(0.05, Math.min(1.05, targetPx / MARKER_GLYPH_PX))
 }
 
+type TradeTip = {
+  side: 'Long' | 'Short' | 'Flat'
+  entry?: number
+  sl?: number
+  tp?: number
+  be?: { state: 'locked' | 'waiting'; px: number; arm?: number }
+  trail?: number
+}
+
 type Tip = {
   time: string
   open: number
@@ -102,6 +112,7 @@ type Tip = {
   delta_pct: number
   vwap?: number
   vwapBands?: { mult: number; up: number; dn: number }[]
+  trade: TradeTip
 }
 
 const VWAP_COLOR = '#26a69a'
@@ -123,6 +134,127 @@ function clsSigned(n: number) {
   if (n > 0) return 'pos'
   if (n < 0) return 'neg'
   return ''
+}
+
+const FAR_PX = 1e8
+
+function isoToSec(iso: string): number {
+  const n = Date.parse(iso)
+  return Number.isFinite(n) ? Math.floor(n / 1000) : 0
+}
+
+function isFarPx(px: number): boolean {
+  return !Number.isFinite(px) || Math.abs(px) >= FAR_PX
+}
+
+function flagOn(v: unknown): boolean {
+  if (v === true) return true
+  if (v === false || v == null || v === '') return false
+  const n = Number(v)
+  return Number.isFinite(n) && n !== 0
+}
+
+function symbolTickSize(symbol: string): number {
+  return (symbol || '').toUpperCase().startsWith('BTC') ? 0.1 : 0.01
+}
+
+/** Trade open on this candle: entry < bar end and exit ≥ bar open. Later entry wins (reverse). */
+function tradeOpenOnBar(trades: TradeRow[], barSec: number, tfSec: number): TradeRow | null {
+  const barEnd = barSec + tfSec
+  let best: TradeRow | null = null
+  let bestEntry = -Infinity
+  for (const tr of trades) {
+    const e = isoToSec(tr.entry_time)
+    const x = isoToSec(tr.exit_time)
+    if (e < barEnd && x >= barSec && e >= bestEntry) {
+      best = tr
+      bestEntry = e
+    }
+  }
+  return best
+}
+
+function trailStopAt(tr: TradeRow, barSec: number, tfSec: number): number | null {
+  const cutoff = barSec + tfSec
+  let last: number | null = null
+  for (const p of tr.trail_path ?? []) {
+    if (isoToSec(p.time) <= cutoff) last = Number(p.stop)
+  }
+  if (last == null || isFarPx(last)) {
+    const s = Number(tr.stop_init ?? tr.stop)
+    return isFarPx(s) ? null : s
+  }
+  return last
+}
+
+function bePrices(
+  tr: TradeRow,
+  params: StrategyParams | undefined,
+  symbol: string,
+  lots: number,
+): { arm: number; lock: number } {
+  const arm0 = Number(tr.be_arm)
+  const lock0 = Number(tr.be_lock)
+  if (Number.isFinite(arm0) && Number.isFinite(lock0) && (arm0 !== 0 || lock0 !== 0)) {
+    return { arm: arm0, lock: lock0 }
+  }
+  const isLong = tr.side === 'Long'
+  const entry = Number(tr.entry_price)
+  const rng = Number(tr.range)
+  const unit = params?.be_unit ?? 'range'
+  const beVal = Number(params?.be_value ?? 0)
+  let off = Number.isFinite(rng) ? rng : 0
+  if (unit === 'tick') off = beVal * symbolTickSize(symbol)
+  else if (unit === 'points') off = beVal
+  const lotsN = Math.max(Math.abs(lots) || 0, 1e-12)
+  const notional = Math.abs(entry) * lotsN
+  const slipQ = notional * (Math.abs(Number(params?.slippage_pct ?? 0)) / 100)
+  const feeQ = notional * (Math.abs(Number(params?.fee_pct ?? 0)) / 100)
+  const lockOff = (slipQ + feeQ) * Math.max(Number(params?.be_ctc ?? 2), 0) / lotsN
+  return {
+    arm: isLong ? entry + off : entry - off,
+    lock: isLong ? entry + lockOff : entry - lockOff,
+  }
+}
+
+function buildTradeTip(data: BacktestResult, barSec: number): TradeTip {
+  const tfSec = Math.max(1, Number(data.tf_minutes) || 1) * 60
+  const tr = tradeOpenOnBar(data.trades ?? [], barSec, tfSec)
+  if (!tr) return { side: 'Flat' }
+  const p = data.params
+  const s = data.stats as Record<string, unknown> | undefined
+  const slOn = flagOn(p?.sl_on ?? s?.sl_on)
+  const tpOn = flagOn(p?.tp_on ?? s?.tp_on)
+  const beOn = flagOn(p?.break_even ?? s?.break_even ?? data.break_even)
+  const trailOn = flagOn(p?.trail_stop ?? s?.trail_stop)
+  const tip: TradeTip = {
+    side: tr.side === 'Short' ? 'Short' : 'Long',
+    entry: Number(tr.entry_price),
+  }
+  if (slOn) {
+    const sl = Number(tr.stop_init ?? tr.stop)
+    if (!isFarPx(sl)) tip.sl = sl
+  }
+  if (tpOn) {
+    const tp = Number(tr.target)
+    if (!isFarPx(tp)) tip.tp = tp
+  }
+  if (beOn) {
+    const { arm, lock } = bePrices(tr, p, data.symbol, Number(data.volume))
+    const locked =
+      Boolean(tr.be_moved) &&
+      (tr.be_moved_time ? isoToSec(tr.be_moved_time) < barSec + tfSec : true)
+    tip.be = {
+      state: locked ? 'locked' : 'waiting',
+      px: locked ? lock : Number(tr.entry_price),
+      arm,
+    }
+  }
+  if (trailOn) {
+    const trail = trailStopAt(tr, barSec, tfSec)
+    if (trail != null) tip.trail = trail
+  }
+  return tip
 }
 
 /** Snap a unix-second timestamp onto the bar open that contains it. */
@@ -401,19 +533,41 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
         const hasTrail = path.length >= 2
         const initStop = Number(tr.stop_init ?? path[0]?.stop ?? tr.stop)
         const stopPx = hasTrail ? initStop : Number(tr.stop)
-        const stopColor = !hasTrail && beLocked ? '#f0b429' : '#f85149'
-        const stopTitle =
-          !hasTrail && beLocked
-            ? `BE ${tagSl} @ ${fmt2(stopPx)}`
-            : `${tagSl} @ ${fmt2(stopPx)}`
+        const beOn = flagOn(data.params?.break_even ?? data.stats?.break_even ?? data.break_even)
+        const slOn = flagOn(data.params?.sl_on ?? data.stats?.sl_on)
+        const { lock: beLockPx } = bePrices(tr, data.params, data.symbol, Number(data.volume))
+        let tBe = tr.be_moved_time ? snap(tr.be_moved_time) : null
+        if (tBe != null) {
+          if (tBe < t0) tBe = t0
+          if (tBe > t1) tBe = t1
+        }
 
         addRay(t0, t1, tr.entry_price, '#f0b429', LineStyle.Solid, 2, `${tagIn} @ ${fmt2(tr.entry_price)}`)
         const far = (px: number) => !Number.isFinite(px) || Math.abs(px) >= 1e8
         if (!far(tr.target)) {
           addRay(t0, t1, tr.target, '#3fb950', LineStyle.Dashed, 1, `${tagTp} @ ${fmt2(tr.target)}`)
         }
-        if (!far(stopPx)) {
-          addRay(t0, t1, stopPx, stopColor, LineStyle.Dashed, !hasTrail && beLocked ? 2 : 1, stopTitle)
+        if (slOn && !far(initStop)) {
+          const slEnd = beOn && beLocked && tBe != null && tBe > t0 ? tBe : t1
+          addRay(t0, slEnd, initStop, '#f85149', LineStyle.Dashed, 1, `${tagSl} @ ${fmt2(initStop)}`)
+        } else if (!beOn && !far(stopPx)) {
+          addRay(t0, t1, stopPx, '#f85149', LineStyle.Dashed, 1, `${tagSl} @ ${fmt2(stopPx)}`)
+        }
+        if (beOn) {
+          const level0 = Number(tr.entry_price)
+          const level1 = Number.isFinite(beLockPx) ? beLockPx : Number(tr.be_lock ?? tr.stop)
+          if (beLocked && tBe != null && tBe > t0) {
+            if (!far(level0)) {
+              addRay(t0, tBe, level0, BE_WHITE, TRAIL_DOTTED, 1, `BE @ ${fmt2(level0)}`)
+            }
+            if (!far(level1)) {
+              addRay(tBe, t1, level1, BE_WHITE, TRAIL_DOTTED, 1, `BE @ ${fmt2(level1)}`)
+            }
+          } else if (beLocked && !far(level1)) {
+            addRay(t0, t1, level1, BE_WHITE, TRAIL_DOTTED, 1, `BE @ ${fmt2(level1)}`)
+          } else if (!far(level0)) {
+            addRay(t0, t1, level0, BE_WHITE, TRAIL_DOTTED, 1, `BE @ ${fmt2(level0)}`)
+          }
         }
 
         if (hasTrail) {
@@ -703,6 +857,7 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
               dn: vp.bands[`dn${mult}`],
             }))
           : undefined,
+        trade: buildTradeTip(data, t),
       })
     }
     chart.subscribeCrosshairMove(onMove as never)
@@ -1000,6 +1155,9 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
               <span className="lg">
                 <i style={{ background: '#f85149' }} /> Stop
               </span>
+              <span className="lg" title="BreakEven lock">
+                <i className="lg-be" /> BE
+              </span>
               <span className="lg" title="Trail stop path when Trail is on">
                 <i style={{ background: TRAIL_CYAN }} /> Trail
               </span>
@@ -1149,6 +1307,57 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
                 ))}
               </div>
             )}
+            <div className="tt-trade">
+              {tip.trade.side === 'Flat' ? (
+                <div className="tt-flat">Flat</div>
+              ) : (
+                <>
+                  <div className="tt-flow">
+                    <span>
+                      Side{' '}
+                      <b className={tip.trade.side === 'Long' ? 'pos' : 'neg'}>{tip.trade.side}</b>
+                    </span>
+                    <span>
+                      Entry <b>{fmt2(tip.trade.entry)}</b>
+                    </span>
+                  </div>
+                  {(tip.trade.sl != null ||
+                    tip.trade.tp != null ||
+                    tip.trade.be ||
+                    tip.trade.trail != null) && (
+                    <div className="tt-flow">
+                      {tip.trade.sl != null && (
+                        <span>
+                          SL <b className="neg">{fmt2(tip.trade.sl)}</b>
+                        </span>
+                      )}
+                      {tip.trade.tp != null && (
+                        <span>
+                          TP <b className="pos">{fmt2(tip.trade.tp)}</b>
+                        </span>
+                      )}
+                      {tip.trade.be && (
+                        <>
+                          <span>
+                            BE <b>{fmt2(tip.trade.be.px)}</b>
+                          </span>
+                          {tip.trade.be.state === 'waiting' && tip.trade.be.arm != null && (
+                            <span>
+                              arm <b className="tt-be-wait">{fmt2(tip.trade.be.arm)}</b>
+                            </span>
+                          )}
+                        </>
+                      )}
+                      {tip.trade.trail != null && (
+                        <span>
+                          Trail <b className="tt-trail">{fmt2(tip.trade.trail)}</b>
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
           </div>
         )}
         <div className="chart-host" ref={hostRef} />

@@ -241,7 +241,7 @@ export function BacktestStep({
           </div>
           <div
             className="strip-pair"
-            title="On: after price reaches the arm, move stop once. Range/% = old method (arm at AGGR 1R). Tick/Points = arm at the typed distance, lock at entry."
+            title="On: arm = unit/distance (when). After the arm, lock = (entry slip USDT + entry fee USDT) × CTC ÷ lots. Slip and fee are separate, not a summed %."
           >
             <span>BE</span>
             <GreenSwitch
@@ -280,6 +280,22 @@ export function BacktestStep({
                   }
                 }}
               />
+            )}
+            {params.break_even === 1 && (
+              <>
+                <span title="Cost-to-cover: (slip USDT + fee USDT) × CTC ÷ lots">CTC</span>
+                <input
+                  className="num-plain"
+                  type="number"
+                  inputMode="decimal"
+                  step="0.5"
+                  min={0}
+                  value={params.be_ctc}
+                  aria-label="CTC"
+                  onChange={(e) => set('be_ctc', Number(e.target.value))}
+                  onBlur={() => set('be_ctc', Math.max(0, Number(params.be_ctc) || 2))}
+                />
+              </>
             )}
           </div>
         </div>

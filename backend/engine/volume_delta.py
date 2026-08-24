@@ -45,6 +45,11 @@ class Trade:
     entry_tag: str = "LE"
     # Directional BreakEven: stop was moved to 0.5R lock
     be_moved: bool = False
+    # BE target (arm) / lock; from slipped entry. None if BE was off
+    be_arm: float | None = None
+    be_lock: float | None = None
+    # First tick the lock was applied (IST)
+    be_moved_time: datetime | None = None
     # Initial stop at entry (before trail / BE)
     stop_init: float = 0.0
     # Compact trail staircase [{time, stop}] when Trail is on
@@ -69,6 +74,24 @@ def _apply_slip(px: float, *, is_long: bool, is_entry: bool, slip_pct: float) ->
     if is_entry:
         return px * (1.0 + f) if is_long else px * (1.0 - f)
     return px * (1.0 - f) if is_long else px * (1.0 + f)
+
+
+def _be_ctc_price_offset(
+    entry: float,
+    lots: float,
+    slip_pct: float,
+    fee_pct: float,
+    ctc: float,
+) -> float:
+    """Lock distance in price from the slipped fill.
+
+    Slip and Fee are separate quote costs (not a summed %). Then × CTC / lots.
+    """
+    lots_n = max(abs(float(lots)), 1e-12)
+    notional = abs(float(entry)) * lots_n
+    slip_q = notional * (abs(float(slip_pct)) / 100.0)
+    fee_q = notional * (abs(float(fee_pct)) / 100.0)
+    return (slip_q + fee_q) * max(float(ctc), 0.0) / lots_n
 
 
 SL_TP_UNITS = frozenset({"range", "tick", "points", "pct"})
@@ -243,6 +266,19 @@ def _make_trade(
         fee=fee,
         entry_tag=tag,
         be_moved=bool(active.get("be_moved")),
+        be_arm=(
+            float(active["be_arm"])
+            if active.get("be_enabled") and active.get("be_arm") is not None
+            else None
+        ),
+        be_lock=(
+            float(active["be_lock"])
+            if active.get("be_enabled") and active.get("be_lock") is not None
+            else None
+        ),
+        be_moved_time=(
+            _to_ist(active["be_moved_time"]) if active.get("be_moved_time") is not None else None
+        ),
         stop_init=float(active.get("stop_init") or active.get("stop") or 0.0),
         trail_path=_finalize_trail_path(active, ot),
     )
@@ -853,7 +889,7 @@ def _scan_ticks_until(
             if (not is_long) and px >= inv:
                 return i + 1, ts, inv, "SMTF"
 
-        # BreakEven: arm at be_offset, lock at be_frac × that distance (once)
+        # BreakEven: arm = target from slipped entry; lock = be_frac × that distance (once)
         if active.get("be_enabled") and not active.get("be_moved"):
             arm = float(active["be_arm"])
             lock = float(active["be_lock"])
@@ -861,6 +897,7 @@ def _scan_ticks_until(
             if armed:
                 active["stop"] = lock
                 active["be_moved"] = True
+                active["be_moved_time"] = ts
                 active["use_stop"] = True
                 pe = active.setdefault("pending_events", [])
                 pe.append(f"BE@{lock:.2f}")
@@ -931,6 +968,7 @@ def run_backtest(
     trail_value: float = 0.0,
     be_unit: str = "range",
     be_value: float = 0.0,
+    be_ctc: float = 2.0,
     pro_mtf_mode: bool = False,
     base_tf_minutes: int = 15,
     base_threshold: float = 30.0,
@@ -1005,20 +1043,19 @@ def run_backtest(
     trail_val = float(trail_value if trail_value is not None else 0.0)
     be_u = _normalize_sl_tp_unit(be_unit)
     be_val = float(be_value if be_value is not None else 0.0)
+    ctc = max(0.0, float(be_ctc if be_ctc is not None else 2.0))
     sl_val = float(stop_loss if stop_loss is not None else 50.0)
     tp_val = float(take_profit if take_profit is not None else 100.0)
     allow_trail = False
     aggr_reverse = not mtf  # Dir + Non-Dir + Pro; Pro-MTF stays directional-only
-    # BreakEven: unit + one input. Range/% = old method (arm at AGGR 1R).
-    #   range → lock 50% of R; pct → lock be_value% of R; tick/points → arm at
-    #   typed distance, lock at entry. break_even_pct is ignored (legacy).
+    # BreakEven: arm from be_unit/be_value (when). Lock = CTC × (slip USDT + fee USDT) / lots.
     be_on = 1 if int(break_even or 0) else 0
     if be_u == "range":
         be_frac = 0.5
     elif be_u == "pct":
         be_frac = max(0.01, min(1.0, (be_val if be_val > 0 else 50.0) / 100.0))
     else:
-        be_frac = 0.0  # tick/points: stop moves to entry
+        be_frac = 0.0
     tf_delta = timedelta(minutes=int(tf_minutes))
     hour_set = _parse_allowed_hours(allowed_entry_hours)
 
@@ -1182,14 +1219,15 @@ def run_backtest(
             be_off = range_off
         else:
             be_off = _unit_offset(
-                raw, be_val, be_u, tick_sz, range_=rng, range_stop=range_stop
+                entry, be_val, be_u, tick_sz, range_=rng, range_stop=range_stop
             )
+        lock_off = _be_ctc_price_offset(float(entry), volume, slip, fee, ctc)
         if is_long:
-            be_arm = float(raw) + be_off
-            be_lock = float(raw) + be_frac * be_off
+            be_arm = float(entry) + be_off
+            be_lock = float(entry) + lock_off
         else:
-            be_arm = float(raw) - be_off
-            be_lock = float(raw) - be_frac * be_off
+            be_arm = float(entry) - be_off
+            be_lock = float(entry) - lock_off
         toff = float(trail_offset) if float(trail_offset or 0) > 0 else (
             _unit_offset(raw, trail_val, trail_u, tick_sz, range_=rng, range_stop=range_stop)
             if trail_on
@@ -2064,6 +2102,7 @@ def run_backtest(
         "trail_value": trail_val,
         "be_unit": be_u,
         "be_value": be_val,
+        "be_ctc": round(ctc, 4),
         "tick_session_slice": {
             "after_min": int(entry_after),
             "before_min": int(entry_before),
@@ -2144,8 +2183,9 @@ def result_to_jsonable(r: BacktestResult) -> dict[str, Any]:
 
     def ser_trade(t: Trade) -> dict[str, Any]:
         d = asdict(t)
-        for k in ("entry_time", "exit_time", "signal_time"):
-            d[k] = d[k].isoformat()
+        for k in ("entry_time", "exit_time", "signal_time", "be_moved_time"):
+            if d.get(k) is not None:
+                d[k] = d[k].isoformat()
         return round_obj(d)
 
     def ser_agg(a: Aggressive) -> dict[str, Any]:

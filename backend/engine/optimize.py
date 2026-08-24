@@ -552,6 +552,7 @@ def _worker_eval(job: dict[str, Any]) -> dict[str, Any]:
         trail_value=float(job.get("trail_value") if job.get("trail_value") is not None else 0),
         be_unit=str(job.get("be_unit") or "range"),
         be_value=float(job.get("be_value") if job.get("be_value") is not None else 0),
+        be_ctc=float(job.get("be_ctc") if job.get("be_ctc") is not None else 2),
         pro_mtf_mode=mtf,
         base_tf_minutes=base_tf or 15,
         base_threshold=base_thr or 30.0,
@@ -589,6 +590,7 @@ def _worker_eval(job: dict[str, Any]) -> dict[str, Any]:
         "trail_value": float(job.get("trail_value") if job.get("trail_value") is not None else 0),
         "be_unit": str(job.get("be_unit") or "range"),
         "be_value": float(job.get("be_value") if job.get("be_value") is not None else 0),
+        "be_ctc": float(job.get("be_ctc") if job.get("be_ctc") is not None else 2),
         "volume": float(job["volume"] if job.get("volume") is not None else c["volume"]),
         "entry_after": int(job["entry_after"]),
         "entry_before": int(job["entry_before"]),
@@ -720,8 +722,11 @@ def _iter_grid(
     tp_on_flags: str | list[int] | None = None,
     trail_unit: str = "range",
     trail_value: float = 0.0,
+    trail_values: str | list[float] | None = None,
     be_unit: str = "range",
     be_value: float = 0.0,
+    be_values: str | list[float] | None = None,
+    be_ctc: float = 2.0,
     workers: int | None = 0,
     ticks: pd.DataFrame | None = None,
     base_tfs: str | list[float] | None = None,
@@ -748,6 +753,13 @@ def _iter_grid(
     trail_v = float(trail_value if trail_value is not None else 0.0)
     be_u = _normalize_sl_tp_unit(be_unit)
     be_v = float(be_value if be_value is not None else 0.0)
+    be_c = max(0.0, float(be_ctc if be_ctc is not None else 2.0))
+    sweep_trail = trail_u != "range" and any(int(x) for x in trail_list)
+    raw_tv = _parse_floats(trail_values) if trail_values not in (None, "") else []
+    trail_val_list = [max(0.0, float(v)) for v in raw_tv] or [max(0.0, trail_v)]
+    sweep_be_dist = be_u in ("tick", "points") and any(int(x) for x in be_list)
+    raw_bv = _parse_floats(be_values) if be_values not in (None, "") else []
+    be_val_list = [float(v) for v in raw_bv] or [be_v]
     vol_raw = _parse_floats(volumes) if volumes not in (None, "") else []
     vol_list = [max(1e-8, float(v)) for v in vol_raw] or [max(1e-8, float(volume or 0.01))]
     sweep_sl = sl_u != "range" and any(int(x) for x in sl_on_list)
@@ -820,7 +832,7 @@ def _iter_grid(
 
     # re_entry only when WaitAndTrade=true (ORB); Wait=false / Pro / Pro-MTF forces 0
     # BreakEven is available in all modes (independent of Risk)
-    # Lock comes from be_unit / be_value (Range=50% of R, %=typed, tick/points=entry)
+    # Lock is CTC × (entry slip USDT + entry fee USDT) / lots after the arm
     # Pro-MTF extra axes: Base TF / Base Thr%
     wants_mtf = any(mtf for _, _, mtf in strat_list)
     sigma_list = _parse_sigmas(pro_vwap_sigmas, float(pro_vwap_sigma or 2))
@@ -862,6 +874,8 @@ def _iter_grid(
         vol: float,
         sl_flag: int,
         tp_flag: int,
+        trail_v: float,
+        be_v: float,
     ) -> None:
         btf_iter: Iterable[int] = base_tf_list if mtf else (0,)
         bthr_iter: Iterable[float] = base_thr_list if mtf else (0.0,)
@@ -876,6 +890,7 @@ def _iter_grid(
                             th, rr, sl, tp, wt, pro, mtf, slip, fee, trail, sess,
                             re, stobe, be, be_pct, int(btf), float(bthr), float(sig),
                             float(vol), int(sl_flag), int(tp_flag),
+                            float(trail_v), float(be_v),
                         )
                     )
 
@@ -895,10 +910,23 @@ def _iter_grid(
                                     rrs_iter = rr_list if (int(tp_flag) and sweep_rr) else (rr_list[0],)
                                     for tp in tps:
                                         for rr in rrs_iter:
-                                            _append(
-                                                th, rr, sl, tp, wt, pro, mtf, slip, fee, trail,
-                                                sess, re, stobe, be, be_pct, vol, sl_flag, tp_flag,
+                                            tvs = (
+                                                trail_val_list
+                                                if (int(trail) and sweep_trail)
+                                                else (trail_val_list[0],)
                                             )
+                                            bvs = (
+                                                be_val_list
+                                                if (int(be) and sweep_be_dist)
+                                                else (be_val_list[0],)
+                                            )
+                                            for tv in tvs:
+                                                for bv in bvs:
+                                                    _append(
+                                                        th, rr, sl, tp, wt, pro, mtf, slip, fee, trail,
+                                                        sess, re, stobe, be, be_pct, vol, sl_flag, tp_flag,
+                                                        tv, bv,
+                                                    )
     if wants_mtf and not any(c[6] for c in combos):
         raise ValueError(
             f"Pro-MTF produced no combos — Base TF must be > chart TF ({tf_minutes}m)."
@@ -915,7 +943,7 @@ def _iter_grid(
     if sigma_n not in (1.0, 2.0, 3.0):
         sigma_n = min((1.0, 2.0, 3.0), key=lambda x: abs(x - sigma_n))
     jobs: list[dict[str, Any]] = []
-    for th, rr, sl, tp, wt, pro, mtf, slip, fee, trail, sess, re, stobe, be, be_pct, btf, bthr, sig, vol, sl_flag, tp_flag in combos:
+    for th, rr, sl, tp, wt, pro, mtf, slip, fee, trail, sess, re, stobe, be, be_pct, btf, bthr, sig, vol, sl_flag, tp_flag, tv, bv in combos:
         ea, eb, et = sess
         jobs.append(
             {
@@ -947,9 +975,10 @@ def _iter_grid(
                 "sl_unit": sl_u,
                 "tp_unit": tp_u,
                 "trail_unit": trail_u,
-                "trail_value": trail_v,
+                "trail_value": float(tv),
                 "be_unit": be_u,
-                "be_value": be_v,
+                "be_value": float(bv),
+                "be_ctc": be_c,
             }
         )
 

@@ -52,6 +52,7 @@ export function comboKey(r: {
   sl_tp_unit?: string
   be_unit?: string
   be_value?: number
+  be_ctc?: number
   entry_after?: number
   entry_before?: number
   exit_time?: number
@@ -86,6 +87,7 @@ export function comboKey(r: {
     n(r.trail_value),
     String(r.be_unit ?? ''),
     n(r.be_value),
+    n(r.be_ctc),
     n(r.entry_after),
     n(r.entry_before),
     n(r.exit_time),

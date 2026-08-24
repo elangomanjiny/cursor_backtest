@@ -158,6 +158,7 @@ const DEFAULTS: StrategyParams = {
   break_even_pct: 50,
   be_unit: 'range',
   be_value: 50,
+  be_ctc: 2,
   start: '2026-08-01',
   end: '2026-08-03',
 }
@@ -273,7 +274,9 @@ export default function App() {
       best: null,
       results: [],
       metric_columns: [],
-      symbol: params.symbol,
+      symbol: grid.symbol || params.symbol,
+      start: grid.start || params.start,
+      end: grid.end || params.end,
       tf_minutes: grid.tf,
       volume: params.volume,
     })
@@ -281,14 +284,14 @@ export default function App() {
       const result = await fetchOptimize(
         {
           exchange: params.exchange,
-          symbol: params.symbol,
           volume: params.volume,
-          start: params.start,
-          end: params.end,
           slippage_pct: params.slippage_pct,
           fee_pct: params.fee_pct,
           max_runs: 400,
           ...grid,
+          symbol: grid.symbol || params.symbol,
+          start: grid.start || params.start,
+          end: grid.end || params.end,
           tf: grid.tf,
         },
         (done, total, workers, combo) => {
@@ -300,7 +303,12 @@ export default function App() {
         ac.signal,
       )
       if (ac.signal.aborted) return
-      setOpt(result)
+      setOpt({
+        ...result,
+        symbol: result.symbol || grid.symbol,
+        start: grid.start,
+        end: grid.end,
+      })
     } catch (e) {
       if (e instanceof OptimizeCancelledError || ac.signal.aborted) {
         // keep last progress briefly cleared; no error toast
@@ -351,6 +359,9 @@ export default function App() {
       : 0
     const next: StrategyParams = {
       ...params,
+      symbol: String(opt?.symbol || params.symbol),
+      start: String(opt?.start || params.start),
+      end: String(opt?.end || params.end),
       tf: Number(opt?.tf_minutes ?? params.tf),
       threshold: Number(b.threshold),
       rr: Number(b.rr),
@@ -377,6 +388,7 @@ export default function App() {
         ? String((b as { be_unit?: string }).be_unit || params.be_unit)
         : params.be_unit) as StrategyParams['be_unit'],
       be_value: Number((b as { be_value?: number }).be_value ?? params.be_value ?? 50),
+      be_ctc: Number((b as { be_ctc?: number }).be_ctc ?? params.be_ctc ?? 2),
       slippage_pct: Number(b.slippage_pct ?? params.slippage_pct ?? 0),
       fee_pct: Number(b.fee_pct ?? params.fee_pct ?? 0),
       entry_after: Number(b.entry_after ?? opt?.entry_after ?? params.entry_after),
@@ -424,10 +436,10 @@ export default function App() {
     }
     const beLab = next.break_even
       ? next.be_unit === 'range'
-        ? 'BE On Range'
+        ? `BE On Range CTC ${next.be_ctc}`
         : next.be_unit === 'pct'
-          ? `BE On ${next.be_value}%`
-          : `BE On ${next.be_value} ${next.be_unit}`
+          ? `BE On ${next.be_value}% CTC ${next.be_ctc}`
+          : `BE On ${next.be_value} ${next.be_unit} CTC ${next.be_ctc}`
       : 'BE Off'
     const expectTrades = Number(b.trades ?? 0)
     const expectNet = Number(b.net_pnl ?? 0)
