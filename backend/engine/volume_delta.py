@@ -324,7 +324,7 @@ class BacktestResult:
     pro_mtf_mode: int = 0
     base_tf_minutes: int = 0
     base_threshold: float = 0.0
-    # Pro-MTF: HTF bias timeline for chart overlay (time ISO IST, mode, invalid)
+    # Pro-MTF: HTF invalidator timeline for chart overlay (time ISO IST, mode, invalid)
     mtf_bias: list[dict[str, Any]] | None = None
 
 
@@ -383,6 +383,16 @@ def mtf_bias_at(
         else:
             break
     return mode, inv
+
+
+def _mtf_accept_long(low: float, invalid: float | None) -> bool:
+    """LTF long: whole candle strictly above the current HTF invalidator."""
+    return invalid is not None and float(low) > float(invalid)
+
+
+def _mtf_accept_short(high: float, invalid: float | None) -> bool:
+    """LTF short: whole candle strictly below the current HTF invalidator."""
+    return invalid is not None and float(high) < float(invalid)
 
 
 def _to_ist(ts: pd.Timestamp | datetime) -> datetime:
@@ -741,9 +751,9 @@ def _prepare_ticks(
         if not bars.empty:
             t0 = _as_utc_ts(bars["open_time"].iloc[0])
             last = _as_utc_ts(bars["open_time"].iloc[-1])
-            start = t0.strftime("%Y-%m-%d")
-            # exclusive end = day after last bar open (+1 day cushion for last bar ticks)
-            end = (last + timedelta(days=2)).strftime("%Y-%m-%d")
+            start = t0.tz_convert(IST).strftime("%Y-%m-%d")
+            # exclusive IST end = day after last bar open (+1 day cushion for last bar ticks)
+            end = (last.tz_convert(IST) + timedelta(days=2)).strftime("%Y-%m-%d")
         ticks = load_ticks(symbol, start=start, end=end)
     df = ticks.copy()
     df["ts"] = pd.to_datetime(df["ts"], utc=True)
@@ -880,15 +890,6 @@ def _scan_ticks_until(
                     active["use_stop"] = True
                     _record_trail(active, ts, stop)
 
-        # Pro-MTF: force flat if price trades through HTF invalid level
-        mtf_inv = active.get("mtf_invalid")
-        if mtf_inv is not None:
-            inv = float(mtf_inv)
-            if is_long and px <= inv:
-                return i + 1, ts, inv, "LMTF"
-            if (not is_long) and px >= inv:
-                return i + 1, ts, inv, "SMTF"
-
         # BreakEven: arm = target from slipped entry; lock = be_frac × that distance (once)
         if active.get("be_enabled") and not active.get("be_moved"):
             arm = float(active["be_arm"])
@@ -1007,9 +1008,16 @@ def run_backtest(
       Optional BreakEven; no ORB trail. Pro-MTF does not reverse.
 
     Pro-MTF (pro_mtf_mode=True):
-      Base TF AGGR sets bull/bear bias + invalid level (low/high); persists across days.
-      Exec TF (chart) runs Directional entries only with the bias (bull→long, bear→short).
-      Through invalid → cancel pending + force-exit (LMTF/SMTF). No VWAP.
+      Base TF AGGR sets bull/bear + invalidator (Buy→low, Sell→high) at HTF close.
+      Latest HTF AGGR always replaces the line (rule A). No VWAP. No LR/SR reverse.
+      LTF trades both sides of the *current* line (whole candle, next-bar open):
+        Buy AGGR and low > invalid → long (close short if open).
+        Sell AGGR and high < invalid → short (close long if open).
+      New HTF AGGR always replaces the line. Same side as the open trade
+      (long+bull / short+bear) → keep it; LTF uses the new invalidator.
+      Against the open trade → flatten (LMTFX/SMTFX) unless the original
+      signal candle is still a legal other-side trade vs the new line.
+      Wick through the line does not exit and does not change HTF bias.
     """
     mtf = bool(pro_mtf_mode)
     pro = bool(pro_mode) and not mtf
@@ -1029,7 +1037,8 @@ def run_backtest(
     # Pro features: forced off for now
     re_en = 0
     stobe = 0
-    # Stop is a hard exit. Reverse is opposite-AGGR (Dir, Non-Dir, Pro). Pro-MTF: no reverse.
+    # Stop is a hard exit. Reverse is opposite-AGGR (Dir, Non-Dir, Pro).
+    # Pro-MTF flattens via LMTFX/SMTFX then arms the other side (not LR/SR).
     allow_reverse = False
     sl_u = _normalize_sl_tp_unit(sl_unit or sl_tp_unit)
     tp_u = _normalize_sl_tp_unit(tp_unit or sl_tp_unit)
@@ -1047,7 +1056,7 @@ def run_backtest(
     sl_val = float(stop_loss if stop_loss is not None else 50.0)
     tp_val = float(take_profit if take_profit is not None else 100.0)
     allow_trail = False
-    aggr_reverse = not mtf  # Dir + Non-Dir + Pro; Pro-MTF stays directional-only
+    aggr_reverse = not mtf  # Dir + Non-Dir + Pro; Pro-MTF uses LMTFX/SMTFX, not LR/SR
     # BreakEven: arm from be_unit/be_value (when). Lock = CTC × (slip USDT + fee USDT) / lots.
     be_on = 1 if int(break_even or 0) else 0
     if be_u == "range":
@@ -1090,8 +1099,8 @@ def run_backtest(
         if not df.empty:
             t0 = _as_utc_ts(df["open_time"].iloc[0])
             last = _as_utc_ts(df["open_time"].iloc[-1])
-            start = t0.strftime("%Y-%m-%d")
-            end = (last + timedelta(days=2)).strftime("%Y-%m-%d")
+            start = t0.tz_convert(IST).strftime("%Y-%m-%d")
+            end = (last.tz_convert(IST) + timedelta(days=2)).strftime("%Y-%m-%d")
         ticks = _load_ticks(symbol, start=start, end=end)
     ticks = slice_ticks_to_session(
         ticks, entry_after, entry_before, exit_time, buffer_min=buf
@@ -1110,6 +1119,8 @@ def run_backtest(
     orb: dict[str, Any] | None = None  # Wait=true shared ORB range
     pending_reentry: dict[str, Any] | None = None
     aggr_flip: dict[str, Any] | None = None  # Directional: reverse at next bar open
+    mtf_flip: dict[str, Any] | None = None  # Pro-MTF: flatten + other side at next open
+    last_mtf_mode: str | None = None
     active = None
     trades: list[Trade] = []
     aggressive: list[Aggressive] = []
@@ -1461,7 +1472,7 @@ def run_backtest(
 
     def _cancel_stale_setups(events: list[str], why: str) -> None:
         """Drop pending ORB / Directional setups / reverse so Flatten cannot fill next session."""
-        nonlocal orb, pending_reentry, aggr_flip, long_setup, short_setup
+        nonlocal orb, pending_reentry, aggr_flip, mtf_flip, long_setup, short_setup
         parts: list[str] = []
         if orb is not None:
             parts.append("orb")
@@ -1472,6 +1483,9 @@ def run_backtest(
         if aggr_flip is not None:
             parts.append("flip")
             aggr_flip = None
+        if mtf_flip is not None:
+            parts.append("mtf-flip")
+            mtf_flip = None
         if long_setup is not None:
             parts.append("LE-setup")
             long_setup = None
@@ -1588,13 +1602,48 @@ def run_backtest(
         mtf_mode, mtf_inv = (None, None)
         if mtf:
             mtf_mode, mtf_inv = mtf_bias_at(mtf_events, ot)
+            htf_flipped = (
+                last_mtf_mode is not None
+                and mtf_mode is not None
+                and mtf_mode != last_mtf_mode
+            )
             if active is not None:
                 active["mtf_invalid"] = mtf_inv
-                # Bias flipped against the open side → force flat at bar open
-                if active["is_long"] and mtf_mode != "bull":
-                    closed_this_bar = _handle_exit(ot, o, "LMTF", events, until=bar_end)
-                elif (not active["is_long"]) and mtf_mode != "bear":
-                    closed_this_bar = _handle_exit(ot, o, "SMTF", events, until=bar_end)
+                # Same side as the *new* HTF (short+bear / long+bull) → keep.
+                # Against the new HTF → flatten unless the original signal
+                # candle is still a legal other-side trade vs the new line.
+                if htf_flipped:
+                    is_long = bool(active["is_long"])
+                    same_side = (is_long and mtf_mode == "bull") or (
+                        (not is_long) and mtf_mode == "bear"
+                    )
+                    if same_side:
+                        legal = True
+                    elif is_long:
+                        legal = _mtf_accept_long(float(active["signal_low"]), mtf_inv)
+                    else:
+                        legal = _mtf_accept_short(float(active["signal_high"]), mtf_inv)
+                    if not legal:
+                        tag = "LMTFX" if is_long else "SMTFX"
+                        closed_this_bar = _handle_exit(ot, o, tag, events, until=bar_end)
+            if long_setup is not None and not _mtf_accept_long(
+                float(long_setup["signal_low"]), mtf_inv
+            ):
+                events.append("LE-SETUP-CANCEL-MTF")
+                long_setup = None
+            if short_setup is not None and not _mtf_accept_short(
+                float(short_setup["signal_high"]), mtf_inv
+            ):
+                events.append("SE-SETUP-CANCEL-MTF")
+                short_setup = None
+            if mtf_flip is not None:
+                want = str(mtf_flip.get("close_tag") or "")
+                keep_flip = (want == "LMTFX" and short_setup is not None) or (
+                    want == "SMTFX" and long_setup is not None
+                )
+                if not keep_flip:
+                    events.append("MTF-FLIP-CANCEL")
+                    mtf_flip = None
 
         in_win = _in_session(ot, entry_after, entry_before, hour_set)
         tick_managed = False
@@ -1614,6 +1663,19 @@ def run_backtest(
                 closed_this_bar = _handle_exit(ot, o, want, events, until=bar_end)
                 tick_managed = True
             aggr_flip = None
+
+        # Pro-MTF: opposite whole-candle LTF AGGR flattens at this bar's open
+        if mtf and mtf_flip is not None:
+            if active is not None:
+                want = str(mtf_flip.get("close_tag") or "")
+                side_ok = (want == "LMTFX" and active["is_long"]) or (
+                    want == "SMTFX" and not active["is_long"]
+                )
+                if side_ok and in_win and not session_flat:
+                    tick_i = book.seek(ot, tick_i)
+                    closed_this_bar = _handle_exit(ot, o, want, events, until=bar_end)
+                    tick_managed = True
+            mtf_flip = None
 
         # --- manage open on ticks through this bar ---
         if active is not None and not tick_managed:
@@ -1725,11 +1787,21 @@ def run_backtest(
                         entered = True
         else:
             # Directional / Pro-MTF: next eligible bar open
-            mtf_long_ok = (not mtf) or (mtf_mode == "bull")
-            mtf_short_ok = (not mtf) or (mtf_mode == "bear")
+            if mtf:
+                mtf_long_ok = bool(
+                    long_setup
+                    and _mtf_accept_long(float(long_setup["signal_low"]), mtf_inv)
+                )
+                mtf_short_ok = bool(
+                    short_setup
+                    and _mtf_accept_short(float(short_setup["signal_high"]), mtf_inv)
+                )
+            else:
+                mtf_long_ok = True
+                mtf_short_ok = True
 
             if active is None:
-                # Age setups; drop if price traded through AGGR stop and/or HTF invalid
+                # Age setups; drop if price traded through AGGR stop (range SL)
                 if long_setup is not None and long_setup["signal_time"] < ot:
                     long_setup["bars"] += 1
                     stop_lvl = float(long_setup["low"])
@@ -1738,12 +1810,10 @@ def run_backtest(
                         and sl_u == "range"
                         and (o <= stop_lvl or l <= stop_lvl)
                     )
-                    hit_mtf = mtf and mtf_inv is not None and (o <= float(mtf_inv) or l <= float(mtf_inv))
-                    if hit_setup or hit_mtf:
-                        lvl = float(mtf_inv) if hit_mtf and mtf_inv is not None else stop_lvl
-                        events.append(f"LE-SETUP-INVALID@{lvl:.2f}")
+                    if hit_setup:
+                        events.append(f"LE-SETUP-INVALID@{stop_lvl:.2f}")
                         long_setup = None
-                    if mtf and not mtf_long_ok:
+                    elif mtf and long_setup is not None and not mtf_long_ok:
                         events.append("LE-SETUP-CANCEL-MTF")
                         long_setup = None
                 if short_setup is not None and short_setup["signal_time"] < ot:
@@ -1754,12 +1824,10 @@ def run_backtest(
                         and sl_u == "range"
                         and (o >= stop_lvl or h >= stop_lvl)
                     )
-                    hit_mtf = mtf and mtf_inv is not None and (o >= float(mtf_inv) or h >= float(mtf_inv))
-                    if hit_setup or hit_mtf:
-                        lvl = float(mtf_inv) if hit_mtf and mtf_inv is not None else stop_lvl
-                        events.append(f"SE-SETUP-INVALID@{lvl:.2f}")
+                    if hit_setup:
+                        events.append(f"SE-SETUP-INVALID@{stop_lvl:.2f}")
                         short_setup = None
-                    if mtf and not mtf_short_ok:
+                    elif mtf and short_setup is not None and not mtf_short_ok:
                         events.append("SE-SETUP-CANCEL-MTF")
                         short_setup = None
 
@@ -1968,39 +2036,69 @@ def run_backtest(
                             events.append("LE-SETUP-CANCEL")
                             long_setup = None
             else:
-                # Directional / Pro-MTF: arm only when flat; Pro-MTF also needs HTF bias
-                if active is None:
-                    can_long = allow_long and ((not mtf) or mtf_mode == "bull")
-                    can_short = allow_short and ((not mtf) or mtf_mode == "bear")
+                # Directional / Pro-MTF. Pro-MTF: both sides of the current HTF line
+                # (whole candle). Opposite qualifier while in a trade → flatten next open.
+                mtf_long_arm = (not mtf) or _mtf_accept_long(l, mtf_inv)
+                mtf_short_arm = (not mtf) or _mtf_accept_short(h, mtf_inv)
+                if mtf and (mtf_mode is None or mtf_inv is None):
+                    mtf_long_arm = mtf_short_arm = False
+
+                def _arm_ltf_setup(is_long: bool) -> dict[str, Any]:
+                    return {
+                        "signal_time": ot,
+                        "high": h,
+                        "low": l,
+                        "range": rng,
+                        "bars": 0,
+                        "signal_high": h,
+                        "signal_low": l,
+                        "signal_delta_pct": dlt,
+                    }
+
+                if mtf and active is not None:
+                    if (
+                        active["is_long"]
+                        and dlt <= -threshold
+                        and mtf_short_arm
+                        and allow_short
+                    ):
+                        mtf_flip = {"close_tag": "LMTFX"}
+                        short_setup = _arm_ltf_setup(False)
+                        long_setup = None
+                        events.append("MTF-FLIP-ARM-SE")
+                    elif (
+                        (not active["is_long"])
+                        and dlt >= threshold
+                        and mtf_long_arm
+                        and allow_long
+                    ):
+                        mtf_flip = {"close_tag": "SMTFX"}
+                        long_setup = _arm_ltf_setup(True)
+                        short_setup = None
+                        events.append("MTF-FLIP-ARM-LE")
+                    elif (
+                        (active["is_long"] and dlt >= threshold)
+                        or ((not active["is_long"]) and dlt <= -threshold)
+                    ):
+                        if mtf_flip is not None:
+                            events.append("MTF-FLIP-CANCEL")
+                            mtf_flip = None
+                elif active is None:
+                    can_long = allow_long and mtf_long_arm
+                    can_short = allow_short and mtf_short_arm
                     if dlt >= threshold and can_long:
-                        long_setup = {
-                            "signal_time": ot,
-                            "high": h,
-                            "low": l,
-                            "range": rng,
-                            "bars": 0,
-                            "signal_high": h,
-                            "signal_low": l,
-                            "signal_delta_pct": dlt,
-                        }
+                        long_setup = _arm_ltf_setup(True)
                         if short_setup is not None:
                             events.append("SE-SETUP-CANCEL")
                             short_setup = None
                     if dlt <= -threshold and can_short:
-                        short_setup = {
-                            "signal_time": ot,
-                            "high": h,
-                            "low": l,
-                            "range": rng,
-                            "bars": 0,
-                            "signal_high": h,
-                            "signal_low": l,
-                            "signal_delta_pct": dlt,
-                        }
+                        short_setup = _arm_ltf_setup(False)
                         if long_setup is not None:
                             events.append("LE-SETUP-CANCEL")
                             long_setup = None
 
+        if mtf:
+            last_mtf_mode = mtf_mode
         prev_close = c
 
         # Bar-open equity only when no intrabar exit already stamped a later time

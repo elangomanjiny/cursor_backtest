@@ -27,8 +27,8 @@ export function StrategyPanel({ params, onChange, busy, hideDataFields }: Props)
       <h2>Strategy parameters</h2>
       <p className="hint">
         {hideDataFields
-          ? 'Change timeframe or params — auto-reruns after the first Run (bars rebuild from loaded ticks).'
-          : 'Click Run backtest to start. After that, edits re-run automatically.'}
+          ? 'Change timeframe or params, then click Run.'
+          : 'Click Run backtest to start. Edits apply on the next Run.'}
       </p>
 
       {!hideDataFields && (

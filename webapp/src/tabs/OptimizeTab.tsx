@@ -1333,7 +1333,7 @@ export function OptimizeTab({
                 <>
                   <SweepRow
                     label="Base TF"
-                    title="Pro-MTF higher timeframe (must be > chart TF)"
+                    title="Pro-MTF higher timeframe: AGGR sets invalidator (Buy→low, Sell→high)"
                     value={baseTfRange}
                     onChange={setBaseTfRange}
                     stepHint="15"
@@ -1394,8 +1394,8 @@ export function OptimizeTab({
                   ))}
                 </select>
               </label>
-              <label title="Optimize start date (UTC, inclusive). Load this range in Step 1 first.">
-                Start
+              <label title="Optimize start date (IST 00:00, inclusive). Load this range in Step 1 first.">
+                Start (IST)
                 <input
                   type="date"
                   disabled={busy}
@@ -1403,8 +1403,8 @@ export function OptimizeTab({
                   onChange={(e) => setOptStart(e.target.value)}
                 />
               </label>
-              <label title="Optimize end date (UTC, exclusive). Load this range in Step 1 first.">
-                End
+              <label title="Optimize end date (IST 00:00, exclusive). Load this range in Step 1 first.">
+                End (IST)
                 <input
                   type="date"
                   disabled={busy}

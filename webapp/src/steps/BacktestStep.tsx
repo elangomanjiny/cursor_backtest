@@ -73,8 +73,8 @@ export function BacktestStep({
           <span className="strip-lab">DATA</span>
           <span>{params.exchange}</span>
           <b>{params.symbol}</b>
-          <span>
-            {params.start} → {params.end}
+          <span title="IST calendar dates. Start is 00:00 inclusive; End is 00:00 exclusive.">
+            {params.start} → {params.end} IST
           </span>
           <label>
             TF
@@ -315,7 +315,7 @@ export function BacktestStep({
               onChange={(e) => set('threshold', Number(e.target.value))}
             />
           </label>
-          <label title="Directional = baseline. Non-Directional = ORB+reverse. Pro = VWAP tags + reverse. Pro-MTF = HTF bias + LTF Directional (no reverse).">
+          <label title="Directional = baseline. Non-Directional = ORB+reverse. Pro = VWAP tags + reverse. Pro-MTF = HTF invalidator + LTF both sides (whole candle, no LR/SR).">
             Strategy
             <select
               value={
@@ -354,7 +354,7 @@ export function BacktestStep({
           </label>
           {params.pro_mtf_mode && (
             <>
-              <label title="Higher timeframe for bull/bear AGGR bias (must be > chart TF)">
+              <label title="Higher timeframe AGGR sets the invalidator (Buy→low, Sell→high). Must be > chart TF.">
                 Base TF
                 <select
                   value={params.base_tf}
@@ -495,7 +495,11 @@ export function BacktestStep({
         <span className="strip-div" aria-hidden />
 
         <div className="strip-seg strip-actions">
-          <button disabled={busy} onClick={onRun}>
+          <button
+            disabled={busy}
+            onClick={onRun}
+            title="Run with the current settings. Changing params does not auto-run."
+          >
             {busy ? '…' : sessionStarted ? 'Run' : 'Run backtest'}
           </button>
           <button className="ghost" disabled={!data} onClick={onGoOptimize}>

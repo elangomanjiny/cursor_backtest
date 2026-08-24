@@ -722,6 +722,11 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
         const reason = (tr.exit_reason || '').toUpperCase()
         const exitRev = reason === 'LR' || reason === 'SR'
         const hitBe = reason === 'LB' || reason === 'SB'
+        const hitMtf =
+          reason === 'LMTFX' ||
+          reason === 'SMTFX' ||
+          reason === 'LMTF' ||
+          reason === 'SMTF'
         const hitStop = reason === 'LSL' || reason === 'SSL' || hitBe
         const hitTarget = reason === 'LT' || reason === 'ST'
         let exitPos: 'aboveBar' | 'belowBar' = short ? 'belowBar' : 'aboveBar'
@@ -733,7 +738,11 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
             ? '#f0b429'
             : reason === 'LSL' || reason === 'SSL'
               ? '#f85149'
-              : '#a371f7'
+              : hitMtf
+                ? reason.startsWith('S')
+                  ? '#f85149'
+                  : '#58a6ff'
+                : '#a371f7'
         const tExit = snap(tr.exit_time)
         markers.push({
           time: tExit as never,
@@ -1085,7 +1094,7 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
           {proMtfMode && (
             <label
               className={`ov-toggle ${showMtfLevels ? 'on' : ''}`}
-              title="Base TF bias invalidator levels on this chart"
+              title="HTF AGGR invalidator (Buy→low, Sell→high) on this chart"
             >
               <input
                 type="checkbox"

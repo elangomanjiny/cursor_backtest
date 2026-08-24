@@ -14,10 +14,12 @@ from fastapi.staticfiles import StaticFiles
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from backend.engine.bars import SUPPORTED_TF, load_or_build_bars, load_ticks  # noqa: E402
+from backend.engine.bars import SUPPORTED_TF, ensure_bars_cover, load_or_build_bars, load_ticks  # noqa: E402
 from backend.engine.dataloader import (  # noqa: E402
     SUPPORTED_EXCHANGES,
     data_availability,
+    ist_bounds,
+    ist_lookback_start,
     load_dataset,
 )
 from backend.engine.formatting import round_obj  # noqa: E402
@@ -33,7 +35,7 @@ from backend.engine.volume_delta import (  # noqa: E402
     write_parity_report,
 )
 
-APP_VERSION = "2.1.27"
+APP_VERSION = "2.1.34"
 app = FastAPI(title="cursor_backtest", version=APP_VERSION)
 app.add_middleware(
     CORSMiddleware,
@@ -48,17 +50,21 @@ def _scope_bars(
     start: str | None = "2026-08-01",
     end: str | None = "2026-08-03",
 ) -> pd.DataFrame:
+    """Keep bars in the IST calendar window [start, end)."""
     out = bars.copy()
     out["open_time"] = pd.to_datetime(out["open_time"], utc=True)
-    if start:
-        out = out[out["open_time"] >= pd.Timestamp(start, tz="UTC")]
-    if end:
-        out = out[out["open_time"] < pd.Timestamp(end, tz="UTC")]
+    t0, t1 = ist_bounds(start, end)
+    if t0 is not None:
+        out = out[out["open_time"] >= t0]
+    if t1 is not None:
+        out = out[out["open_time"] < t1]
     return out
 
 
-def _load_bars(symbol: str, tf: int) -> pd.DataFrame:
+def _load_bars(symbol: str, tf: int, start: str | None = None, end: str | None = None) -> pd.DataFrame:
     try:
+        if start and end:
+            return ensure_bars_cover(symbol, tf, start, end)
         return load_or_build_bars(symbol, tf)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e)) from e
@@ -71,7 +77,7 @@ def _ensure_ready(
 ) -> dict:
     """Build bars for TF from ticks if needed, then re-check availability."""
     try:
-        load_or_build_bars(symbol, tf)
+        ensure_bars_cover(symbol, tf, start, end)
     except FileNotFoundError:
         pass
     except ValueError as e:
@@ -157,14 +163,23 @@ def data_bars(
 ):
     """OHLCV + delta table for Data Loader preview."""
     try:
-        bars = _load_bars(symbol, tf)
+        bars = _load_bars(symbol, tf, start, end)
     except HTTPException:
         raise
     scoped = _scope_bars(bars, start, end)
     if scoped.empty:
-        return {"symbol": symbol, "tf": tf, "bars": [], "count": 0}
-    # newest last; cap rows for UI
-    if len(scoped) > limit:
+        return {
+            "symbol": symbol,
+            "tf": tf,
+            "start": start,
+            "end": end,
+            "count": 0,
+            "total": 0,
+            "bars": [],
+        }
+    total = int(len(scoped))
+    # newest last; cap rows for the preview table only (load/backtest use full data)
+    if total > limit:
         scoped = scoped.iloc[-limit:]
     rows = []
     for _, r in scoped.iterrows():
@@ -184,7 +199,15 @@ def data_bars(
                 }
             )
         )
-    return {"symbol": symbol, "tf": tf, "start": start, "end": end, "count": len(rows), "bars": rows}
+    return {
+        "symbol": symbol,
+        "tf": tf,
+        "start": start,
+        "end": end,
+        "count": len(rows),
+        "total": total,
+        "bars": rows,
+    }
 
 
 @app.get("/api/backtest")
@@ -238,7 +261,7 @@ def backtest(
         exchange, symbol, start or "2026-08-01", end or "2026-08-03", tf
     )
 
-    bars = _load_bars(symbol, tf)
+    bars = _load_bars(symbol, tf, start, end)
     scoped = _scope_bars(bars, start, end)
     if scoped.empty:
         raise HTTPException(400, "No bars in requested range")
@@ -263,13 +286,15 @@ def backtest(
                 400,
                 f"Pro-MTF Base TF ({base_tf}m) must be greater than chart TF ({tf}m).",
             )
+        htf_start = ist_lookback_start(start or "2026-08-01", 2)
+        htf_end = end or "2026-08-03"
         try:
-            base_all = _load_bars(symbol, int(base_tf))
+            base_all = ensure_bars_cover(symbol, int(base_tf), htf_start, htf_end)
         except FileNotFoundError as e:
             raise HTTPException(409, str(e)) from e
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
-        base_scoped = _scope_bars(base_all, start, end)
+        base_scoped = _scope_bars(base_all, htf_start, htf_end)
         if base_scoped.empty:
             raise HTTPException(400, f"No {base_tf}m bars in requested range for Pro-MTF")
 
@@ -466,7 +491,7 @@ def optimize(
             if btf > int(tf):
                 _ensure_ready(exchange, symbol, start or "2026-08-01", end or "2026-08-03", btf)
 
-    bars = _load_bars(symbol, tf)
+    bars = _load_bars(symbol, tf, start, end)
     scoped = _scope_bars(bars, start, end)
     if scoped.empty:
         raise HTTPException(400, "No bars in requested range")

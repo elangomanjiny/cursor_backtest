@@ -36,6 +36,7 @@ export function DataLoaderStep({
 }: Props) {
   const [tableTf, setTableTf] = useState(tf)
   const [rows, setRows] = useState<OhlcvBar[]>([])
+  const [tableTotal, setTableTotal] = useState(0)
   const [tableBusy, setTableBusy] = useState(false)
 
   useEffect(() => {
@@ -45,16 +46,23 @@ export function DataLoaderStep({
   useEffect(() => {
     if (!dataReady) {
       setRows([])
+      setTableTotal(0)
       return
     }
     let cancelled = false
     setTableBusy(true)
     void fetchBars({ symbol, tf: tableTf, start, end })
       .then((r) => {
-        if (!cancelled) setRows(r.bars)
+        if (!cancelled) {
+          setRows(r.bars)
+          setTableTotal(Number(r.total ?? r.count ?? r.bars.length))
+        }
       })
       .catch(() => {
-        if (!cancelled) setRows([])
+        if (!cancelled) {
+          setRows([])
+          setTableTotal(0)
+        }
       })
       .finally(() => {
         if (!cancelled) setTableBusy(false)
@@ -74,7 +82,8 @@ export function DataLoaderStep({
       <h2 className={dataReady ? 'title-ready' : 'title-idle'}>Step 1 — Data Loader</h2>
       <p className="hint">
         Pull Binance USD-M futures aggTrades, then build OHLCV + delta bars. Supports up to ~1
-        year (day-by-day download; large ranges need disk + time). For live prep: load IS window,
+        year (day-by-day download; large ranges need disk + time). Dates are IST calendar days:
+        Start is 00:00 IST inclusive, End is 00:00 IST exclusive. For live prep: load IS window,
         optimize, then change dates to an OOS window and re-backtest without re-fitting.
       </p>
 
@@ -97,8 +106,8 @@ export function DataLoaderStep({
             disabled={busy}
           />
         </label>
-        <label>
-          Start date (UTC)
+        <label title="Inclusive. 00:00 IST on this date.">
+          Start date (IST)
           <input
             type="date"
             value={start}
@@ -106,8 +115,8 @@ export function DataLoaderStep({
             disabled={busy}
           />
         </label>
-        <label>
-          End date (UTC, exclusive)
+        <label title="Exclusive. Window ends at 00:00 IST on this date (that day is not included).">
+          End date (IST, exclusive)
           <input
             type="date"
             value={end}
@@ -153,7 +162,12 @@ export function DataLoaderStep({
               </select>
             </label>
             <span className="hint" style={{ margin: 0 }}>
-              {tableBusy ? 'Refreshing…' : `${rows.length} bars`} · click headers to sort
+              {tableBusy
+                ? 'Refreshing…'
+                : tableTotal > rows.length
+                  ? `preview last ${rows.length} of ${tableTotal} bars`
+                  : `${rows.length} bars`}{' '}
+              · click headers to sort
             </span>
           </div>
           <div className="table-scroll ohlcv-table">

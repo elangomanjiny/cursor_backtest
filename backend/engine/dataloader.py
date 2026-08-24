@@ -9,9 +9,12 @@ import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 import pandas as pd
+
+IST = ZoneInfo("Asia/Kolkata")
 
 from scripts.ingest_aggtrades import _read_aggtrades_zip, build_ohlc_and_delta
 
@@ -28,7 +31,45 @@ SUPPORTED_TF = (1, 3, 5, 15, 30, 60)
 MAX_LOAD_DAYS = 370
 
 
+def ist_bounds(
+    start: str | None, end: str | None
+) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+    """User YYYY-MM-DD are IST calendar days. Return UTC-aware [start, end)."""
+    t0 = t1 = None
+    if start:
+        t0 = pd.Timestamp(str(start)[:10], tz=IST).tz_convert("UTC")
+    if end:
+        t1 = pd.Timestamp(str(end)[:10], tz=IST).tz_convert("UTC")
+    return t0, t1
+
+
+def ist_lookback_start(start: str, days: int = 2) -> str:
+    """IST calendar date `days` before start (for HTF bias before the LTF window)."""
+    d = date.fromisoformat(str(start)[:10]) - timedelta(days=max(0, int(days)))
+    return d.isoformat()
+
+
+def utc_days_covering_ist(start: str, end: str) -> list[date]:
+    """Binance Vision UTC daily files that overlap IST [start, end)."""
+    t0, t1 = ist_bounds(start, end)
+    if t0 is None or t1 is None:
+        raise ValueError("start and end required")
+    if t1 <= t0:
+        raise ValueError("end date must be after start date")
+    out: list[date] = []
+    d = t0.date()
+    last = t1.date()
+    while d <= last:
+        day0 = pd.Timestamp(d.isoformat(), tz="UTC")
+        day1 = day0 + pd.Timedelta(days=1)
+        if day1 > t0 and day0 < t1:
+            out.append(d)
+        d += timedelta(days=1)
+    return out
+
+
 def _daterange(start: str, end: str, *, max_days: int = MAX_LOAD_DAYS) -> list[date]:
+    """UTC calendar days to download for the IST [start, end) window."""
     s = date.fromisoformat(start[:10])
     e = date.fromisoformat(end[:10])
     if e <= s:
@@ -37,14 +78,9 @@ def _daterange(start: str, end: str, *, max_days: int = MAX_LOAD_DAYS) -> list[d
     if days > max_days:
         raise ValueError(
             f"Date range limited to {max_days} days (~1 year). "
-            f"Requested {days} days ({start[:10]} to {end[:10]})."
+            f"Requested {days} IST days ({start[:10]} to {end[:10]})."
         )
-    out = []
-    cur = s
-    while cur < e:
-        out.append(cur)
-        cur += timedelta(days=1)
-    return out
+    return utc_days_covering_ist(start, end)
 
 
 def _zip_path(symbol: str, d: date) -> Path:
@@ -119,8 +155,7 @@ def load_tick_parts(
     to legacy single-file parquet.
     """
     symbol = symbol.upper()
-    t0 = pd.Timestamp(start[:10], tz="UTC") if start else None
-    t1 = pd.Timestamp(end[:10], tz="UTC") if end else None
+    t0, t1 = ist_bounds(start, end)
 
     parts_dir = ticks_parts_dir(symbol)
     frames: list[pd.DataFrame] = []
@@ -128,14 +163,16 @@ def load_tick_parts(
     if parts_dir.is_dir():
         parts = sorted(parts_dir.glob("part-*.parquet"))
         for p in parts:
-            # part-YYYY-MM-DD.parquet
+            # part-YYYY-MM-DD.parquet (UTC calendar day on disk)
             try:
                 day = date.fromisoformat(p.stem.replace("part-", "")[:10])
             except ValueError:
                 continue
-            if t0 is not None and day < t0.date():
+            day0 = pd.Timestamp(day.isoformat(), tz="UTC")
+            day1 = day0 + pd.Timedelta(days=1)
+            if t0 is not None and day1 <= t0:
                 continue
-            if t1 is not None and day >= t1.date():
+            if t1 is not None and day0 >= t1:
                 continue
             frames.append(pd.read_parquet(p))
     else:
@@ -189,9 +226,8 @@ def load_dataset(
         raise RuntimeError("No ticks after load/clip — check symbol/dates on Binance Vision.")
 
     bars = pd.concat(bar_frames, ignore_index=True).sort_values("open_time").reset_index(drop=True)
-    # Clip bars to requested window (exclusive end)
-    t0 = pd.Timestamp(start[:10], tz="UTC")
-    t1 = pd.Timestamp(end[:10], tz="UTC")
+    # Clip bars to IST [start, end)
+    t0, t1 = ist_bounds(start, end)
     bars["open_time"] = pd.to_datetime(bars["open_time"], utc=True)
     bars = bars[(bars["open_time"] >= t0) & (bars["open_time"] < t1)]
     if bars.empty:
@@ -214,6 +250,7 @@ def load_dataset(
         "tf": tf,
         "start": start[:10],
         "end": end[:10],
+        "tz": "Asia/Kolkata",
         "bars": int(len(bars)),
         "ticks": int(tick_rows),
         "tick_parts": str(ticks_parts_dir(symbol).relative_to(ROOT)).replace("\\", "/"),
@@ -279,8 +316,7 @@ def data_availability(
     if bar_path.exists():
         bars = pd.read_parquet(bar_path)
         bars["open_time"] = pd.to_datetime(bars["open_time"], utc=True)
-        t0 = pd.Timestamp(start[:10], tz="UTC")
-        t1 = pd.Timestamp(end[:10], tz="UTC")
+        t0, t1 = ist_bounds(start, end)
         scoped = bars[(bars["open_time"] >= t0) & (bars["open_time"] < t1)]
         bars_in_range = int(len(scoped))
         if bars_in_range > 0:
@@ -338,6 +374,7 @@ def data_availability(
         "tf": tf,
         "start": start[:10],
         "end": end[:10],
+        "tz": "Asia/Kolkata",
         "bars_in_range": bars_in_range,
         "first_bar": first_iso,
         "last_bar": last_iso,

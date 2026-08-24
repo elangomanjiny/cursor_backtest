@@ -27,11 +27,14 @@ def build_footprint_bars(
 ) -> list[dict[str, Any]]:
     """Return FootprintBar-compatible dicts (Exact order-flow)."""
     df = ticks.copy()
+    from backend.engine.dataloader import ist_bounds
+
     df["ts"] = pd.to_datetime(df["ts"], utc=True)
-    if start:
-        df = df[df["ts"] >= pd.Timestamp(start, tz="UTC")]
-    if end:
-        df = df[df["ts"] < pd.Timestamp(end, tz="UTC")]
+    t0, t1 = ist_bounds(start, end)
+    if t0 is not None:
+        df = df[df["ts"] >= t0]
+    if t1 is not None:
+        df = df[df["ts"] < t1]
     if df.empty:
         return []
 

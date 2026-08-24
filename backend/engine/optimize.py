@@ -470,7 +470,7 @@ def _load_htf_bars(
     base_tfs: Iterable[int],
 ) -> dict[int, pd.DataFrame]:
     """Load HTF bars for Pro-MTF combos, scoped around the exec window."""
-    from backend.engine.bars import load_or_build_bars
+    from backend.engine.bars import ensure_bars_cover
 
     needed = sorted({int(x) for x in base_tfs if int(x) > int(exec_tf)})
     if not needed:
@@ -480,9 +480,11 @@ def _load_htf_bars(
     ot = pd.to_datetime(exec_bars["open_time"], utc=True)
     t0 = ot.min() - pd.Timedelta(days=2)
     t1 = ot.max() + pd.Timedelta(minutes=max(needed))
+    start = t0.tz_convert(IST).strftime("%Y-%m-%d")
+    end = (t1.tz_convert(IST) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     out: dict[int, pd.DataFrame] = {}
     for btf in needed:
-        df = load_or_build_bars(symbol, btf).copy()
+        df = ensure_bars_cover(symbol, btf, start, end).copy()
         df["open_time"] = pd.to_datetime(df["open_time"], utc=True)
         scoped = df[(df["open_time"] >= t0) & (df["open_time"] <= t1)]
         if scoped.empty:
@@ -812,8 +814,8 @@ def _iter_grid(
         start = end = None
         if not filtered.empty:
             ot = pd.to_datetime(filtered["open_time"], utc=True)
-            start = ot.iloc[0].strftime("%Y-%m-%d")
-            end = (ot.iloc[-1] + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
+            start = ot.iloc[0].tz_convert(IST).strftime("%Y-%m-%d")
+            end = (ot.iloc[-1].tz_convert(IST) + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
         ticks = load_ticks(symbol, start=start, end=end)
 
     # Precompute indicators on full bars; slice ticks to widest session window

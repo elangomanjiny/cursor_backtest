@@ -5,7 +5,7 @@ export type StrategyParams = {
   wait_and_trade: boolean
   /** Pro: Lo/Sh/Se/Co + VWAP±Nσ qualifier (Directional-style entries). */
   pro_mode: boolean
-  /** Pro-MTF: HTF AGGR bias + LTF Directional (no VWAP). */
+  /** Pro-MTF: HTF AGGR line + LTF both-side whole-candle entries (no VWAP). */
   pro_mtf_mode: boolean
   /** Pro-MTF base (higher) timeframe minutes. */
   base_tf: number
@@ -407,7 +407,13 @@ export async function fetchBars(p: {
 }) {
   const r = await fetch(`/api/data/bars?${qs(p)}`)
   if (!r.ok) throw new Error(await errText(r))
-  return r.json() as Promise<{ count: number; bars: OhlcvBar[]; tf: number; symbol: string }>
+  return r.json() as Promise<{
+    count: number
+    total?: number
+    bars: OhlcvBar[]
+    tf: number
+    symbol: string
+  }>
 }
 
 export async function fetchBacktest(params: StrategyParams) {

@@ -181,7 +181,6 @@ export default function App() {
   } | null>(null)
   const reqId = useRef(0)
   const optAbortRef = useRef<AbortController | null>(null)
-  const skipAutoBacktestRef = useRef(false)
 
   const dataReady = Boolean(availability?.ready)
 
@@ -244,22 +243,6 @@ export default function App() {
       if (id === reqId.current) setBusy(false)
     }
   }, [])
-
-  useEffect(() => {
-    if (!sessionStarted || step !== 2) return
-    // Keep skip armed across React Strict Mode's effect double-invoke so Apply
-    // does not get overwritten by a second auto-run with a stale race.
-    if (skipAutoBacktestRef.current) {
-      const clear = window.setTimeout(() => {
-        skipAutoBacktestRef.current = false
-      }, 0)
-      return () => window.clearTimeout(clear)
-    }
-    const t = window.setTimeout(() => {
-      void runBacktest(params)
-    }, 350)
-    return () => window.clearTimeout(t)
-  }, [params, sessionStarted, step, runBacktest])
 
   const runOptimize = async (grid: OptimizeGrid) => {
     optAbortRef.current?.abort()
@@ -337,9 +320,7 @@ export default function App() {
     b: OptimizePoint,
     viewFilter?: { dayofweek?: string; allowed_entry_hours?: string },
   ) => {
-    // Build the exact next params and run immediately — do not rely on the
-    // params-effect alone (it can race with a stale closure and re-run the
-    // previous combo, which looked like “thr 30 didn’t apply”).
+    // Apply writes params then runs once. Backtest tab does not auto-run on edits.
     const dowFromOpt =
       typeof opt?.dayofweek === 'string' && opt.dayofweek.trim()
         ? opt.dayofweek.trim()
@@ -451,7 +432,6 @@ export default function App() {
     setApplyNote(
       `Applied thr=${next.threshold} RR=${next.rr} ${beLab}${filterNote} · optimize cell trades=${expectTrades} net=${expectNet.toFixed(2)} → running backtest…`,
     )
-    skipAutoBacktestRef.current = true
     setParams(next)
     setView('performance')
     setStep(2)
