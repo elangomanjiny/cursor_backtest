@@ -23,6 +23,7 @@ from backend.engine.dataloader import (  # noqa: E402
     load_dataset,
 )
 from backend.engine.formatting import round_obj  # noqa: E402
+from backend.engine.footprint import MAX_FOOTPRINT_BARS, build_footprint_bars  # noqa: E402
 from backend.engine.nautilus_bridge import status as nautilus_status  # noqa: E402
 from backend.engine.optimize import iter_optimize_progress, run_optimize  # noqa: E402
 from backend.engine.questdb_client import health as questdb_health  # noqa: E402
@@ -35,7 +36,7 @@ from backend.engine.volume_delta import (  # noqa: E402
     write_parity_report,
 )
 
-APP_VERSION = "2.1.34"
+APP_VERSION = "2.1.38"
 app = FastAPI(title="cursor_backtest", version=APP_VERSION)
 app.add_middleware(
     CORSMiddleware,
@@ -112,6 +113,7 @@ def health():
         "supported_exchanges": list(SUPPORTED_EXCHANGES),
         "questdb": questdb_health(),
         "nautilus": nautilus_status(),
+        "max_footprint_bars": MAX_FOOTPRINT_BARS,
     }
 
 
@@ -208,6 +210,34 @@ def data_bars(
         "total": total,
         "bars": rows,
     }
+
+
+@app.get("/api/footprint")
+def footprint(
+    symbol: str = "ETHUSDT",
+    tf: int = Query(15, alias="tf"),
+    t0: int = Query(..., description="Unix seconds, inclusive"),
+    t1: int = Query(..., description="Unix seconds, exclusive"),
+    bin_mult: int = Query(1, ge=1, le=10000, description="Cluster size = symbol tick × this"),
+):
+    """Visible-range order-flow clusters (bid/ask at price). Zoom in if too many bars."""
+    if tf not in SUPPORTED_TF:
+        raise HTTPException(400, f"tf must be one of {list(SUPPORTED_TF)}")
+    if int(t1) <= int(t0):
+        raise HTTPException(400, "t1 must be after t0")
+    try:
+        out = build_footprint_bars(
+            symbol=symbol,
+            tf_minutes=tf,
+            t0_unix=int(t0),
+            t1_unix=int(t1),
+            bin_mult=int(bin_mult),
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(409, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return round_obj(out)
 
 
 @app.get("/api/backtest")

@@ -16,6 +16,7 @@ import { fmt2 } from '../format'
 import { loadChartRange, saveChartRange } from '../chartZoomStore'
 import { attachCandlePricePan, resetPriceOnly } from '../chartPricePan'
 import { attachMarkerLabels, type MarkerLabel } from '../chartMarkerLabels'
+import { FootprintOverlay, type CandleSeries, type FootprintMode } from '../FootprintOverlay'
 import { selectTrade, useChartStudy } from '../chartStudyStore'
 import {
   classifyAggrTag,
@@ -158,6 +159,11 @@ function symbolTickSize(symbol: string): number {
   return (symbol || '').toUpperCase().startsWith('BTC') ? 0.1 : 0.01
 }
 
+function fmtTick(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '—'
+  return n.toFixed(10).replace(/\.?0+$/, '')
+}
+
 /** Trade open on this candle: entry < bar end and exit ≥ bar open. Later entry wins (reverse). */
 function tradeOpenOnBar(trades: TradeRow[], barSec: number, tfSec: number): TradeRow | null {
   const barEnd = barSec + tfSec
@@ -283,6 +289,7 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
   const wrapRef = useRef<HTMLDivElement>(null)
   const navRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
+  const candleSeriesRef = useRef<CandleSeries | null>(null)
   const panesRef = useRef<IPaneApi[]>([])
   const [unit, setUnit] = useState<Unit>('quote')
   const [tip, setTip] = useState<Tip | null>(null)
@@ -290,6 +297,10 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
   const [showTrades, setShowTrades] = useState(true)
   const [showMtfLevels, setShowMtfLevels] = useState(true)
   const [showVwap, setShowVwap] = useState(false)
+  const [showFootprint, setShowFootprint] = useState(false)
+  const [fpMode, setFpMode] = useState<FootprintMode>('profile')
+  const [fpBinMult, setFpBinMult] = useState(1)
+  const [chartEpoch, setChartEpoch] = useState(0)
   const [vwapSource, setVwapSource] = useState<VwapSource>('hlc3')
   const [vwapSession, setVwapSession] = useState<VwapSession>('binance')
   const [vwapBandsRaw, setVwapBandsRaw] = useState('1,2')
@@ -422,6 +433,7 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
       wickUpColor: '#3fb950',
       wickDownColor: '#f85149',
     })
+    candleSeriesRef.current = candles
     candles.setData(
       data.bars.map((b) => ({
         time: b.time as never,
@@ -909,6 +921,7 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
     window.addEventListener('resize', onResize)
     const detachPricePan = attachCandlePricePan(chart, el)
     requestAnimationFrame(syncPaneOverlays)
+    setChartEpoch((n) => n + 1)
 
     return () => {
       const r = chart.timeScale().getVisibleLogicalRange()
@@ -920,6 +933,7 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
       chart.unsubscribeCrosshairMove(onMove as never)
       chart.remove()
       chartRef.current = null
+      candleSeriesRef.current = null
       panesRef.current = []
       setPaneLayouts([])
     }
@@ -1104,6 +1118,17 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
               HTF Invalid
             </label>
           )}
+          <label
+            className={`ov-toggle ${showFootprint ? 'on' : ''}`}
+            title="Order-flow clusters. Zoom in — Japanese candles when bars are too thin."
+          >
+            <input
+              type="checkbox"
+              checked={showFootprint}
+              onChange={(e) => setShowFootprint(e.target.checked)}
+            />
+            Footprint
+          </label>
           <label className={`ov-toggle ${showVwap ? 'on' : ''}`} title="Session VWAP ± std-dev bands">
             <input
               type="checkbox"
@@ -1208,6 +1233,49 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
               </span>
             </>
           )}
+          {showFootprint && fpMode === 'profile' && (
+            <>
+              <span className="lg" title="Total volume at price (left of candle)">
+                <i style={{ background: '#58a6ff' }} /> Volume
+              </span>
+              <span className="lg" title="Ask − Bid (right of candle)">
+                <i style={{ background: '#3fb950' }} /> +Δ
+              </span>
+              <span className="lg" title="Ask − Bid (right of candle)">
+                <i style={{ background: '#f85149' }} /> −Δ
+              </span>
+            </>
+          )}
+          {showFootprint && fpMode === 'bidask' && (
+            <>
+              <span className="lg" title="Sell aggressor volume (bid)">
+                <i style={{ background: '#f85149' }} /> Bid
+              </span>
+              <span className="lg" title="Buy aggressor volume (ask)">
+                <i style={{ background: '#3fb950' }} /> Ask
+              </span>
+            </>
+          )}
+          {showFootprint && fpMode === 'delta' && (
+            <>
+              <span className="lg" title="Ask − Bid (buy aggression)">
+                <i style={{ background: '#3fb950' }} /> +Δ
+              </span>
+              <span className="lg" title="Ask − Bid (sell aggression)">
+                <i style={{ background: '#f85149' }} /> −Δ
+              </span>
+            </>
+          )}
+          {showFootprint && fpMode === 'volume' && (
+            <span className="lg" title="Bid + Ask volume at price">
+              <i style={{ background: '#58a6ff' }} /> Volume
+            </span>
+          )}
+          {showFootprint && (
+            <span className="lg" title="Point of control (max volume in the bar)">
+              <i style={{ background: '#f0b429' }} /> POC
+            </span>
+          )}
           {showVwap && (
             <>
               <span className="lg">
@@ -1236,6 +1304,75 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
           {panelMax ? '❐' : '⛶'}
         </button>
       </div>
+
+      {showFootprint && (
+        <div className="vwap-settings" role="group" aria-label="Footprint settings">
+          <span>Mode</span>
+          <div className="unit-toggle" role="group" aria-label="Footprint display mode">
+            <button
+              type="button"
+              className={fpMode === 'profile' ? 'active' : 'ghost'}
+              title="Volume profile left of the candle, delta profile right"
+              onClick={() => setFpMode('profile')}
+            >
+              Profile
+            </button>
+            <button
+              type="button"
+              className={fpMode === 'bidask' ? 'active' : 'ghost'}
+              title="Bid profile left, ask profile right"
+              onClick={() => setFpMode('bidask')}
+            >
+              Bid/Ask
+            </button>
+            <button
+              type="button"
+              className={fpMode === 'delta' ? 'active' : 'ghost'}
+              title="Delta profile (bar width = |Ask − Bid|)"
+              onClick={() => setFpMode('delta')}
+            >
+              Delta
+            </button>
+            <button
+              type="button"
+              className={fpMode === 'volume' ? 'active' : 'ghost'}
+              title="Volume profile (bar width = Bid + Ask)"
+              onClick={() => setFpMode('volume')}
+            >
+              Total Vol
+            </button>
+          </div>
+          <label title="Cluster height = symbol tick × this multiplier">
+            Bin ×
+            <input
+              type="number"
+              min={1}
+              max={10000}
+              step={1}
+              list="fp-bin-presets"
+              value={fpBinMult}
+              onChange={(e) => {
+                const n = Math.max(1, Math.floor(Number(e.target.value) || 1))
+                setFpBinMult(Math.min(10000, n))
+              }}
+            />
+          </label>
+          <datalist id="fp-bin-presets">
+            <option value="1" />
+            <option value="2" />
+            <option value="5" />
+            <option value="10" />
+            <option value="20" />
+            <option value="25" />
+            <option value="50" />
+            <option value="100" />
+          </datalist>
+          <span className="vwap-settings-hint">
+            Bin = {fmtTick(symbolTickSize(data.symbol))} × {fpBinMult} ={' '}
+            {fmtTick(symbolTickSize(data.symbol) * fpBinMult)}
+          </span>
+        </div>
+      )}
 
       {showVwap && showVwapSettings && (
         <div className="vwap-settings" role="group" aria-label="VWAP settings">
@@ -1370,6 +1507,19 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
           </div>
         )}
         <div className="chart-host" ref={hostRef} />
+        <FootprintOverlay
+          chartRef={chartRef}
+          seriesRef={candleSeriesRef}
+          wrapRef={wrapRef}
+          chartEpoch={chartEpoch}
+          show={showFootprint}
+          symbol={data.symbol}
+          tf={data.tf_minutes}
+          unit={unit}
+          mode={fpMode}
+          binMult={fpBinMult}
+          barTimes={barTimes}
+        />
         {paneLayouts.map((pl, i) =>
           pl.height < 20 ? null : (
             <div

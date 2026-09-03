@@ -391,6 +391,27 @@ tr.best { background: #0d3b1e33; }
 }
 
 .chart-wrap { position: relative; }
+.footprint-canvas {
+  position: absolute;
+  left: 0;
+  right: 56px;
+  z-index: 3;
+  pointer-events: none;
+  width: calc(100% - 56px);
+}
+.footprint-hint {
+  position: absolute;
+  top: 10px;
+  right: 72px;
+  z-index: 4;
+  pointer-events: none;
+  background: rgba(22, 27, 34, 0.9);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.72rem;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
 .chart-tooltip {
   position: absolute;
   top: 8px;
@@ -1064,6 +1085,9 @@ th.sorted-desc .sort-ind {
 }
 .vwap-settings input {
   width: 72px;
+}
+.vwap-settings input[type="number"] {
+  width: 64px;
 }
 .vwap-settings-hint {
   color: var(--muted);

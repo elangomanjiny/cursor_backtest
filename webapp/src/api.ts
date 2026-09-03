@@ -416,6 +416,49 @@ export async function fetchBars(p: {
   }>
 }
 
+export type FootprintLevel = {
+  price: number
+  bidVolume: number
+  askVolume: number
+  bidQuote: number
+  askQuote: number
+  tradeCount: number
+}
+
+export type FootprintBar = {
+  time: number
+  open: number
+  high: number
+  low: number
+  close: number
+  bidQuote?: number
+  askQuote?: number
+  poc?: number
+  levels: FootprintLevel[]
+}
+
+export type FootprintResponse = {
+  ok: boolean
+  reason?: string
+  tick_size: number
+  symbol_tick?: number
+  bin_mult?: number
+  tf: number
+  max_bars?: number
+  requested_bars?: number
+  count?: number
+  bars: FootprintBar[]
+}
+
+export async function fetchFootprint(
+  p: { symbol: string; tf: number; t0: number; t1: number; bin_mult?: number },
+  signal?: AbortSignal,
+) {
+  const r = await fetch(`/api/footprint?${qs(p)}`, { signal })
+  if (!r.ok) throw new Error(await errText(r))
+  return (await r.json()) as FootprintResponse
+}
+
 export async function fetchBacktest(params: StrategyParams) {
   const r = await fetch(`/api/backtest?${qs(params)}`)
   if (!r.ok) throw new Error(await errText(r))
