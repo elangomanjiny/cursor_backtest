@@ -42,7 +42,7 @@ from backend.engine.volume_delta import (  # noqa: E402
     write_parity_report,
 )
 
-APP_VERSION = "2.1.42"
+APP_VERSION = "2.1.49"
 app = FastAPI(title="cursor_backtest", version=APP_VERSION)
 app.add_middleware(
     CORSMiddleware,
@@ -220,6 +220,79 @@ def data_bars(
     }
 
 
+MAX_ORDERFLOW_BARS = 100_000
+
+
+@app.get("/api/orderflow/bars")
+def orderflow_bars(
+    symbol: str = "ETHUSDT",
+    tf: int = Query(15, alias="tf"),
+    start: str = "2026-08-01",
+    end: str = "2026-08-03",
+    exchange: str = "BINANCE_UM",
+):
+    """Full-range OHLCV + delta for the Orderflow tab (not the 500-row preview)."""
+    if tf not in SUPPORTED_TF:
+        raise HTTPException(400, f"tf must be one of {list(SUPPORTED_TF)}")
+    _ensure_ready(exchange, symbol, start, end, tf)
+    try:
+        bars = _load_bars(symbol, tf, start, end)
+    except HTTPException:
+        raise
+    scoped = _scope_bars(bars, start, end)
+    if scoped.empty:
+        return {
+            "symbol": symbol,
+            "tf": tf,
+            "start": start,
+            "end": end,
+            "count": 0,
+            "total": 0,
+            "bars": [],
+        }
+    total = int(len(scoped))
+    if total > MAX_ORDERFLOW_BARS:
+        raise HTTPException(
+            400,
+            f"Too many bars ({total:,}). Raise timeframe or shorten dates "
+            f"(max {MAX_ORDERFLOW_BARS:,}).",
+        )
+    rows = []
+    for _, r in scoped.iterrows():
+        ts = pd.Timestamp(r["open_time"])
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+        rows.append(
+            round_obj(
+                {
+                    "time": int(ts.timestamp()),
+                    "time_iso": ts.tz_convert("Asia/Kolkata").isoformat(),
+                    "open": float(r["open"]),
+                    "high": float(r["high"]),
+                    "low": float(r["low"]),
+                    "close": float(r["close"]),
+                    "volume_quote": float(r.get("volume_quote", 0)),
+                    "volume_base": float(r.get("volume_base", 0)),
+                    "delta_quote": float(r.get("delta_quote", 0)),
+                    "delta_base": float(r.get("delta_base", 0)),
+                    "delta_pct": float(r.get("delta_pct", 0)),
+                }
+            )
+        )
+    return {
+        "symbol": symbol,
+        "tf": tf,
+        "exchange": exchange,
+        "start": start,
+        "end": end,
+        "count": len(rows),
+        "total": total,
+        "bars": rows,
+    }
+
+
 @app.get("/api/footprint")
 def footprint(
     symbol: str = "ETHUSDT",
@@ -285,7 +358,7 @@ def flow_stats(
     t0: int = Query(..., description="Unix seconds, inclusive"),
     t1: int = Query(..., description="Unix seconds, exclusive"),
 ):
-    """Per-bar COT High/Low (session) and Min/Max Delta (intrabar running)."""
+    """Per-bar COT High/Low (since this candle's last new high/low) and Min/Max Delta."""
     if tf not in SUPPORTED_TF:
         raise HTTPException(400, f"tf must be one of {list(SUPPORTED_TF)}")
     if int(t1) <= int(t0):

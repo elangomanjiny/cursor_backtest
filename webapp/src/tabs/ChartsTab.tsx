@@ -14,6 +14,7 @@ import {
 import type { BacktestResult, BarRow, StrategyParams, TradeRow } from '../api'
 import { fmt2 } from '../format'
 import { loadChartRange, saveChartRange } from '../chartZoomStore'
+import { loadChartUi, saveChartUi } from '../userSettingsStore'
 import { attachCandlePricePan, resetPriceOnly } from '../chartPricePan'
 import { attachMarkerLabels, type MarkerLabel } from '../chartMarkerLabels'
 import { FootprintOverlay, type CandleSeries, type FootprintMode } from '../FootprintOverlay'
@@ -291,24 +292,25 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
   const chartRef = useRef<IChartApi | null>(null)
   const candleSeriesRef = useRef<CandleSeries | null>(null)
   const panesRef = useRef<IPaneApi[]>([])
-  const [unit, setUnit] = useState<Unit>('quote')
+  const savedUi = useMemo(() => loadChartUi(), [])
+  const [unit, setUnit] = useState<Unit>(savedUi.unit)
   const [tip, setTip] = useState<Tip | null>(null)
-  const [showSignals, setShowSignals] = useState(true)
-  const [showTrades, setShowTrades] = useState(true)
-  const [showMtfLevels, setShowMtfLevels] = useState(true)
-  const [showVwap, setShowVwap] = useState(false)
-  const [showFootprint, setShowFootprint] = useState(false)
-  const [showVaz, setShowVaz] = useState(false)
-  const [showCot, setShowCot] = useState(false)
-  const [showMinMax, setShowMinMax] = useState(false)
-  const [showLegend, setShowLegend] = useState(false)
-  const [showHoverTip, setShowHoverTip] = useState(false)
-  const [fpMode, setFpMode] = useState<FootprintMode>('profile')
-  const [fpBinMult, setFpBinMult] = useState(1)
+  const [showSignals, setShowSignals] = useState(savedUi.showSignals)
+  const [showTrades, setShowTrades] = useState(savedUi.showTrades)
+  const [showMtfLevels, setShowMtfLevels] = useState(savedUi.showMtfLevels)
+  const [showVwap, setShowVwap] = useState(savedUi.showVwap)
+  const [showFootprint, setShowFootprint] = useState(savedUi.showFootprint)
+  const [showVaz, setShowVaz] = useState(savedUi.showVaz)
+  const [showCot, setShowCot] = useState(savedUi.showCot)
+  const [showMinMax, setShowMinMax] = useState(savedUi.showMinMax)
+  const [showLegend, setShowLegend] = useState(savedUi.showLegend)
+  const [showHoverTip, setShowHoverTip] = useState(savedUi.showHoverTip)
+  const [fpMode, setFpMode] = useState<FootprintMode>(savedUi.fpMode)
+  const [fpBinMult, setFpBinMult] = useState(savedUi.fpBinMult)
   const [chartEpoch, setChartEpoch] = useState(0)
-  const [vwapSource, setVwapSource] = useState<VwapSource>('hlc3')
-  const [vwapSession, setVwapSession] = useState<VwapSession>('binance')
-  const [vwapBandsRaw, setVwapBandsRaw] = useState('1,2')
+  const [vwapSource, setVwapSource] = useState<VwapSource>(savedUi.vwapSource)
+  const [vwapSession, setVwapSession] = useState<VwapSession>(savedUi.vwapSession)
+  const [vwapBandsRaw, setVwapBandsRaw] = useState(savedUi.vwapBandsRaw)
   const [showVwapSettings, setShowVwapSettings] = useState(false)
   const [paneLayouts, setPaneLayouts] = useState<PaneLayout[]>([])
   const [panelMax, setPanelMax] = useState(false)
@@ -316,6 +318,44 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
   const study = useChartStudy()
 
   const unitLabel = unit === 'quote' ? 'USDT' : 'BASE'
+
+  useEffect(() => {
+    saveChartUi({
+      unit,
+      showSignals,
+      showTrades,
+      showMtfLevels,
+      showVwap,
+      showFootprint,
+      showVaz,
+      showCot,
+      showMinMax,
+      showLegend,
+      showHoverTip,
+      fpMode,
+      fpBinMult,
+      vwapSource,
+      vwapSession,
+      vwapBandsRaw,
+    })
+  }, [
+    unit,
+    showSignals,
+    showTrades,
+    showMtfLevels,
+    showVwap,
+    showFootprint,
+    showVaz,
+    showCot,
+    showMinMax,
+    showLegend,
+    showHoverTip,
+    fpMode,
+    fpBinMult,
+    vwapSource,
+    vwapSession,
+    vwapBandsRaw,
+  ])
   const vwapBands = useMemo(() => parseBandMultipliers(vwapBandsRaw), [vwapBandsRaw])
   const vwapSettings: VwapSettings = useMemo(
     () => ({
@@ -1038,14 +1078,27 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
   }
 
   const setPaneState = (paneId: string, state: 'normal' | 'minimized' | 'maximized') => {
-    const pane = panesRef.current.find((p) => p.id() === paneId)
+    const panes = panesRef.current
+    const pane = panes.find((p) => p.id() === paneId)
     if (!pane) return
-    // Toggle off if already in that state
-    const cur = pane.options().state
-    const next = cur === state ? 'normal' : state
+    const priceId = panes[0]?.id()
     try {
+      // Price-pane ⛶: hide Vol/Δ/Δ% (do not use library "maximized" — it stacks
+      // those series onto the candle pane). Second click restores them.
+      if (paneId === priceId && state === 'maximized') {
+        const rest = panes.slice(1)
+        const collapsed =
+          rest.length > 0 && rest.every((p) => p.options().state === 'minimized')
+        for (const p of rest) {
+          p.applyOptions({ state: collapsed ? 'normal' : 'minimized' })
+        }
+        requestAnimationFrame(syncPaneOverlays)
+        return
+      }
+      const cur = pane.options().state
+      const next = cur === state ? 'normal' : state
       if (next === 'maximized') {
-        for (const p of panesRef.current) {
+        for (const p of panes) {
           if (p.id() !== paneId && p.options().state === 'maximized') {
             p.applyOptions({ state: 'normal' })
           }
@@ -1069,13 +1122,15 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
   const bull = tip ? tip.close >= tip.open : false
   const sel = study.selectedTrade
   const paneNames = ['Price', 'Vol', 'Δ', 'Δ%']
+  const priceOnly =
+    paneLayouts.length > 1 && paneLayouts.slice(1).every((p) => p.state === 'minimized')
 
   return (
     <div
       className={`panel chart-panel${panelMax ? ' panel-maximized' : ''}`}
       style={{ display: visible ? 'flex' : 'none' }}
     >
-      <div className="chart-toolbar tight-toolbar">
+      <div className="chart-inbar">
         <div className="unit-toggle" role="group" aria-label="Volume unit">
           <button
             type="button"
@@ -1147,7 +1202,7 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
           </label>
           <label
             className={`ov-toggle ${showCot ? 'on' : ''}`}
-            title="Session COT High/Low — cumulative delta since the last new session high/low (Binance 05:30 IST)"
+            title="COT High/Low — this candle's delta since its last new high / last new low"
           >
             <input
               type="checkbox"
@@ -1351,10 +1406,10 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
           )}
           {showCot && (
             <>
-              <span className="lg" title="Cumulative delta since the last new session high">
+              <span className="lg" title="This candle's delta since its last new high">
                 <i style={{ background: '#3fb950' }} /> CH
               </span>
-              <span className="lg" title="Cumulative delta since the last new session low">
+              <span className="lg" title="This candle's delta since its last new low">
                 <i style={{ background: '#f85149' }} /> CL
               </span>
             </>
@@ -1403,10 +1458,10 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
         <div className="vwap-settings" role="group" aria-label="Order-flow labels">
           <span className="vwap-settings-hint">
             {showCot
-              ? 'COT CH/CL = session Δ since last new high/low (05:30 IST). Green dash = CH>0, red dash = CL<0'
+              ? 'COT CH/CL = this candle Δ since last new high / last new low. Gold dash = CH>0 or CL<0'
               : ''}
             {showCot && showMinMax ? ' · ' : ''}
-            {showMinMax ? 'Min/Max Δ = running-delta extremes. Dashed box if |value| is 0–9' : ''}
+            {showMinMax ? 'Min/Max Δ = running-delta extremes. Cyan dash if |value| is 0–9' : ''}
             {' · follows '}
             {unitLabel}
           </span>
@@ -1483,7 +1538,7 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
             Bin = {fmtTick(symbolTickSize(data.symbol))} × {fpBinMult} ={' '}
             {fmtTick(symbolTickSize(data.symbol) * fpBinMult)}
             {showVaz ? ' · VAZ = 70% value area per candle' : ''}
-            {showCot ? ' · COT = session Δ since last new high/low (05:30 IST)' : ''}
+            {showCot ? ' · COT = this candle Δ since last new high / last new low' : ''}
             {showMinMax ? ' · Min/Max Δ = running-delta extremes of the bar' : ''}
           </span>
         </div>
@@ -1657,8 +1712,16 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
                 </button>
                 <button
                   type="button"
-                  className={`pane-btn${pl.state === 'maximized' ? ' on' : ''}`}
-                  title={pl.state === 'maximized' ? 'Restore pane' : 'Maximize pane'}
+                  className={`pane-btn${i === 0 ? (priceOnly ? ' on' : '') : pl.state === 'maximized' ? ' on' : ''}`}
+                  title={
+                    i === 0
+                      ? priceOnly
+                        ? 'Show Vol / Δ panes'
+                        : 'Price only — hide Vol / Δ panes'
+                      : pl.state === 'maximized'
+                        ? 'Restore pane'
+                        : 'Maximize pane'
+                  }
                   onClick={() => setPaneState(pl.id, 'maximized')}
                 >
                   {pl.state === 'maximized' ? '❐' : '⛶'}

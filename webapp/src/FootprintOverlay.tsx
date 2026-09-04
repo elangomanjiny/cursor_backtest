@@ -56,6 +56,8 @@ function fmtDelta(v: number): string {
 const COL = {
   vol: 'rgba(88,166,255,0.48)',
   poc: '#f0b429',
+  goldDash: '#f0b429',
+  cyanDash: '#22d3ee',
   vaz: 'rgba(240,180,41,0.22)',
   vazLine: 'rgba(240,180,41,0.45)',
   pos: 'rgba(63,185,80,0.48)',
@@ -162,7 +164,7 @@ function drawSignedPill(
   ctx.fillRect(rx, ry, rw, rh)
   const ink = v >= 0 ? COL.posTxt : COL.negTxt
   if (dashAlert(kind, v)) {
-    ctx.strokeStyle = kind === 'ch' ? COL.posTxt : kind === 'cl' ? COL.negTxt : ink
+    ctx.strokeStyle = kind === 'ch' || kind === 'cl' ? COL.goldDash : COL.cyanDash
     ctx.lineWidth = 1.5
     ctx.setLineDash([3, 2])
     ctx.strokeRect(rx + 0.5, ry + 0.5, rw - 1, rh - 1)
@@ -171,6 +173,19 @@ function drawSignedPill(
   ctx.fillStyle = ink
   ctx.textAlign = 'center'
   ctx.fillText(text, x, y)
+}
+
+function barSlot(chart: IChartApi, time: number, tfSec: number) {
+  const ts = chart.timeScale()
+  const mid = ts.timeToCoordinate(time as never)
+  if (mid == null) return null
+  const next = ts.timeToCoordinate((time + tfSec) as never)
+  const prev = ts.timeToCoordinate((time - tfSec) as never)
+  let spacing = 8
+  if (next != null && next > mid) spacing = next - mid
+  else if (prev != null && mid > prev) spacing = mid - prev
+  const bw = Math.max(4, spacing - 1)
+  return { mid, x0: mid - bw / 2, bw }
 }
 
 function drawFlowLabels(
@@ -185,46 +200,67 @@ function drawFlowLabels(
   h: number,
 ) {
   if (!showCot && !showMinMax) return
-  const ts = chart.timeScale()
   ctx.font = '10px ui-sans-serif, system-ui, sans-serif'
   ctx.textBaseline = 'middle'
   for (const bar of bars) {
     const f = flowOf(bar, unit)
-    const x0 = ts.timeToCoordinate(bar.time as never)
-    const x1 = ts.timeToCoordinate((bar.time + tfSec) as never)
-    if (x0 == null) continue
-    const right = x1 != null && x1 > x0 ? x1 : x0 + 8
-    const bw = Math.max(4, right - x0 - 1)
+    const slot = barSlot(chart, bar.time, tfSec)
+    if (!slot) continue
+    const { mid, bw } = slot
     if (bw < 6) continue
     const compact = bw < 28
-    const mid = x0 + bw / 2
     const yH = series.priceToCoordinate(bar.high)
     const yL = series.priceToCoordinate(bar.low)
     if (yH == null || yL == null) continue
     ctx.font = compact
       ? '9px ui-sans-serif, system-ui, sans-serif'
       : '10px ui-sans-serif, system-ui, sans-serif'
-    let above = yH - 7
-    let below = yL + 7
-    if (showCot && f.ch != null && Number.isFinite(f.ch)) {
-      const txt = compact ? fmtDelta(f.ch) : `CH ${fmtDelta(f.ch)}`
-      if (above > 4 && above < h - 4) drawSignedPill(ctx, txt, mid, above, f.ch, 'ch')
-      above -= compact ? 11 : 13
+    const gap = Math.max(10, bw * 0.28)
+    const above = yH - 8
+    const below = yL + 8
+    const maxTxt =
+      showMinMax && f.maxD != null && Number.isFinite(f.maxD)
+        ? compact
+          ? fmtDelta(f.maxD)
+          : `Max ${fmtDelta(f.maxD)}`
+        : null
+    const chTxt =
+      showCot && f.ch != null && Number.isFinite(f.ch)
+        ? compact
+          ? fmtDelta(f.ch)
+          : `CH ${fmtDelta(f.ch)}`
+        : null
+    const minTxt =
+      showMinMax && f.minD != null && Number.isFinite(f.minD)
+        ? compact
+          ? fmtDelta(f.minD)
+          : `Min ${fmtDelta(f.minD)}`
+        : null
+    const clTxt =
+      showCot && f.cl != null && Number.isFinite(f.cl)
+        ? compact
+          ? fmtDelta(f.cl)
+          : `CL ${fmtDelta(f.cl)}`
+        : null
+    if (above > 4 && above < h - 4) {
+      if (maxTxt && chTxt) {
+        drawSignedPill(ctx, maxTxt, mid - gap, above, f.maxD as number, 'max')
+        drawSignedPill(ctx, chTxt, mid + gap, above, f.ch as number, 'ch')
+      } else if (maxTxt) {
+        drawSignedPill(ctx, maxTxt, mid, above, f.maxD as number, 'max')
+      } else if (chTxt) {
+        drawSignedPill(ctx, chTxt, mid, above, f.ch as number, 'ch')
+      }
     }
-    if (showMinMax && f.maxD != null && Number.isFinite(f.maxD)) {
-      const txt = compact ? fmtDelta(f.maxD) : `Max ${fmtDelta(f.maxD)}`
-      if (above > 4 && above < h - 4) drawSignedPill(ctx, txt, mid, above, f.maxD, 'max')
-      above -= compact ? 11 : 13
-    }
-    if (showCot && f.cl != null && Number.isFinite(f.cl)) {
-      const txt = compact ? fmtDelta(f.cl) : `CL ${fmtDelta(f.cl)}`
-      if (below > 4 && below < h - 4) drawSignedPill(ctx, txt, mid, below, f.cl, 'cl')
-      below += compact ? 11 : 13
-    }
-    if (showMinMax && f.minD != null && Number.isFinite(f.minD)) {
-      const txt = compact ? fmtDelta(f.minD) : `Min ${fmtDelta(f.minD)}`
-      if (below > 4 && below < h - 4) drawSignedPill(ctx, txt, mid, below, f.minD, 'min')
-      below += compact ? 11 : 13
+    if (below > 4 && below < h - 4) {
+      if (minTxt && clTxt) {
+        drawSignedPill(ctx, minTxt, mid - gap, below, f.minD as number, 'min')
+        drawSignedPill(ctx, clTxt, mid + gap, below, f.cl as number, 'cl')
+      } else if (minTxt) {
+        drawSignedPill(ctx, minTxt, mid, below, f.minD as number, 'min')
+      } else if (clTxt) {
+        drawSignedPill(ctx, clTxt, mid, below, f.cl as number, 'cl')
+      }
     }
   }
 }
@@ -246,15 +282,12 @@ function drawVaz(
   unit: Unit,
   h: number,
 ) {
-  const ts = chart.timeScale()
   for (const bar of bars) {
     const za = vazOf(bar, unit)
     if (!za) continue
-    const x0 = ts.timeToCoordinate(bar.time as never)
-    const x1 = ts.timeToCoordinate((bar.time + tfSec) as never)
-    if (x0 == null) continue
-    const right = x1 != null && x1 > x0 ? x1 : x0 + 8
-    const bw = Math.max(3, right - x0 - 1)
+    const slot = barSlot(chart, bar.time, tfSec)
+    if (!slot) continue
+    const { x0, bw } = slot
     const yTop = series.priceToCoordinate(za.vah + tick)
     const yBot = series.priceToCoordinate(za.val)
     if (yTop == null || yBot == null) continue
@@ -326,15 +359,11 @@ function draw(
   }
   if (!showFp || !bars.length) return
 
-  const ts = chart.timeScale()
   const split = mode === 'profile' || mode === 'bidask'
   for (const bar of bars) {
-    const x0 = ts.timeToCoordinate(bar.time as never)
-    const x1 = ts.timeToCoordinate((bar.time + tfSec) as never)
-    if (x0 == null) continue
-    const right = x1 != null && x1 > x0 ? x1 : x0 + 8
-    const bw = Math.max(4, right - x0 - 1)
-    const mid = x0 + bw / 2
+    const slot = barSlot(chart, bar.time, tfSec)
+    if (!slot) continue
+    const { mid, x0, bw } = slot
     const sideGap = 1.5
     const maxSide = Math.max(4, bw / 2 - sideGap)
     const maxFull = Math.max(4, bw - 2)
@@ -559,9 +588,12 @@ export function FootprintOverlay({
       const win = visibleWindow()
       if (!win) return
       const hints: string[] = []
+      const fpZoomed =
+        win.barPx >= FOOTPRINT_MIN_BAR_PX && win.nBars <= FOOTPRINT_MAX_BARS
+      const reuseVazFromFp = showRef.current && showVazRef.current && fpZoomed
 
       if (showRef.current) {
-        if (win.barPx < FOOTPRINT_MIN_BAR_PX || win.nBars > FOOTPRINT_MAX_BARS) {
+        if (!fpZoomed) {
           fpAc.current.abort()
           fpAc.current = new AbortController()
           barsRef.current = []
@@ -585,6 +617,7 @@ export function FootprintOverlay({
                 return
               }
               barsRef.current = r.bars || []
+              if (showVazRef.current) vazRef.current = barsRef.current
               tickRef.current = Number(r.tick_size || tickRef.current || 0.01)
               applyFpCandles(true)
               setHint(barsRef.current.length ? null : 'No ticks in view')
@@ -609,6 +642,8 @@ export function FootprintOverlay({
           vazAc.current = new AbortController()
           vazRef.current = []
           if (!showRef.current) hints.push('Zoom in for VAZ')
+        } else if (reuseVazFromFp) {
+          vazAc.current.abort()
         } else {
           vazAc.current.abort()
           vazAc.current = new AbortController()

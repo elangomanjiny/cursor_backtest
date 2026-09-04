@@ -416,6 +416,40 @@ export async function fetchBars(p: {
   }>
 }
 
+export type OrderflowBar = {
+  time: number
+  time_iso: string
+  open: number
+  high: number
+  low: number
+  close: number
+  volume_quote: number
+  volume_base: number
+  delta_quote: number
+  delta_base: number
+  delta_pct: number
+}
+
+export async function fetchOrderflowBars(p: {
+  exchange: string
+  symbol: string
+  tf: number
+  start: string
+  end: string
+}) {
+  const r = await fetch(`/api/orderflow/bars?${qs(p)}`)
+  if (!r.ok) throw new Error(await errText(r))
+  return r.json() as Promise<{
+    count: number
+    total?: number
+    bars: OrderflowBar[]
+    tf: number
+    symbol: string
+    start: string
+    end: string
+  }>
+}
+
 export type FootprintLevel = {
   price: number
   bidVolume: number
@@ -447,8 +481,6 @@ export type FootprintBar = {
   cotLow?: number
   cotHighQuote?: number
   cotLowQuote?: number
-  sessionHigh?: number
-  sessionLow?: number
   levels?: FootprintLevel[]
 }
 

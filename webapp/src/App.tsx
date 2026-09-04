@@ -14,13 +14,15 @@ import {
   type TradeRow,
 } from './api'
 import { clearChartRange } from './chartZoomStore'
+import { loadSavedParams, saveSavedParams } from './userSettingsStore'
 import { resetChartStudy } from './chartStudyStore'
 import { BacktestStep } from './steps/BacktestStep'
 import { DataLoaderStep } from './steps/DataLoaderStep'
 import { OptimizeTab, type OptimizeGrid } from './tabs/OptimizeTab'
+import { OrderflowTab } from './tabs/OrderflowTab'
 import './App.css'
 
-type Step = 1 | 2 | 3
+type Step = 1 | 2 | 3 | 4
 
 function mergeLiveOpt(
   prev: OptimizeResult | null,
@@ -165,7 +167,10 @@ const DEFAULTS: StrategyParams = {
 
 export default function App() {
   const [step, setStep] = useState<Step>(1)
-  const [params, setParams] = useState<StrategyParams>(DEFAULTS)
+  const [params, setParams] = useState<StrategyParams>(() => ({
+    ...DEFAULTS,
+    ...loadSavedParams(),
+  }))
   const [availability, setAvailability] = useState<DataAvailability | null>(null)
   const [data, setData] = useState<BacktestResult | null>(null)
   const [opt, setOpt] = useState<OptimizeResult | null>(null)
@@ -173,6 +178,7 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [sessionStarted, setSessionStarted] = useState(false)
+  const [ofVisited, setOfVisited] = useState(false)
   const [view, setView] = useState<'charts' | 'trades' | 'equity' | 'performance'>('charts')
   const [optProgress, setOptProgress] = useState<{
     done: number
@@ -185,16 +191,20 @@ export default function App() {
   const dataReady = Boolean(availability?.ready)
 
   useEffect(() => {
+    saveSavedParams(params)
+  }, [params])
+
+  useEffect(() => {
     void fetchHealth()
       .then(setHealth)
       .catch(() => undefined)
     // restore readiness if parquet already present
     void fetchDataStatus({
-      exchange: DEFAULTS.exchange,
-      symbol: DEFAULTS.symbol,
-      start: DEFAULTS.start,
-      end: DEFAULTS.end,
-      tf: DEFAULTS.tf,
+      exchange: params.exchange,
+      symbol: params.symbol,
+      start: params.start,
+      end: params.end,
+      tf: params.tf,
     })
       .then(setAvailability)
       .catch(() => undefined)
@@ -496,6 +506,7 @@ export default function App() {
             [1, '1. Data Loader'],
             [2, '2. Backtest'],
             [3, '3. Optimize'],
+            [4, '4. Orderflow'],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -503,8 +514,11 @@ export default function App() {
             className={`${step === id ? 'active' : ''} ${
               id === 1 && dataReady ? 'ready' : ''
             } ${id > 1 && dataReady ? 'ready' : ''}`}
-            disabled={id > 1 && !dataReady}
-            onClick={() => setStep(id)}
+            disabled={id > 1 && id !== 4 && !dataReady}
+            onClick={() => {
+              if (id === 4) setOfVisited(true)
+              setStep(id)
+            }}
           >
             {label}
             {id === 1 && dataReady ? ' ✓' : ''}
@@ -566,6 +580,22 @@ export default function App() {
             onApplyBest={applyBest}
             onLoadCombo={applyCombo}
           />
+        )}
+        {(step === 4 || ofVisited) && (
+          <div
+            className="of-keep"
+            style={{ display: step === 4 ? undefined : 'none', height: step === 4 ? '100%' : 0, overflow: 'hidden' }}
+          >
+            <OrderflowTab
+              exchange={params.exchange}
+              symbol={params.symbol}
+              start={params.start}
+              end={params.end}
+              tf={params.tf}
+              dataReady={dataReady}
+              active={step === 4}
+            />
+          </div>
         )}
       </div>
     </div>
