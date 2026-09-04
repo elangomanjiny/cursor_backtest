@@ -23,7 +23,13 @@ from backend.engine.dataloader import (  # noqa: E402
     load_dataset,
 )
 from backend.engine.formatting import round_obj  # noqa: E402
-from backend.engine.footprint import MAX_FOOTPRINT_BARS, build_footprint_bars  # noqa: E402
+from backend.engine.footprint import (  # noqa: E402
+    MAX_FLOW_BARS,
+    MAX_FOOTPRINT_BARS,
+    MAX_VAZ_BARS,
+    build_flow_stats,
+    build_footprint_bars,
+)
 from backend.engine.nautilus_bridge import status as nautilus_status  # noqa: E402
 from backend.engine.optimize import iter_optimize_progress, run_optimize  # noqa: E402
 from backend.engine.questdb_client import health as questdb_health  # noqa: E402
@@ -36,7 +42,7 @@ from backend.engine.volume_delta import (  # noqa: E402
     write_parity_report,
 )
 
-APP_VERSION = "2.1.38"
+APP_VERSION = "2.1.42"
 app = FastAPI(title="cursor_backtest", version=APP_VERSION)
 app.add_middleware(
     CORSMiddleware,
@@ -114,6 +120,8 @@ def health():
         "questdb": questdb_health(),
         "nautilus": nautilus_status(),
         "max_footprint_bars": MAX_FOOTPRINT_BARS,
+        "max_vaz_bars": MAX_VAZ_BARS,
+        "max_flow_bars": MAX_FLOW_BARS,
     }
 
 
@@ -232,6 +240,63 @@ def footprint(
             t0_unix=int(t0),
             t1_unix=int(t1),
             bin_mult=int(bin_mult),
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(409, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return round_obj(out)
+
+
+@app.get("/api/value-area")
+def value_area(
+    symbol: str = "ETHUSDT",
+    tf: int = Query(15, alias="tf"),
+    t0: int = Query(..., description="Unix seconds, inclusive"),
+    t1: int = Query(..., description="Unix seconds, exclusive"),
+    bin_mult: int = Query(1, ge=1, le=10000, description="Cluster size = symbol tick × this"),
+):
+    """Per-bar 70% value area (VAL/POC/VAH) for the visible range. Thin payload — no clusters."""
+    if tf not in SUPPORTED_TF:
+        raise HTTPException(400, f"tf must be one of {list(SUPPORTED_TF)}")
+    if int(t1) <= int(t0):
+        raise HTTPException(400, "t1 must be after t0")
+    try:
+        out = build_footprint_bars(
+            symbol=symbol,
+            tf_minutes=tf,
+            t0_unix=int(t0),
+            t1_unix=int(t1),
+            bin_mult=int(bin_mult),
+            max_bars=MAX_VAZ_BARS,
+            include_levels=False,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(409, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return round_obj(out)
+
+
+@app.get("/api/flow-stats")
+def flow_stats(
+    symbol: str = "ETHUSDT",
+    tf: int = Query(15, alias="tf"),
+    t0: int = Query(..., description="Unix seconds, inclusive"),
+    t1: int = Query(..., description="Unix seconds, exclusive"),
+):
+    """Per-bar COT High/Low (session) and Min/Max Delta (intrabar running)."""
+    if tf not in SUPPORTED_TF:
+        raise HTTPException(400, f"tf must be one of {list(SUPPORTED_TF)}")
+    if int(t1) <= int(t0):
+        raise HTTPException(400, "t1 must be after t0")
+    try:
+        out = build_flow_stats(
+            symbol=symbol,
+            tf_minutes=tf,
+            t0_unix=int(t0),
+            t1_unix=int(t1),
+            max_bars=MAX_FLOW_BARS,
         )
     except FileNotFoundError as e:
         raise HTTPException(409, str(e)) from e

@@ -298,6 +298,11 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
   const [showMtfLevels, setShowMtfLevels] = useState(true)
   const [showVwap, setShowVwap] = useState(false)
   const [showFootprint, setShowFootprint] = useState(false)
+  const [showVaz, setShowVaz] = useState(false)
+  const [showCot, setShowCot] = useState(false)
+  const [showMinMax, setShowMinMax] = useState(false)
+  const [showLegend, setShowLegend] = useState(false)
+  const [showHoverTip, setShowHoverTip] = useState(false)
   const [fpMode, setFpMode] = useState<FootprintMode>('profile')
   const [fpBinMult, setFpBinMult] = useState(1)
   const [chartEpoch, setChartEpoch] = useState(0)
@@ -1129,6 +1134,39 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
             />
             Footprint
           </label>
+          <label
+            className={`ov-toggle ${showVaz ? 'on' : ''}`}
+            title="Per-candle 70% value area (VAL–VAH) from that bar's volume profile"
+          >
+            <input
+              type="checkbox"
+              checked={showVaz}
+              onChange={(e) => setShowVaz(e.target.checked)}
+            />
+            VAZ
+          </label>
+          <label
+            className={`ov-toggle ${showCot ? 'on' : ''}`}
+            title="Session COT High/Low — cumulative delta since the last new session high/low (Binance 05:30 IST)"
+          >
+            <input
+              type="checkbox"
+              checked={showCot}
+              onChange={(e) => setShowCot(e.target.checked)}
+            />
+            COT
+          </label>
+          <label
+            className={`ov-toggle ${showMinMax ? 'on' : ''}`}
+            title="Min/Max Delta — highest and lowest running delta reached inside each bar"
+          >
+            <input
+              type="checkbox"
+              checked={showMinMax}
+              onChange={(e) => setShowMinMax(e.target.checked)}
+            />
+            Min/Max Δ
+          </label>
           <label className={`ov-toggle ${showVwap ? 'on' : ''}`} title="Session VWAP ± std-dev bands">
             <input
               type="checkbox"
@@ -1151,6 +1189,28 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
               ⚙
             </button>
           )}
+          <label
+            className={`ov-toggle ${showLegend ? 'on' : ''}`}
+            title="Show the color key row"
+          >
+            <input
+              type="checkbox"
+              checked={showLegend}
+              onChange={(e) => setShowLegend(e.target.checked)}
+            />
+            Legend
+          </label>
+          <label
+            className={`ov-toggle ${showHoverTip ? 'on' : ''}`}
+            title="Show the OHLC / volume hover box on the chart"
+          >
+            <input
+              type="checkbox"
+              checked={showHoverTip}
+              onChange={(e) => setShowHoverTip(e.target.checked)}
+            />
+            Tip
+          </label>
         </div>
 
         {sel !== null && (
@@ -1159,6 +1219,7 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
           </button>
         )}
 
+        {showLegend && (
         <div className="legend-row" style={{ margin: 0, flex: 1 }}>
           <span className="lg">
             <i style={{ background: '#3fb950' }} /> Price
@@ -1272,9 +1333,41 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
             </span>
           )}
           {showFootprint && (
-            <span className="lg" title="Point of control (max volume in the bar)">
-              <i style={{ background: '#f0b429' }} /> POC
+            <>
+              <span className="lg" title="Volume POC — gold outline on the max-volume bar">
+                <i style={{ background: '#f0b429' }} /> Vol POC
+              </span>
+              {(fpMode === 'profile' || fpMode === 'delta') && (
+                <span className="lg" title="Delta POC — gold outline on the max |Ask − Bid| bar">
+                  <i style={{ background: '#f0b429' }} /> Δ POC
+                </span>
+              )}
+            </>
+          )}
+          {showVaz && (
+            <span className="lg" title="70% value area of each candle (VAL–VAH)">
+              <i style={{ background: 'rgba(240,180,41,0.55)' }} /> VAZ
             </span>
+          )}
+          {showCot && (
+            <>
+              <span className="lg" title="Cumulative delta since the last new session high">
+                <i style={{ background: '#3fb950' }} /> CH
+              </span>
+              <span className="lg" title="Cumulative delta since the last new session low">
+                <i style={{ background: '#f85149' }} /> CL
+              </span>
+            </>
+          )}
+          {showMinMax && (
+            <>
+              <span className="lg" title="Highest running delta inside the bar">
+                <i style={{ background: '#3fb950' }} /> Max Δ
+              </span>
+              <span className="lg" title="Lowest running delta inside the bar">
+                <i style={{ background: '#f85149' }} /> Min Δ
+              </span>
+            </>
           )}
           {showVwap && (
             <>
@@ -1294,6 +1387,7 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
             </>
           )}
         </div>
+        )}
 
         <button
           type="button"
@@ -1305,43 +1399,61 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
         </button>
       </div>
 
-      {showFootprint && (
+      {(showCot || showMinMax) && !showFootprint && !showVaz && (
+        <div className="vwap-settings" role="group" aria-label="Order-flow labels">
+          <span className="vwap-settings-hint">
+            {showCot
+              ? 'COT CH/CL = session Δ since last new high/low (05:30 IST). Green dash = CH>0, red dash = CL<0'
+              : ''}
+            {showCot && showMinMax ? ' · ' : ''}
+            {showMinMax ? 'Min/Max Δ = running-delta extremes. Dashed box if |value| is 0–9' : ''}
+            {' · follows '}
+            {unitLabel}
+          </span>
+        </div>
+      )}
+
+      {(showFootprint || showVaz) && (
         <div className="vwap-settings" role="group" aria-label="Footprint settings">
-          <span>Mode</span>
-          <div className="unit-toggle" role="group" aria-label="Footprint display mode">
-            <button
-              type="button"
-              className={fpMode === 'profile' ? 'active' : 'ghost'}
-              title="Volume profile left of the candle, delta profile right"
-              onClick={() => setFpMode('profile')}
-            >
-              Profile
-            </button>
-            <button
-              type="button"
-              className={fpMode === 'bidask' ? 'active' : 'ghost'}
-              title="Bid profile left, ask profile right"
-              onClick={() => setFpMode('bidask')}
-            >
-              Bid/Ask
-            </button>
-            <button
-              type="button"
-              className={fpMode === 'delta' ? 'active' : 'ghost'}
-              title="Delta profile (bar width = |Ask − Bid|)"
-              onClick={() => setFpMode('delta')}
-            >
-              Delta
-            </button>
-            <button
-              type="button"
-              className={fpMode === 'volume' ? 'active' : 'ghost'}
-              title="Volume profile (bar width = Bid + Ask)"
-              onClick={() => setFpMode('volume')}
-            >
-              Total Vol
-            </button>
-          </div>
+          {showFootprint && (
+            <>
+              <span>Mode</span>
+              <div className="unit-toggle" role="group" aria-label="Footprint display mode">
+                <button
+                  type="button"
+                  className={fpMode === 'profile' ? 'active' : 'ghost'}
+                  title="Volume profile left of the candle, delta profile right"
+                  onClick={() => setFpMode('profile')}
+                >
+                  Profile
+                </button>
+                <button
+                  type="button"
+                  className={fpMode === 'bidask' ? 'active' : 'ghost'}
+                  title="Bid profile left, ask profile right"
+                  onClick={() => setFpMode('bidask')}
+                >
+                  Bid/Ask
+                </button>
+                <button
+                  type="button"
+                  className={fpMode === 'delta' ? 'active' : 'ghost'}
+                  title="Delta profile (bar width = |Ask − Bid|)"
+                  onClick={() => setFpMode('delta')}
+                >
+                  Delta
+                </button>
+                <button
+                  type="button"
+                  className={fpMode === 'volume' ? 'active' : 'ghost'}
+                  title="Volume profile (bar width = Bid + Ask)"
+                  onClick={() => setFpMode('volume')}
+                >
+                  Total Vol
+                </button>
+              </div>
+            </>
+          )}
           <label title="Cluster height = symbol tick × this multiplier">
             Bin ×
             <input
@@ -1370,6 +1482,9 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
           <span className="vwap-settings-hint">
             Bin = {fmtTick(symbolTickSize(data.symbol))} × {fpBinMult} ={' '}
             {fmtTick(symbolTickSize(data.symbol) * fpBinMult)}
+            {showVaz ? ' · VAZ = 70% value area per candle' : ''}
+            {showCot ? ' · COT = session Δ since last new high/low (05:30 IST)' : ''}
+            {showMinMax ? ' · Min/Max Δ = running-delta extremes of the bar' : ''}
           </span>
         </div>
       )}
@@ -1413,7 +1528,7 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
       )}
 
       <div className="chart-wrap" ref={wrapRef}>
-        {tip && (
+        {showHoverTip && tip && (
           <div className="chart-tooltip">
             <div className="tt-time">{tip.time.replace('T', ' ').slice(0, 19)}</div>
             <div className="tt-ohlc">
@@ -1513,6 +1628,9 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
           wrapRef={wrapRef}
           chartEpoch={chartEpoch}
           show={showFootprint}
+          showVaz={showVaz}
+          showCot={showCot}
+          showMinMax={showMinMax}
           symbol={data.symbol}
           tf={data.tf_minutes}
           unit={unit}
