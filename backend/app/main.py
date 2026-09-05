@@ -27,9 +27,11 @@ from backend.engine.footprint import (  # noqa: E402
     MAX_FLOW_BARS,
     MAX_FOOTPRINT_BARS,
     MAX_VAZ_BARS,
+    build_anchored_profile,
     build_flow_stats,
     build_footprint_bars,
 )
+from backend.engine.of_signals import attach_bb_stats  # noqa: E402
 from backend.engine.nautilus_bridge import status as nautilus_status  # noqa: E402
 from backend.engine.optimize import iter_optimize_progress, run_optimize  # noqa: E402
 from backend.engine.questdb_client import health as questdb_health  # noqa: E402
@@ -42,7 +44,7 @@ from backend.engine.volume_delta import (  # noqa: E402
     write_parity_report,
 )
 
-APP_VERSION = "2.1.49"
+APP_VERSION = "2.2.0"
 app = FastAPI(title="cursor_backtest", version=APP_VERSION)
 app.add_middleware(
     CORSMiddleware,
@@ -281,6 +283,7 @@ def orderflow_bars(
                 }
             )
         )
+    rows = attach_bb_stats(rows)
     return {
         "symbol": symbol,
         "tf": tf,
@@ -300,6 +303,7 @@ def footprint(
     t0: int = Query(..., description="Unix seconds, inclusive"),
     t1: int = Query(..., description="Unix seconds, exclusive"),
     bin_mult: int = Query(1, ge=1, le=10000, description="Cluster size = symbol tick × this"),
+    max_bars: int | None = Query(None, ge=1, le=512, description="Bar cap; default 64. VP uses up to 512."),
 ):
     """Visible-range order-flow clusters (bid/ask at price). Zoom in if too many bars."""
     if tf not in SUPPORTED_TF:
@@ -308,6 +312,35 @@ def footprint(
         raise HTTPException(400, "t1 must be after t0")
     try:
         out = build_footprint_bars(
+            symbol=symbol,
+            tf_minutes=tf,
+            t0_unix=int(t0),
+            t1_unix=int(t1),
+            bin_mult=int(bin_mult),
+            max_bars=int(max_bars) if max_bars is not None else None,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(409, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return round_obj(out)
+
+
+@app.get("/api/anchored-profile")
+def anchored_profile(
+    symbol: str = "ETHUSDT",
+    tf: int = Query(15, alias="tf"),
+    t0: int = Query(..., description="Unix seconds, inclusive"),
+    t1: int = Query(..., description="Unix seconds, exclusive"),
+    bin_mult: int = Query(1, ge=1, le=10000),
+):
+    """Composite anchored volume profile for a dragged start/end range. Includes 70% VA."""
+    if tf not in SUPPORTED_TF:
+        raise HTTPException(400, f"tf must be one of {list(SUPPORTED_TF)}")
+    if int(t1) <= int(t0):
+        raise HTTPException(400, "t1 must be after t0")
+    try:
+        out = build_anchored_profile(
             symbol=symbol,
             tf_minutes=tf,
             t0_unix=int(t0),
@@ -357,6 +390,7 @@ def flow_stats(
     tf: int = Query(15, alias="tf"),
     t0: int = Query(..., description="Unix seconds, inclusive"),
     t1: int = Query(..., description="Unix seconds, exclusive"),
+    max_bars: int | None = Query(None, ge=1, le=1440),
 ):
     """Per-bar COT High/Low (since this candle's last new high/low) and Min/Max Delta."""
     if tf not in SUPPORTED_TF:
@@ -369,7 +403,7 @@ def flow_stats(
             tf_minutes=tf,
             t0_unix=int(t0),
             t1_unix=int(t1),
-            max_bars=MAX_FLOW_BARS,
+            max_bars=int(max_bars) if max_bars is not None else MAX_FLOW_BARS,
         )
     except FileNotFoundError as e:
         raise HTTPException(409, str(e)) from e

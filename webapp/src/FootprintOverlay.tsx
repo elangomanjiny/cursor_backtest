@@ -1,6 +1,14 @@
 import { useEffect, useRef, useState, type RefObject } from 'react'
 import type { IChartApi } from '@stocksharp/chart'
-import { fetchFlowStats, fetchFootprint, fetchValueArea, type FootprintBar, type FootprintLevel } from './api'
+import {
+  fetchAnchoredProfile,
+  fetchFlowStats,
+  fetchFootprint,
+  fetchValueArea,
+  type AnchoredProfile,
+  type FootprintBar,
+  type FootprintLevel,
+} from './api'
 
 export type CandleSeries = {
   priceToCoordinate: (price: number) => number | null
@@ -17,6 +25,24 @@ export const FLOW_MAX_BARS = 512
 
 type Unit = 'quote' | 'base'
 
+export type OfSignalBar = {
+  time: number
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+  delta: number
+  range?: number | null
+  rangeUpper?: number | null
+  volMid?: number | null
+  volStd?: number | null
+  dAbsMid?: number | null
+  dAbsStd?: number | null
+  hh?: boolean
+  ll?: boolean
+}
+
 type Props = {
   chartRef: RefObject<IChartApi | null>
   seriesRef: RefObject<CandleSeries | null>
@@ -26,6 +52,28 @@ type Props = {
   showVaz: boolean
   showCot: boolean
   showMinMax: boolean
+  showVp?: boolean
+  vpMode?: FootprintMode
+  vpBinMult?: number
+  vpT0?: number | null
+  vpT1?: number | null
+  showIdhl?: boolean
+  guides?: { time: number; high: number; low: number }[]
+  ofBars?: OfSignalBar[]
+  showImb?: boolean
+  showDiv?: boolean
+  showAbsorb?: boolean
+  absorbMode?: 'body' | 'range'
+  absorbBodyPct?: number
+  showUa?: boolean
+  showBigVol?: boolean
+  showBigAsk?: boolean
+  showBigBid?: boolean
+  imbRatio?: number
+  imbConsec?: number
+  imbIgnoreZero?: boolean
+  imbMode?: 'diagonal' | 'horizontal'
+  bigMult?: number
   symbol: string
   tf: number
   unit: Unit
@@ -265,11 +313,61 @@ function drawFlowLabels(
   }
 }
 
-function vazOf(bar: FootprintBar, unit: Unit): { val: number; vah: number } | null {
+function vazOf(bar: FootprintBar, unit: Unit): { val: number; poc: number; vah: number } | null {
   const val = unit === 'quote' ? bar.val : (bar.valBase ?? bar.val)
   const vah = unit === 'quote' ? bar.vah : (bar.vahBase ?? bar.vah)
+  const poc = unit === 'quote' ? bar.poc : (bar.pocBase ?? bar.poc)
   if (val == null || vah == null || !Number.isFinite(val) || !Number.isFinite(vah)) return null
-  return { val, vah: Math.max(val, vah) }
+  const lo = Math.min(val, vah)
+  const hi = Math.max(val, vah)
+  const mid = poc != null && Number.isFinite(poc) ? Number(poc) : (lo + hi) / 2
+  return { val: lo, poc: mid, vah: hi }
+}
+
+type StairSeg = { x0: number; x1: number; y: number }
+
+function strokeStairs(
+  ctx: CanvasRenderingContext2D,
+  segs: StairSeg[],
+  color: string,
+  width: number,
+) {
+  if (!segs.length) return
+  ctx.strokeStyle = color
+  ctx.lineWidth = width
+  ctx.lineJoin = 'miter'
+  ctx.lineCap = 'butt'
+  ctx.beginPath()
+  ctx.moveTo(segs[0].x0, segs[0].y)
+  for (let i = 0; i < segs.length; i++) {
+    ctx.lineTo(segs[i].x1, segs[i].y)
+    if (i + 1 < segs.length) ctx.lineTo(segs[i].x1, segs[i + 1].y)
+  }
+  ctx.stroke()
+}
+
+function fillStairsBand(
+  ctx: CanvasRenderingContext2D,
+  top: StairSeg[],
+  bot: StairSeg[],
+  color: string,
+) {
+  if (!top.length || !bot.length) return
+  ctx.beginPath()
+  ctx.moveTo(top[0].x0, top[0].y)
+  for (let i = 0; i < top.length; i++) {
+    ctx.lineTo(top[i].x1, top[i].y)
+    if (i + 1 < top.length) ctx.lineTo(top[i].x1, top[i + 1].y)
+  }
+  const last = bot[bot.length - 1]
+  ctx.lineTo(last.x1, last.y)
+  for (let i = bot.length - 1; i >= 0; i--) {
+    ctx.lineTo(bot[i].x0, bot[i].y)
+    if (i > 0) ctx.lineTo(bot[i].x0, bot[i - 1].y)
+  }
+  ctx.closePath()
+  ctx.fillStyle = color
+  ctx.fill()
 }
 
 function drawVaz(
@@ -277,33 +375,331 @@ function drawVaz(
   chart: IChartApi,
   series: CandleSeries,
   bars: FootprintBar[],
-  tick: number,
+  _tick: number,
   tfSec: number,
   unit: Unit,
   h: number,
 ) {
-  for (const bar of bars) {
+  const ordered = [...bars].sort((a, b) => a.time - b.time)
+  const vah: StairSeg[] = []
+  const poc: StairSeg[] = []
+  const val: StairSeg[] = []
+  for (const bar of ordered) {
     const za = vazOf(bar, unit)
     if (!za) continue
     const slot = barSlot(chart, bar.time, tfSec)
     if (!slot) continue
-    const { x0, bw } = slot
-    const yTop = series.priceToCoordinate(za.vah + tick)
-    const yBot = series.priceToCoordinate(za.val)
-    if (yTop == null || yBot == null) continue
-    const top = Math.min(yTop, yBot)
-    const zh = Math.max(1, Math.abs(yBot - yTop))
-    if (top + zh < 0 || top > h) continue
-    ctx.fillStyle = COL.vaz
-    ctx.fillRect(x0, top, bw, zh)
-    ctx.strokeStyle = COL.vazLine
-    ctx.lineWidth = 1
+    const yVah = series.priceToCoordinate(za.vah)
+    const yPoc = series.priceToCoordinate(za.poc)
+    const yVal = series.priceToCoordinate(za.val)
+    if (yVah == null || yPoc == null || yVal == null) continue
+    if (yVah < -40 && yVal < -40) continue
+    if (yVah > h + 40 && yVal > h + 40) continue
+    const x0 = slot.x0
+    const x1 = slot.x0 + slot.bw
+    vah.push({ x0, x1, y: yVah })
+    poc.push({ x0, x1, y: yPoc })
+    val.push({ x0, x1, y: yVal })
+  }
+  if (!vah.length) return
+  fillStairsBand(ctx, vah, val, 'rgba(240, 180, 41, 0.10)')
+  strokeStairs(ctx, vah, '#f0b429', 1.6)
+  strokeStairs(ctx, poc, '#ffe08a', 2)
+  strokeStairs(ctx, val, '#58a6ff', 1.6)
+  const last = vah[vah.length - 1]
+  ctx.font = '10px ui-sans-serif, system-ui, sans-serif'
+  ctx.textAlign = 'left'
+  ctx.fillStyle = '#f0b429'
+  ctx.fillText('VAH', last.x1 + 6, vah[vah.length - 1].y)
+  ctx.fillStyle = '#ffe08a'
+  ctx.fillText('POC', last.x1 + 6, poc[poc.length - 1].y)
+  ctx.fillStyle = '#58a6ff'
+  ctx.fillText('VAL', last.x1 + 6, val[val.length - 1].y)
+}
+
+function utcDay(ts: number): string {
+  return new Date(ts * 1000).toISOString().slice(0, 10)
+}
+
+function drawDaySeps(
+  ctx: CanvasRenderingContext2D,
+  chart: IChartApi,
+  times: number[],
+  h: number,
+) {
+  ctx.save()
+  ctx.setLineDash([5, 4])
+  ctx.strokeStyle = '#d2a8ff99'
+  ctx.lineWidth = 1
+  ctx.font = '10px ui-sans-serif, system-ui, sans-serif'
+  ctx.fillStyle = '#d2a8ff'
+  ctx.textAlign = 'left'
+  let prev = ''
+  for (const t of times) {
+    const d = utcDay(t)
+    if (d === prev) continue
+    prev = d
+    const x = chart.timeScale().timeToCoordinate(t as never)
+    if (x == null || x < -8 || x > ctx.canvas.clientWidth + 8) continue
     ctx.beginPath()
-    ctx.moveTo(x0, top + 0.5)
-    ctx.lineTo(x0 + bw, top + 0.5)
-    ctx.moveTo(x0, top + zh - 0.5)
-    ctx.lineTo(x0 + bw, top + zh - 0.5)
+    ctx.moveTo(x, 0)
+    ctx.lineTo(x, h)
     ctx.stroke()
+  }
+  ctx.restore()
+}
+
+function drawIdhl(
+  ctx: CanvasRenderingContext2D,
+  chart: IChartApi,
+  series: CandleSeries,
+  bars: { time: number; high: number; low: number }[],
+  tfSec: number,
+) {
+  let day = ''
+  let hi = -Infinity
+  let lo = Infinity
+  const hiSegs: StairSeg[] = []
+  const loSegs: StairSeg[] = []
+  for (const b of bars) {
+    const d = utcDay(b.time)
+    if (d !== day) {
+      day = d
+      hi = b.high
+      lo = b.low
+    } else {
+      if (b.high > hi) hi = b.high
+      if (b.low < lo) lo = b.low
+    }
+    const slot = barSlot(chart, b.time, tfSec)
+    if (!slot) continue
+    const yH = series.priceToCoordinate(hi)
+    const yL = series.priceToCoordinate(lo)
+    if (yH != null) hiSegs.push({ x0: slot.x0, x1: slot.x0 + slot.bw, y: yH })
+    if (yL != null) loSegs.push({ x0: slot.x0, x1: slot.x0 + slot.bw, y: yL })
+  }
+  if (!hiSegs.length) return
+  strokeStairs(ctx, hiSegs, '#3fb950cc', 1.3)
+  strokeStairs(ctx, loSegs, '#f85149cc', 1.3)
+  const lastH = hiSegs[hiSegs.length - 1]
+  const lastL = loSegs[loSegs.length - 1]
+  ctx.font = '10px ui-sans-serif, system-ui, sans-serif'
+  ctx.textAlign = 'left'
+  ctx.fillStyle = '#3fb950'
+  ctx.fillText('IDH', lastH.x1 + 6, lastH.y)
+  ctx.fillStyle = '#f85149'
+  ctx.fillText('IDL', lastL.x1 + 6, lastL.y)
+}
+
+function drawVpRangeMarks(
+  ctx: CanvasRenderingContext2D,
+  chart: IChartApi,
+  t0: number | null | undefined,
+  t1: number | null | undefined,
+  h: number,
+) {
+  ctx.save()
+  ctx.setLineDash([4, 3])
+  ctx.strokeStyle = '#a371f7'
+  ctx.lineWidth = 1.4
+  ctx.font = '10px ui-sans-serif, system-ui, sans-serif'
+  ctx.textAlign = 'center'
+  const marks: { t: number; lab: string }[] = []
+  if (t0 != null && Number.isFinite(t0)) marks.push({ t: t0, lab: 'VP start' })
+  if (t1 != null && Number.isFinite(t1) && t1 !== t0) marks.push({ t: t1, lab: 'VP end' })
+  for (const m of marks) {
+    const x = chart.timeScale().timeToCoordinate(m.t as never)
+    if (x == null) continue
+    ctx.beginPath()
+    ctx.moveTo(x, 0)
+    ctx.lineTo(x, h)
+    ctx.stroke()
+    ctx.fillStyle = '#a371f7'
+    ctx.fillText(m.lab, x, 12)
+  }
+  ctx.restore()
+}
+
+export type OfSigFlags = {
+  imb: boolean
+  div: boolean
+  absorb: boolean
+  absorbMode: 'body' | 'range'
+  absorbBodyPct: number
+  ua: boolean
+  bigVol: boolean
+  bigAsk: boolean
+  bigBid: boolean
+  imbRatio: number
+  imbConsec: number
+  imbIgnoreZero: boolean
+  imbMode: 'diagonal' | 'horizontal'
+  bigMult: number
+}
+
+function markTri(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  dir: 1 | -1,
+  color: string,
+) {
+  ctx.fillStyle = color
+  ctx.beginPath()
+  ctx.moveTo(x, y)
+  ctx.lineTo(x - 4, y + dir * 8)
+  ctx.lineTo(x + 4, y + dir * 8)
+  ctx.closePath()
+  ctx.fill()
+}
+
+function sigmaHigh(x: number, mid: number | null | undefined, std: number | null | undefined, k: number): boolean {
+  if (mid == null || std == null || !Number.isFinite(mid) || !Number.isFinite(std)) return false
+  return x > mid + k * std
+}
+
+function rangeInBand(rng: number | null | undefined, upper: number | null | undefined): boolean {
+  if (rng == null || upper == null || !Number.isFinite(rng) || !Number.isFinite(upper)) return false
+  return rng <= upper
+}
+
+function classifyImb(num: number, den: number, ratio: number, ignoreZero: boolean): boolean {
+  if (num <= 0) return false
+  if (den <= 0) return !ignoreZero
+  return num / den >= ratio
+}
+
+function markUa(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  color: string,
+  lab: string,
+) {
+  ctx.fillStyle = color
+  ctx.fillRect(x - 5, y - 5, 10, 10)
+  ctx.strokeStyle = '#0d1117'
+  ctx.lineWidth = 1
+  ctx.strokeRect(x - 5, y - 5, 10, 10)
+  ctx.font = '9px ui-sans-serif, system-ui, sans-serif'
+  ctx.textAlign = 'center'
+  ctx.fillStyle = color
+  ctx.fillText(lab, x, y - 12)
+}
+
+function drawImbalanceMarks(
+  ctx: CanvasRenderingContext2D,
+  series: CandleSeries,
+  levels: FootprintLevel[],
+  slot: { x0: number; bw: number },
+  unit: Unit,
+  h: number,
+  sigs: OfSigFlags,
+) {
+  const n = levels.length
+  if (n < 1) return
+  const ratio = Math.max(1.5, sigs.imbRatio || 3)
+  const need = Math.max(1, Math.round(sigs.imbConsec || 1))
+  const ignoreZero = sigs.imbIgnoreZero !== false
+  const askImb = new Array<boolean>(n).fill(false)
+  const bidImb = new Array<boolean>(n).fill(false)
+  if (sigs.imbMode === 'horizontal') {
+    for (let k = 0; k < n; k++) {
+      const ask = volOf(levels[k], unit, 'ask')
+      const bid = volOf(levels[k], unit, 'bid')
+      askImb[k] = classifyImb(ask, bid, ratio, ignoreZero)
+      bidImb[k] = classifyImb(bid, ask, ratio, ignoreZero)
+    }
+  } else {
+    for (let k = 1; k < n; k++) {
+      const askUp = volOf(levels[k], unit, 'ask')
+      const bidDn = volOf(levels[k - 1], unit, 'bid')
+      askImb[k] = classifyImb(askUp, bidDn, ratio, ignoreZero)
+      bidImb[k - 1] = classifyImb(bidDn, askUp, ratio, ignoreZero)
+    }
+  }
+  const paintRun = (flags: boolean[], side: 'ask' | 'bid') => {
+    let i = 0
+    while (i < n) {
+      if (!flags[i]) {
+        i += 1
+        continue
+      }
+      let j = i
+      while (j < n && flags[j]) j += 1
+      if (j - i >= need) {
+        for (let k = i; k < j; k++) {
+          const y = series.priceToCoordinate(levels[k].price)
+          if (y == null || y < 0 || y > h) continue
+          ctx.fillStyle = side === 'ask' ? '#3fb950' : '#f85149'
+          const x = side === 'ask' ? slot.x0 + slot.bw - 4 : slot.x0
+          ctx.fillRect(x, y - 2, 4, 4)
+        }
+      }
+      i = j
+    }
+  }
+  paintRun(askImb, 'ask')
+  paintRun(bidImb, 'bid')
+}
+
+function drawOfSignals(
+  ctx: CanvasRenderingContext2D,
+  chart: IChartApi,
+  series: CandleSeries,
+  fpBars: FootprintBar[],
+  ofBars: OfSignalBar[],
+  tfSec: number,
+  unit: Unit,
+  h: number,
+  sigs: OfSigFlags,
+) {
+  const fpBy = new Map(fpBars.map((b) => [b.time, b]))
+  const n = ofBars.length
+  const k = Math.max(0.5, sigs.bigMult || 1)
+  for (let i = 0; i < n; i++) {
+    const b = ofBars[i]
+    const slot = barSlot(chart, b.time, tfSec)
+    if (!slot) continue
+    const yH = series.priceToCoordinate(b.high)
+    const yL = series.priceToCoordinate(b.low)
+    if (yH == null || yL == null) continue
+    if (sigs.bigVol && sigmaHigh(b.volume, b.volMid, b.volStd, k)) {
+      markTri(ctx, slot.mid, yL + 10, 1, '#58a6ff')
+    }
+    if (sigs.bigAsk && b.delta > 0 && sigmaHigh(b.delta, b.dAbsMid, b.dAbsStd, k)) {
+      markTri(ctx, slot.mid + 6, yH - 10, -1, '#3fb950')
+    }
+    if (sigs.bigBid && b.delta < 0 && sigmaHigh(Math.abs(b.delta), b.dAbsMid, b.dAbsStd, k)) {
+      markTri(ctx, slot.mid - 6, yL + 10, 1, '#f85149')
+    }
+    if (sigs.div && i > 0) {
+      const p = ofBars[i - 1]
+      if (b.high > p.high && b.delta < p.delta) markTri(ctx, slot.mid, yH - 16, -1, '#f0b429')
+      if (b.low < p.low && b.delta > p.delta) markTri(ctx, slot.mid, yL + 16, 1, '#a371f7')
+    }
+    const rng = Math.max(1e-9, b.range ?? b.high - b.low)
+    const bodyOk = Math.abs(b.close - b.open) / rng < Math.max(0.05, (sigs.absorbBodyPct || 35) / 100)
+    const rangeOk = rangeInBand(rng, b.rangeUpper)
+    const sizeOk = sigs.absorbMode === 'body' ? bodyOk : rangeOk
+    if (sigs.absorb && (b.hh || b.ll) && sizeOk && sigmaHigh(b.volume, b.volMid, b.volStd, k)) {
+      ctx.strokeStyle = '#f0b429'
+      ctx.lineWidth = 1.4
+      ctx.strokeRect(slot.x0, yH, slot.bw, yL - yH)
+    }
+    const fp = fpBy.get(b.time)
+    const levels = [...(fp?.levels ?? [])].sort((a, c) => a.price - c.price)
+    if (sigs.ua && levels.length) {
+      const hi = levels[levels.length - 1]
+      const lo = levels[0]
+      const askHi = volOf(hi, unit, 'ask')
+      const bidLo = volOf(lo, unit, 'bid')
+      if (askHi <= 0) markUa(ctx, slot.mid, yH, '#f0b429', 'UA H')
+      if (bidLo <= 0) markUa(ctx, slot.mid, yL, '#58a6ff', 'UA L')
+    }
+    if (sigs.imb && levels.length) {
+      drawImbalanceMarks(ctx, series, levels, slot, unit, h, sigs)
+    }
   }
 }
 
@@ -317,6 +713,133 @@ function drawLabel(
   ctx.textAlign = align
   ctx.fillStyle = COL.text
   ctx.fillText(text, cx, cy)
+}
+
+function drawAvpVa(
+  ctx: CanvasRenderingContext2D,
+  series: CandleSeries,
+  x0: number,
+  boxW: number,
+  vah: number | null | undefined,
+  poc: number | null | undefined,
+  val: number | null | undefined,
+) {
+  const marks: { p: number; c: string; lab: string }[] = []
+  if (vah != null) marks.push({ p: vah, c: '#f0b429', lab: 'VAH' })
+  if (poc != null) marks.push({ p: poc, c: '#ffe08a', lab: 'POC' })
+  if (val != null) marks.push({ p: val, c: '#58a6ff', lab: 'VAL' })
+  ctx.save()
+  ctx.setLineDash([4, 3])
+  ctx.font = '10px ui-sans-serif, system-ui, sans-serif'
+  ctx.textAlign = 'left'
+  for (const m of marks) {
+    const y = series.priceToCoordinate(m.p)
+    if (y == null) continue
+    ctx.strokeStyle = m.c
+    ctx.lineWidth = 1.2
+    ctx.beginPath()
+    ctx.moveTo(x0 - 6, y)
+    ctx.lineTo(x0 + boxW + 8, y)
+    ctx.stroke()
+    ctx.fillStyle = m.c
+    ctx.fillText(m.lab, x0 + boxW + 10, y)
+  }
+  ctx.restore()
+}
+
+function drawCompositeVp(
+  ctx: CanvasRenderingContext2D,
+  series: CandleSeries,
+  levels: FootprintLevel[],
+  tick: number,
+  unit: Unit,
+  mode: FootprintMode,
+  w: number,
+  h: number,
+  va?: { val?: number | null; poc?: number | null; vah?: number | null },
+) {
+  const agg = new Map<number, { bid: number; ask: number }>()
+  for (const lv of levels) {
+    const p = Number(lv.price)
+    if (!Number.isFinite(p)) continue
+    const cur = agg.get(p) ?? { bid: 0, ask: 0 }
+    cur.bid += volOf(lv, unit, 'bid')
+    cur.ask += volOf(lv, unit, 'ask')
+    agg.set(p, cur)
+  }
+  if (!agg.size) return
+  let maxVol = 1e-12
+  let maxAbsD = 1e-12
+  let maxBid = 1e-12
+  let maxAsk = 1e-12
+  let volPoc = 0
+  let volPocV = -1
+  let deltaPoc = 0
+  let deltaPocV = -1
+  for (const [p, v] of agg) {
+    const tot = v.bid + v.ask
+    const d = Math.abs(v.ask - v.bid)
+    if (tot > maxVol) maxVol = tot
+    if (d > maxAbsD) maxAbsD = d
+    if (v.bid > maxBid) maxBid = v.bid
+    if (v.ask > maxAsk) maxAsk = v.ask
+    if (tot > volPocV) {
+      volPocV = tot
+      volPoc = p
+    }
+    if (d > deltaPocV) {
+      deltaPocV = d
+      deltaPoc = p
+    }
+  }
+  const boxW = 84
+  const xRight = w - 52
+  const x0 = xRight - boxW
+  ctx.fillStyle = 'rgba(13,17,23,0.45)'
+  ctx.fillRect(x0 - 4, 0, boxW + 8, h)
+  if (va?.vah != null && va.val != null) {
+    const yH = series.priceToCoordinate(va.vah)
+    const yL = series.priceToCoordinate(va.val)
+    if (yH != null && yL != null) {
+      const top = Math.min(yH, yL)
+      const hh = Math.abs(yL - yH)
+      ctx.fillStyle = 'rgba(240,180,41,0.12)'
+      ctx.fillRect(x0 - 4, top, boxW + 8, hh)
+    }
+  }
+  for (const [p, v] of agg) {
+    const yTop = series.priceToCoordinate(p + tick)
+    const yBot = series.priceToCoordinate(p)
+    if (yTop == null || yBot == null) continue
+    const top = Math.min(yTop, yBot)
+    const cellH = Math.max(1, Math.abs(yBot - yTop) - 0.4)
+    if (top + cellH < 0 || top > h) continue
+    const tot = v.bid + v.ask
+    const delta = v.ask - v.bid
+    if (mode === 'bidask') {
+      const bidW = profileW(v.bid, Math.max(maxBid, maxAsk), boxW / 2 - 2)
+      const askW = profileW(v.ask, Math.max(maxBid, maxAsk), boxW / 2 - 2)
+      const mid = x0 + boxW / 2
+      hbar(ctx, mid - bidW, top, bidW, cellH, COL.bid)
+      hbar(ctx, mid, top, askW, cellH, COL.ask)
+    } else if (mode === 'delta') {
+      const dW = profileW(Math.abs(delta), maxAbsD, boxW)
+      hbar(ctx, x0, top, dW, cellH, delta >= 0 ? COL.pos : COL.neg)
+      if (Math.abs(p - deltaPoc) < tick / 2) pocStroke(ctx, x0, top, dW, cellH)
+    } else if (mode === 'volume') {
+      const volW = profileW(tot, maxVol, boxW)
+      hbar(ctx, x0, top, volW, cellH, COL.vol)
+      if (Math.abs(p - volPoc) < tick / 2) pocStroke(ctx, x0, top, volW, cellH)
+    } else {
+      const volW = profileW(tot, maxVol, boxW / 2 - 1)
+      const dW = profileW(Math.abs(delta), maxAbsD, boxW / 2 - 1)
+      const mid = x0 + boxW / 2
+      hbar(ctx, mid - volW, top, volW, cellH, COL.vol)
+      hbar(ctx, mid, top, dW, cellH, delta >= 0 ? COL.pos : COL.neg)
+      if (Math.abs(p - volPoc) < tick / 2) pocStroke(ctx, mid - volW, top, volW, cellH)
+    }
+  }
+  if (va) drawAvpVa(ctx, series, x0, boxW, va.vah, va.poc, va.val)
 }
 
 function draw(
@@ -334,6 +857,15 @@ function draw(
   showVaz: boolean,
   showCot: boolean,
   showMinMax: boolean,
+  showVp: boolean,
+  avp: AnchoredProfile | null,
+  vpMode: FootprintMode,
+  vpT0?: number | null,
+  vpT1?: number | null,
+  showIdhl?: boolean,
+  guides?: { time: number; high: number; low: number }[],
+  ofBars?: OfSignalBar[],
+  sigs?: OfSigFlags,
 ) {
   const pane = chart.panes()[0]
   const size = pane?.getSize()
@@ -351,11 +883,26 @@ function draw(
   ctx.font = '10px ui-sans-serif, system-ui, sans-serif'
   ctx.textBaseline = 'middle'
 
+  if (guides?.length) drawDaySeps(ctx, chart, guides.map((g) => g.time), h)
+  if (showIdhl && guides?.length) drawIdhl(ctx, chart, series, guides, tfSec)
   if (showVaz && vazBars.length) {
     drawVaz(ctx, chart, series, vazBars, tick, tfSec, unit, h)
   }
   if (showCot || showMinMax) {
     drawFlowLabels(ctx, chart, series, flowBars, tfSec, unit, showCot, showMinMax, h)
+  }
+  if (showVp) {
+    drawVpRangeMarks(ctx, chart, vpT0, vpT1, h)
+    if (avp?.levels?.length) {
+      const va =
+        unit === 'quote'
+          ? { val: avp.val, poc: avp.poc, vah: avp.vah }
+          : { val: avp.valBase, poc: avp.pocBase, vah: avp.vahBase }
+      drawCompositeVp(ctx, series, avp.levels, tick, unit, vpMode, w, h, va)
+    }
+  }
+  if (sigs && ofBars?.length) {
+    drawOfSignals(ctx, chart, series, bars, ofBars, tfSec, unit, h, sigs)
   }
   if (!showFp || !bars.length) return
 
@@ -467,6 +1014,28 @@ export function FootprintOverlay({
   showVaz,
   showCot,
   showMinMax,
+  showVp = false,
+  vpMode = 'profile',
+  vpBinMult,
+  vpT0 = null,
+  vpT1 = null,
+  showIdhl = false,
+  guides = [],
+  ofBars = [],
+  showImb = false,
+  showDiv = false,
+  showAbsorb = false,
+  absorbMode = 'range',
+  absorbBodyPct = 35,
+  showUa = false,
+  showBigVol = false,
+  showBigAsk = false,
+  showBigBid = false,
+  imbRatio = 3,
+  imbConsec = 1,
+  imbIgnoreZero = true,
+  imbMode = 'diagonal',
+  bigMult = 2,
   symbol,
   tf,
   unit,
@@ -479,22 +1048,56 @@ export function FootprintOverlay({
   const barsRef = useRef<FootprintBar[]>([])
   const vazRef = useRef<FootprintBar[]>([])
   const flowRef = useRef<FootprintBar[]>([])
+  const avpRef = useRef<AnchoredProfile | null>(null)
   const tickRef = useRef(0.01)
   const modeRef = useRef(mode)
+  const vpModeRef = useRef(vpMode)
   const unitRef = useRef(unit)
   const showRef = useRef(show)
   const showVazRef = useRef(showVaz)
   const showCotRef = useRef(showCot)
   const showMinMaxRef = useRef(showMinMax)
+  const showVpRef = useRef(showVp)
+  const showIdhlRef = useRef(showIdhl)
+  const guidesRef = useRef(guides)
+  const vpT0Ref = useRef(vpT0)
+  const vpT1Ref = useRef(vpT1)
   modeRef.current = mode
+  vpModeRef.current = vpMode
   unitRef.current = unit
   showRef.current = show
   showVazRef.current = showVaz
   showCotRef.current = showCot
   showMinMaxRef.current = showMinMax
+  showVpRef.current = showVp
+  showIdhlRef.current = showIdhl
+  guidesRef.current = guides
+  vpT0Ref.current = vpT0
+  vpT1Ref.current = vpT1
   const binSafe = Math.max(1, Math.round(Number(binMult) || 1))
-  const wantFlow = showCot || showMinMax
-  const active = show || showVaz || wantFlow
+  const vpBinSafe = Math.max(1, Math.round(Number(vpBinMult ?? binMult) || 1))
+  const wantFpData = show || showImb || showUa
+  const sigs: OfSigFlags = {
+    imb: showImb,
+    div: showDiv,
+    absorb: showAbsorb,
+    absorbMode,
+    absorbBodyPct,
+    ua: showUa,
+    bigVol: showBigVol,
+    bigAsk: showBigAsk,
+    bigBid: showBigBid,
+    imbRatio,
+    imbConsec,
+    imbIgnoreZero,
+    imbMode,
+    bigMult,
+  }
+  const sigsRef = useRef(sigs)
+  sigsRef.current = sigs
+  const ofBarsRef = useRef(ofBars)
+  ofBarsRef.current = ofBars
+  const active = Boolean(barTimes.length)
 
   useEffect(() => {
     const chart = chartRef.current
@@ -505,18 +1108,12 @@ export function FootprintOverlay({
       barsRef.current = []
       vazRef.current = []
       flowRef.current = []
+      avpRef.current = null
       const c = canvasRef.current?.getContext('2d')
       if (c && canvasRef.current) {
         c.setTransform(1, 0, 0, 1, 0, 0)
         c.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height)
       }
-      seriesRef.current?.applyOptions({
-        upColor: '#3fb950',
-        downColor: '#f85149',
-        wickUpColor: '#3fb950',
-        wickDownColor: '#f85149',
-        borderVisible: false,
-      })
       return
     }
 
@@ -524,6 +1121,7 @@ export function FootprintOverlay({
     let aborted = false
     const fpAc = { current: new AbortController() }
     const vazAc = { current: new AbortController() }
+    const vpAc = { current: new AbortController() }
     const flowAc = { current: new AbortController() }
     let flowKey = ''
 
@@ -544,6 +1142,15 @@ export function FootprintOverlay({
         showVazRef.current,
         showCotRef.current,
         showMinMaxRef.current,
+        showVpRef.current,
+        avpRef.current,
+        vpModeRef.current,
+        vpT0Ref.current,
+        vpT1Ref.current,
+        showIdhlRef.current,
+        guidesRef.current,
+        ofBarsRef.current,
+        sigsRef.current,
       )
     }
 
@@ -563,25 +1170,16 @@ export function FootprintOverlay({
     }
 
     const applyFpCandles = (on: boolean) => {
-      if (on) {
-        series.applyOptions({
-          upColor: 'rgba(63,185,80,0.50)',
-          downColor: 'rgba(248,81,73,0.50)',
-          wickUpColor: 'rgba(63,185,80,0.85)',
-          wickDownColor: 'rgba(248,81,73,0.85)',
-          borderVisible: true,
-          borderUpColor: 'rgba(63,185,80,0.80)',
-          borderDownColor: 'rgba(248,81,73,0.80)',
-        })
-      } else {
-        series.applyOptions({
-          upColor: '#3fb950',
-          downColor: '#f85149',
-          wickUpColor: '#3fb950',
-          wickDownColor: '#f85149',
-          borderVisible: false,
-        })
-      }
+      if (!on) return
+      series.applyOptions({
+        upColor: 'rgba(63,185,80,0.50)',
+        downColor: 'rgba(248,81,73,0.50)',
+        wickUpColor: 'rgba(63,185,80,0.85)',
+        wickDownColor: 'rgba(248,81,73,0.85)',
+        borderVisible: true,
+        borderUpColor: 'rgba(63,185,80,0.80)',
+        borderDownColor: 'rgba(248,81,73,0.80)',
+      })
     }
 
     const load = () => {
@@ -590,9 +1188,9 @@ export function FootprintOverlay({
       const hints: string[] = []
       const fpZoomed =
         win.barPx >= FOOTPRINT_MIN_BAR_PX && win.nBars <= FOOTPRINT_MAX_BARS
-      const reuseVazFromFp = showRef.current && showVazRef.current && fpZoomed
+      const reuseVazFromFp = wantFpData && showVazRef.current && fpZoomed
 
-      if (showRef.current) {
+      if (wantFpData) {
         if (!fpZoomed) {
           fpAc.current.abort()
           fpAc.current = new AbortController()
@@ -634,6 +1232,43 @@ export function FootprintOverlay({
         fpAc.current.abort()
         barsRef.current = []
         applyFpCandles(false)
+      }
+
+      if (showVpRef.current) {
+        const a = vpT0Ref.current
+        const b = vpT1Ref.current
+        let t0 = a != null && Number.isFinite(a) ? a : win.t0
+        let t1 = b != null && Number.isFinite(b) ? b + tf * 60 : win.t1
+        if (t1 <= t0) t1 = t0 + tf * 60
+        vpAc.current.abort()
+        vpAc.current = new AbortController()
+        if (!showRef.current) hints.push('Loading AVP…')
+        void fetchAnchoredProfile(
+          { symbol, tf, t0, t1, bin_mult: vpBinSafe },
+          vpAc.current.signal,
+        )
+          .then((r) => {
+            if (aborted) return
+            if (!r.ok) {
+              avpRef.current = null
+              if (!showRef.current) setHint('AVP range failed')
+              paint()
+              return
+            }
+            avpRef.current = r
+            tickRef.current = Number(r.tick_size || tickRef.current || 0.01)
+            if (!showRef.current) setHint(r.levels?.length ? null : 'No ticks in AVP range')
+            paint()
+          })
+          .catch((e) => {
+            if (aborted || (e instanceof DOMException && e.name === 'AbortError')) return
+            avpRef.current = null
+            if (!showRef.current) setHint(String(e.message || e))
+            paint()
+          })
+      } else {
+        vpAc.current.abort()
+        avpRef.current = null
       }
 
       if (showVazRef.current) {
@@ -739,12 +1374,13 @@ export function FootprintOverlay({
       aborted = true
       fpAc.current.abort()
       vazAc.current.abort()
+      vpAc.current.abort()
       flowAc.current.abort()
       if (timer != null) window.clearTimeout(timer)
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(schedule)
       window.removeEventListener('resize', schedule)
     }
-  }, [active, show, showVaz, showCot, showMinMax, symbol, tf, binSafe, chartEpoch, chartRef, seriesRef, wrapRef, barTimes])
+  }, [active, show, showVaz, showCot, showMinMax, showVp, showImb, showUa, symbol, tf, binSafe, vpBinSafe, vpT0, vpT1, chartEpoch, chartRef, seriesRef, wrapRef, barTimes])
 
   useEffect(() => {
     if (!active) return
@@ -767,8 +1403,47 @@ export function FootprintOverlay({
       showVaz,
       showCot,
       showMinMax,
+      showVp,
+      avpRef.current,
+      vpMode,
+      vpT0,
+      vpT1,
+      showIdhl,
+      guides,
+      ofBars,
+      sigsRef.current,
     )
-  }, [active, show, showVaz, showCot, showMinMax, mode, unit, tf])
+  }, [
+    active,
+    show,
+    showVaz,
+    showCot,
+    showMinMax,
+    showVp,
+    vpMode,
+    vpT0,
+    vpT1,
+    showIdhl,
+    guides,
+    ofBars,
+    showImb,
+    showDiv,
+    showAbsorb,
+    absorbMode,
+    absorbBodyPct,
+    showUa,
+    showBigVol,
+    showBigAsk,
+    showBigBid,
+    imbRatio,
+    imbConsec,
+    imbIgnoreZero,
+    imbMode,
+    bigMult,
+    mode,
+    unit,
+    tf,
+  ])
 
   if (!active) return null
 

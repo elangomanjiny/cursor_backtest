@@ -48,6 +48,18 @@ export function OrderflowTab({ exchange, symbol, start, end, tf, dataReady, acti
   cellsRef.current = cells
   const [leftOpen, setLeftOpen] = useState(true)
   const [leftPinned, setLeftPinned] = useState(false)
+  const skipLeftHoverRef = useRef(false)
+
+  const toggleLeftPin = () => {
+    if (leftPinned) {
+      skipLeftHoverRef.current = true
+      setLeftPinned(false)
+      setLeftOpen(false)
+    } else {
+      setLeftPinned(true)
+      setLeftOpen(true)
+    }
+  }
 
   const n = layoutCount(layout)
   const shown = useMemo(() => cells.slice(0, n), [cells, n])
@@ -92,16 +104,20 @@ export function OrderflowTab({ exchange, symbol, start, end, tf, dataReady, acti
       <div className="of-hud">
         <div
           className={`of-rail left${leftOpen ? ' open' : ''}${leftPinned ? ' pinned' : ''}`}
-          onMouseEnter={() => setLeftOpen(true)}
+          onMouseEnter={() => {
+            if (skipLeftHoverRef.current) return
+            setLeftOpen(true)
+          }}
           onMouseLeave={() => {
+            skipLeftHoverRef.current = false
             if (!leftPinned) setLeftOpen(false)
           }}
         >
         <button
           type="button"
-          className={`of-edge left${leftOpen ? ' on' : ''}`}
-          title={leftOpen ? 'Hide data menu' : 'Show data menu'}
-          onClick={() => setLeftOpen((v) => !v)}
+          className={`of-edge left${leftOpen || leftPinned ? ' on' : ''}`}
+          title={leftPinned ? 'Unpin data menu' : 'Pin data menu'}
+          onClick={toggleLeftPin}
         >
           DATA
         </button>
@@ -112,7 +128,7 @@ export function OrderflowTab({ exchange, symbol, start, end, tf, dataReady, acti
               type="button"
               className={`ghost of-pin${leftPinned ? ' on' : ''}`}
               title={leftPinned ? 'Unpin (auto-hide)' : 'Pin open'}
-              onClick={() => setLeftPinned((v) => !v)}
+              onClick={toggleLeftPin}
             >
               {leftPinned ? '📌' : '📍'}
             </button>

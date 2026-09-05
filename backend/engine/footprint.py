@@ -10,7 +10,7 @@ from backend.engine.dataloader import IST, ist_bounds, ticks_parts_dir
 
 MAX_FOOTPRINT_BARS = 64
 MAX_VAZ_BARS = 512
-MAX_FLOW_BARS = 512
+MAX_FLOW_BARS = 1440
 VALUE_AREA_PCT = 0.70
 
 # (symbol, tf, UTC date) → per-bar stats. First hit walks the day; later
@@ -597,6 +597,110 @@ def build_footprint_bars(
         va_pct=VALUE_AREA_PCT,
         bars=bars,
     )
+
+
+def build_anchored_profile(
+    *,
+    symbol: str = "ETHUSDT",
+    tf_minutes: int = 15,
+    t0_unix: int,
+    t1_unix: int,
+    bin_mult: int = 1,
+) -> dict[str, Any]:
+    """One composite volume profile for [t0, t1). No per-bar cap — ticks are aggregated by price only."""
+    tf_minutes = int(tf_minutes)
+    symbol_tick = _tick_size(symbol)
+    mult = max(1, int(bin_mult or 1))
+    tick = symbol_tick * mult
+    t0 = pd.Timestamp(int(t0_unix), unit="s", tz="UTC")
+    t1 = pd.Timestamp(int(t1_unix), unit="s", tz="UTC")
+    if t1 <= t0:
+        return {
+            "ok": False,
+            "reason": "bad_range",
+            "tick_size": tick,
+            "levels": [],
+        }
+    ticks = _load_ticks_range(symbol, t0, t1)
+    if ticks is None or ticks.empty:
+        return {
+            "ok": True,
+            "reason": "empty",
+            "tick_size": tick,
+            "bin_mult": mult,
+            "symbol_tick": symbol_tick,
+            "tf": tf_minutes,
+            "t0": int(t0.timestamp()),
+            "t1": int(t1.timestamp()),
+            "levels": [],
+        }
+    keep = [c for c in ("ts", "price", "quantity", "aggressor_sell") if c in ticks.columns]
+    df = ticks.loc[:, keep].copy()
+    df["ts"] = pd.to_datetime(df["ts"], utc=True)
+    df = df[(df["ts"] >= t0) & (df["ts"] < t1)]
+    if df.empty:
+        return {
+            "ok": True,
+            "reason": "empty",
+            "tick_size": tick,
+            "bin_mult": mult,
+            "symbol_tick": symbol_tick,
+            "tf": tf_minutes,
+            "t0": int(t0.timestamp()),
+            "t1": int(t1.timestamp()),
+            "levels": [],
+        }
+    sell = df["aggressor_sell"].astype(bool)
+    qty = df["quantity"]
+    px = df["price"]
+    df["bid_base"] = qty.where(sell, 0.0)
+    df["ask_base"] = qty.where(~sell, 0.0)
+    df["bid_quote"] = (qty * px).where(sell, 0.0)
+    df["ask_quote"] = (qty * px).where(~sell, 0.0)
+    df["price_r"] = _bin_prices(px, tick)
+    grp = (
+        df.groupby("price_r", sort=True)
+        .agg(
+            bidVolume=("bid_base", "sum"),
+            askVolume=("ask_base", "sum"),
+            bidQuote=("bid_quote", "sum"),
+            askQuote=("ask_quote", "sum"),
+            tradeCount=("quantity", "count"),
+        )
+        .reset_index()
+    )
+    levels = [
+        {
+            "price": float(rec.price_r),
+            "bidVolume": round(float(rec.bidVolume), 6),
+            "askVolume": round(float(rec.askVolume), 6),
+            "bidQuote": round(float(rec.bidQuote), 2),
+            "askQuote": round(float(rec.askQuote), 2),
+            "tradeCount": int(rec.tradeCount),
+        }
+        for rec in grp.itertuples(index=False)
+    ]
+    poc_q, val_q, vah_q = value_area_from_levels(levels, quote=True)
+    poc_b, val_b, vah_b = value_area_from_levels(levels, quote=False)
+    return {
+        "ok": True,
+        "reason": "ok" if levels else "empty",
+        "tick_size": tick,
+        "bin_mult": mult,
+        "symbol_tick": symbol_tick,
+        "tf": tf_minutes,
+        "t0": int(t0.timestamp()),
+        "t1": int(t1.timestamp()),
+        "count": len(levels),
+        "va_pct": VALUE_AREA_PCT,
+        "poc": poc_q,
+        "val": val_q,
+        "vah": vah_q,
+        "pocBase": poc_b,
+        "valBase": val_b,
+        "vahBase": vah_b,
+        "levels": levels,
+    }
 
 
 def build_flow_stats(

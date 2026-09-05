@@ -428,6 +428,19 @@ export type OrderflowBar = {
   delta_quote: number
   delta_base: number
   delta_pct: number
+  range?: number | null
+  rangeMid?: number | null
+  rangeUpper?: number | null
+  volMidQuote?: number | null
+  volStdQuote?: number | null
+  volMidBase?: number | null
+  volStdBase?: number | null
+  dAbsMidQuote?: number | null
+  dAbsStdQuote?: number | null
+  dAbsMidBase?: number | null
+  dAbsStdBase?: number | null
+  hh?: boolean
+  ll?: boolean
 }
 
 export async function fetchOrderflowBars(p: {
@@ -498,12 +511,35 @@ export type FootprintResponse = {
 }
 
 export async function fetchFootprint(
-  p: { symbol: string; tf: number; t0: number; t1: number; bin_mult?: number },
+  p: { symbol: string; tf: number; t0: number; t1: number; bin_mult?: number; max_bars?: number },
   signal?: AbortSignal,
 ) {
   const r = await fetch(`/api/footprint?${qs(p)}`, { signal })
   if (!r.ok) throw new Error(await errText(r))
   return (await r.json()) as FootprintResponse
+}
+
+export type AnchoredProfile = {
+  ok: boolean
+  reason?: string
+  tick_size: number
+  bin_mult?: number
+  poc?: number | null
+  val?: number | null
+  vah?: number | null
+  pocBase?: number | null
+  valBase?: number | null
+  vahBase?: number | null
+  levels: FootprintLevel[]
+}
+
+export async function fetchAnchoredProfile(
+  p: { symbol: string; tf: number; t0: number; t1: number; bin_mult?: number },
+  signal?: AbortSignal,
+) {
+  const r = await fetch(`/api/anchored-profile?${qs(p)}`, { signal })
+  if (!r.ok) throw new Error(await errText(r))
+  return (await r.json()) as AnchoredProfile
 }
 
 export async function fetchValueArea(
@@ -516,7 +552,7 @@ export async function fetchValueArea(
 }
 
 export async function fetchFlowStats(
-  p: { symbol: string; tf: number; t0: number; t1: number },
+  p: { symbol: string; tf: number; t0: number; t1: number; max_bars?: number },
   signal?: AbortSignal,
 ) {
   const r = await fetch(`/api/flow-stats?${qs(p)}`, { signal })

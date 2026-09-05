@@ -72,6 +72,59 @@ function freezePriceScale(chart: IChartApi): PaneScale | null {
   return scale.frozenRange ? scale : null
 }
 
+/** Fit the right price scale to candle high/low only (ignore VWAP / overlays). */
+export function fitPriceToCandles(
+  chart: IChartApi,
+  bars: ReadonlyArray<{ high: number; low: number }>,
+  logical?: { from: number; to: number } | null,
+): void {
+  if (!bars.length) return
+  const r = logical ?? chart.timeScale().getVisibleLogicalRange()
+  let lo = Infinity
+  let hi = -Infinity
+  if (r) {
+    const a = Math.max(0, Math.floor(r.from))
+    const b = Math.min(bars.length - 1, Math.ceil(r.to))
+    for (let i = a; i <= b; i++) {
+      const bar = bars[i]
+      if (!bar) continue
+      lo = Math.min(lo, Number(bar.low))
+      hi = Math.max(hi, Number(bar.high))
+    }
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) {
+    for (const bar of bars) {
+      lo = Math.min(lo, Number(bar.low))
+      hi = Math.max(hi, Number(bar.high))
+    }
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) return
+  const pad = Math.max((hi - lo) * 0.08, (Math.abs(hi) + Math.abs(lo)) * 1e-6, 1e-8)
+  const pane = mainPaneInternal(chart)
+  const api = mainPaneApi(chart)
+  if (!pane) return
+  const scale = rightScale(pane)
+  if (!scale) return
+  try {
+    api?.priceScale('right').applyOptions({ autoScale: false })
+  } catch {
+    try {
+      chart.priceScale('right').applyOptions({ autoScale: false })
+    } catch {
+      /* ignore */
+    }
+  }
+  pane.priceZoom = 1
+  scale.frozenRange = {
+    min: lo - pad,
+    max: hi + pad,
+    mode: scale.frozenRange?.mode,
+    baseValue: scale.frozenRange?.baseValue,
+    baseValues: scale.frozenRange?.baseValues,
+  }
+  asInternal(chart).scheduleDraw?.()
+}
+
 /** Reset vertical price zoom/pan; keep current time (X) zoom if possible. */
 export function resetPriceOnly(chart: IChartApi): void {
   const logical = chart.timeScale().getVisibleLogicalRange()
