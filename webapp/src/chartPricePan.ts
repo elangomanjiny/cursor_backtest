@@ -39,6 +39,60 @@ function mainPaneApi(chart: IChartApi): IPaneApi | null {
   }
 }
 
+/** Width of the right price scale, used to keep overlays and gestures off the labels. */
+export function priceScaleGutter(chart: IChartApi, hostWidth?: number, hostEl?: HTMLElement | null): number {
+  const MIN = 108
+  const read = (fn: () => number | undefined): number | null => {
+    try {
+      const w = fn()
+      if (typeof w === 'number' && Number.isFinite(w) && w >= 8) return Math.ceil(w)
+    } catch {
+      /* ignore */
+    }
+    return null
+  }
+  const plotW = read(() => (chart.timeScale() as { width?: () => number }).width?.())
+  const full = hostWidth != null && hostWidth > 40 ? hostWidth : null
+  let gutter = MIN
+  if (plotW != null && full != null && full > plotW + 24) {
+    const raw = full - plotW
+    // Ignore huge gaps — they mean timeScale.width() is stale after a layout change.
+    if (raw <= 160) gutter = Math.max(MIN, raw)
+  } else {
+    const scaleW =
+      read(() => (chart.priceScale('right') as { width?: () => number }).width?.()) ??
+      read(() => {
+        const pane = mainPaneApi(chart)
+        return (pane?.priceScale('right') as { width?: () => number } | undefined)?.width?.()
+      })
+    gutter = Math.max(MIN, scaleW ?? MIN)
+  }
+  if (hostEl) {
+    const tds = hostEl.querySelectorAll('td')
+    for (const td of tds) {
+      const node = td as HTMLElement
+      const cw = node.offsetWidth
+      const ch = node.offsetHeight
+      if (cw >= 48 && cw <= 160 && ch > 60) gutter = Math.max(gutter, Math.ceil(cw))
+    }
+  }
+  return Math.min(160, Math.max(MIN, gutter))
+}
+
+/** Keep series paint inside the plot cell so candles cannot cover the right price scale. */
+export function clipPlotCanvases(host: HTMLElement, chart: IChartApi): void {
+  const gutter = priceScaleGutter(chart, host.clientWidth, host)
+  host.style.setProperty('--price-gutter', `${gutter}px`)
+  host.parentElement?.style.setProperty('--price-gutter', `${gutter}px`)
+  const tds = [...host.querySelectorAll('td')] as HTMLElement[]
+  for (const td of tds) {
+    const w = td.offsetWidth
+    const h = td.offsetHeight
+    const isPriceScale = w >= 48 && w <= 180 && h > 60
+    td.style.overflow = isPriceScale ? 'visible' : 'hidden'
+  }
+}
+
 function rightScale(pane: PaneInternal): PaneScale | null {
   try {
     return pane.priceScale('right')
@@ -162,6 +216,23 @@ export function resetPriceOnly(chart: IChartApi): void {
  * Shift the visible price window by pixel delta (drag down → higher prices).
  * Freezes Y on first vertical pan so zoomed candles can move.
  */
+/** Stretch/compress the price window (axis drag). Mouse down zooms in. */
+export function zoomPriceByPixels(chart: IChartApi, dy: number, plotHeight: number): boolean {
+  if (!dy || plotHeight <= 0) return false
+  const scale = freezePriceScale(chart)
+  if (!scale?.frozenRange) return false
+  const fr = scale.frozenRange
+  const span = fr.max - fr.min
+  if (!(span > 0)) return false
+  const factor = Math.exp((-dy / plotHeight) * 2.2)
+  const mid = (fr.max + fr.min) / 2
+  const half = Math.max(span * 0.02, (span * factor) / 2, 1e-8)
+  fr.min = mid - half
+  fr.max = mid + half
+  asInternal(chart).scheduleDraw?.()
+  return true
+}
+
 export function panPriceByPixels(chart: IChartApi, dy: number, plotHeight: number): boolean {
   if (!dy || plotHeight <= 0) return false
   const scale = freezePriceScale(chart)
@@ -197,28 +268,37 @@ function mainPanePlotHeight(chart: IChartApi, canvasHeight: number): number {
   return Math.max(1, canvasHeight * 0.55)
 }
 
+function inPriceGutter(chart: IChartApi, x: number, y: number, canvasW: number, canvasH: number): boolean {
+  const gutter = priceScaleGutter(chart, canvasW)
+  if (x < canvasW - gutter) return false
+  if (y > canvasH - 28) return false
+  try {
+    const size = mainPaneApi(chart)?.getSize()
+    if (size) return y >= size.top && y <= size.top + size.height - 2
+  } catch {
+    /* ignore */
+  }
+  return y < canvasH * 0.55
+}
+
 function inMainPanePlot(chart: IChartApi, x: number, y: number, canvasW: number, canvasH: number): boolean {
-  // Leave right price gutter + bottom time gutter to sschart.
-  if (x > canvasW - 64) return false
+  const gutter = priceScaleGutter(chart, canvasW)
+  if (x >= canvasW - gutter) return false
   if (y > canvasH - 28) return false
   try {
     const size = mainPaneApi(chart)?.getSize()
     if (size) {
-      return y >= size.top && y <= size.top + size.height - 2 && x < canvasW - 64
+      return y >= size.top && y <= size.top + size.height - 2 && x < canvasW - gutter
     }
   } catch {
     /* ignore */
   }
-  // Fallback: upper ~55% of host is price pane.
   return y < canvasH * 0.55
 }
 
 /**
- * Enable click-drag on the candle area to pan price vertically
- * (sschart only pans time on pane drag; price-axis drag only zooms).
- *
- * - After Y zoom / frozen scale: vertical-dominant drag pans price.
- * - Always: Shift+drag pans price (and suppresses time pan).
+ * Price-axis drag stretches Y. Plot drag (after stretch, or vertical / Shift)
+ * pans candles up and down.
  */
 export function attachCandlePricePan(chart: IChartApi, host: HTMLElement): () => void {
   const canvas = host.querySelector('canvas')
@@ -228,7 +308,8 @@ export function attachCandlePricePan(chart: IChartApi, host: HTMLElement): () =>
   let lastX: number | null = null
   let tracking = false
   let armed = false
-  let forceY = false // Shift held at pointerdown
+  let mode: 'plot' | 'axis' | null = null
+  let forceY = false
   let savedScroll:
     | boolean
     | { pressedMouseMove?: boolean; mouseWheel?: boolean }
@@ -265,19 +346,20 @@ export function attachCandlePricePan(chart: IChartApi, host: HTMLElement): () =>
     const rect = canvas.getBoundingClientRect()
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
-    if (!inMainPanePlot(chart, x, y, rect.width, rect.height)) return
+    const axis = inPriceGutter(chart, x, y, rect.width, rect.height)
+    const plot = inMainPanePlot(chart, x, y, rect.width, rect.height)
+    if (!axis && !plot) return
 
     tracking = true
-    armed = false
+    armed = axis
+    mode = axis ? 'axis' : 'plot'
     forceY = e.shiftKey
     lastY = e.clientY
     lastX = e.clientX
 
-    if (forceY || isPriceZoomed(chart)) {
-      // Claim the gesture early so sschart does not start a time-pan.
+    if (axis || forceY || isPriceZoomed(chart)) {
       disableTimePan()
-      if (forceY) {
-        armed = true
+      if (axis || forceY) {
         e.stopImmediatePropagation()
         e.preventDefault()
       }
@@ -294,7 +376,6 @@ export function attachCandlePricePan(chart: IChartApi, host: HTMLElement): () =>
     if (!armed) {
       if (Math.abs(dy) < 2 && Math.abs(dx) < 2) return
       const zoomed = isPriceZoomed(chart) || forceY || e.shiftKey
-      // After Y zoom prefer vertical pan; otherwise require clear vertical dominance.
       if (!zoomed && Math.abs(dy) <= Math.abs(dx) * 1.25) return
       if (zoomed && Math.abs(dy) < Math.abs(dx) * 0.55 && !forceY && !e.shiftKey) return
       armed = true
@@ -304,10 +385,11 @@ export function attachCandlePricePan(chart: IChartApi, host: HTMLElement): () =>
     if (Math.abs(dy) < 0.35) return
     const rect = canvas.getBoundingClientRect()
     const plotH = mainPanePlotHeight(chart, rect.height)
-    if (panPriceByPixels(chart, dy, plotH)) {
+    const ok = mode === 'axis' ? zoomPriceByPixels(chart, dy, plotH) : panPriceByPixels(chart, dy, plotH)
+    if (ok) {
       e.stopImmediatePropagation()
       e.preventDefault()
-      canvas.style.cursor = 'ns-resize'
+      canvas.style.cursor = mode === 'axis' ? 'ns-resize' : 'move'
     }
   }
 
@@ -315,17 +397,31 @@ export function attachCandlePricePan(chart: IChartApi, host: HTMLElement): () =>
     tracking = false
     armed = false
     forceY = false
+    mode = null
     lastY = null
     lastX = null
+    canvas.style.cursor = ''
     restoreScroll()
   }
 
-  // Capture phase so we can stop sschart's time-pan once we own the Y gesture.
+  const onWheel = (e: WheelEvent) => {
+    const rect = canvas.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    const y = e.clientY - rect.top
+    if (!inPriceGutter(chart, x, y, rect.width, rect.height)) return
+    const plotH = mainPanePlotHeight(chart, rect.height)
+    if (zoomPriceByPixels(chart, -e.deltaY, plotH)) {
+      e.preventDefault()
+      e.stopImmediatePropagation()
+    }
+  }
+
   const opts: AddEventListenerOptions = { capture: true }
   canvas.addEventListener('pointerdown', onDown, opts)
   canvas.addEventListener('pointermove', onMove, opts)
   canvas.addEventListener('pointerup', onUp, opts)
   canvas.addEventListener('pointercancel', onUp, opts)
+  canvas.addEventListener('wheel', onWheel, { capture: true, passive: false })
   window.addEventListener('pointerup', onUp)
 
   return () => {
@@ -334,6 +430,7 @@ export function attachCandlePricePan(chart: IChartApi, host: HTMLElement): () =>
     canvas.removeEventListener('pointermove', onMove, opts)
     canvas.removeEventListener('pointerup', onUp, opts)
     canvas.removeEventListener('pointercancel', onUp, opts)
+    canvas.removeEventListener('wheel', onWheel, opts)
     window.removeEventListener('pointerup', onUp)
   }
 }

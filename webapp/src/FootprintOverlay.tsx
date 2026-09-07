@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type RefObject } from 'react'
 import type { IChartApi } from '@stocksharp/chart'
+import { clipPlotCanvases, priceScaleGutter } from './chartPricePan'
 import {
   fetchAnchoredProfile,
   fetchFlowStats,
@@ -55,6 +56,7 @@ type Props = {
   showVp?: boolean
   vpMode?: FootprintMode
   vpBinMult?: number
+  vazBinMult?: number
   vpT0?: number | null
   vpT1?: number | null
   showIdhl?: boolean
@@ -80,6 +82,7 @@ type Props = {
   mode: FootprintMode
   binMult: number
   barTimes: number[]
+  onVazBars?: (bars: FootprintBar[]) => void
 }
 
 function volOf(bar: FootprintLevel, unit: Unit, side: 'bid' | 'ask') {
@@ -723,26 +726,31 @@ function drawAvpVa(
   vah: number | null | undefined,
   poc: number | null | undefined,
   val: number | null | undefined,
+  deltaPoc?: number | null,
 ) {
-  const marks: { p: number; c: string; lab: string }[] = []
+  const marks: { p: number; c: string; lab: string; dy?: number }[] = []
   if (vah != null) marks.push({ p: vah, c: '#f0b429', lab: 'VAH' })
   if (poc != null) marks.push({ p: poc, c: '#ffe08a', lab: 'POC' })
   if (val != null) marks.push({ p: val, c: '#58a6ff', lab: 'VAL' })
+  if (deltaPoc != null && Number.isFinite(deltaPoc)) {
+    const sameAsVol = poc != null && Math.abs(deltaPoc - poc) < 1e-9
+    marks.push({ p: deltaPoc, c: '#ff7b72', lab: 'ΔPOC', dy: sameAsVol ? 11 : 0 })
+  }
   ctx.save()
   ctx.setLineDash([4, 3])
   ctx.font = '10px ui-sans-serif, system-ui, sans-serif'
-  ctx.textAlign = 'left'
+  ctx.textAlign = 'right'
   for (const m of marks) {
     const y = series.priceToCoordinate(m.p)
     if (y == null) continue
     ctx.strokeStyle = m.c
     ctx.lineWidth = 1.2
     ctx.beginPath()
-    ctx.moveTo(x0 - 6, y)
-    ctx.lineTo(x0 + boxW + 8, y)
+    ctx.moveTo(x0, y)
+    ctx.lineTo(x0 + boxW, y)
     ctx.stroke()
     ctx.fillStyle = m.c
-    ctx.fillText(m.lab, x0 + boxW + 10, y)
+    ctx.fillText(m.lab, x0 - 6, y + (m.dy ?? 0))
   }
   ctx.restore()
 }
@@ -793,7 +801,7 @@ function drawCompositeVp(
     }
   }
   const boxW = 84
-  const xRight = w - 52
+  const xRight = w - 4
   const x0 = xRight - boxW
   ctx.fillStyle = 'rgba(13,17,23,0.45)'
   ctx.fillRect(x0 - 4, 0, boxW + 8, h)
@@ -837,9 +845,10 @@ function drawCompositeVp(
       hbar(ctx, mid - volW, top, volW, cellH, COL.vol)
       hbar(ctx, mid, top, dW, cellH, delta >= 0 ? COL.pos : COL.neg)
       if (Math.abs(p - volPoc) < tick / 2) pocStroke(ctx, mid - volW, top, volW, cellH)
+      if (Math.abs(p - deltaPoc) < tick / 2) pocStroke(ctx, mid, top, dW, cellH)
     }
   }
-  if (va) drawAvpVa(ctx, series, x0, boxW, va.vah, va.poc, va.val)
+  if (va) drawAvpVa(ctx, series, x0, boxW, va.vah, va.poc, va.val, deltaPoc)
 }
 
 function draw(
@@ -848,6 +857,7 @@ function draw(
   series: CandleSeries,
   bars: FootprintBar[],
   tick: number,
+  avpTick: number,
   tfSec: number,
   unit: Unit,
   mode: FootprintMode,
@@ -869,9 +879,34 @@ function draw(
 ) {
   const pane = chart.panes()[0]
   const size = pane?.getSize()
-  const w = canvas.clientWidth
+  const host = canvas.parentElement
+  const fullW = host?.clientWidth ?? canvas.clientWidth
+  const gutter = priceScaleGutter(chart, fullW, host)
+  let plotW: number | null = null
+  try {
+    const tw = (chart.timeScale() as { width?: () => number }).width?.()
+    if (typeof tw === 'number' && Number.isFinite(tw) && tw > 40) plotW = Math.floor(tw)
+  } catch {
+    /* ignore */
+  }
+  const w =
+    plotW != null && plotW < fullW - 40 && fullW - plotW <= 200
+      ? plotW
+      : Math.max(1, fullW - gutter)
+  const scaleGap = Math.max(gutter, fullW - w)
+  host?.style.setProperty('--price-gutter', `${scaleGap}px`)
+  const chartHost =
+    host instanceof HTMLElement
+      ? host.classList.contains('chart-host')
+        ? host
+        : (host.querySelector('.chart-host') as HTMLElement | null)
+      : null
+  if (chartHost) clipPlotCanvases(chartHost, chart)
   const h = size?.height ?? canvas.clientHeight
   const dpr = window.devicePixelRatio || 1
+  canvas.style.left = '0'
+  canvas.style.right = `${scaleGap}px`
+  canvas.style.width = `${w}px`
   canvas.width = Math.max(1, Math.floor(w * dpr))
   canvas.height = Math.max(1, Math.floor(h * dpr))
   canvas.style.height = `${h}px`
@@ -880,6 +915,9 @@ function draw(
   if (!ctx) return
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   ctx.clearRect(0, 0, w, h)
+  ctx.beginPath()
+  ctx.rect(0, 0, w, h)
+  ctx.clip()
   ctx.font = '10px ui-sans-serif, system-ui, sans-serif'
   ctx.textBaseline = 'middle'
 
@@ -898,7 +936,7 @@ function draw(
         unit === 'quote'
           ? { val: avp.val, poc: avp.poc, vah: avp.vah }
           : { val: avp.valBase, poc: avp.pocBase, vah: avp.vahBase }
-      drawCompositeVp(ctx, series, avp.levels, tick, unit, vpMode, w, h, va)
+      drawCompositeVp(ctx, series, avp.levels, avpTick, unit, vpMode, w, h, va)
     }
   }
   if (sigs && ofBars?.length) {
@@ -1017,6 +1055,7 @@ export function FootprintOverlay({
   showVp = false,
   vpMode = 'profile',
   vpBinMult,
+  vazBinMult,
   vpT0 = null,
   vpT1 = null,
   showIdhl = false,
@@ -1042,14 +1081,21 @@ export function FootprintOverlay({
   mode,
   binMult,
   barTimes,
+  onVazBars,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [hint, setHint] = useState<string | null>(null)
   const barsRef = useRef<FootprintBar[]>([])
   const vazRef = useRef<FootprintBar[]>([])
   const flowRef = useRef<FootprintBar[]>([])
+  const onVazBarsRef = useRef(onVazBars)
+  onVazBarsRef.current = onVazBars
   const avpRef = useRef<AnchoredProfile | null>(null)
-  const tickRef = useRef(0.01)
+  const fpTickRef = useRef(0.01)
+  const avpTickRef = useRef(0.01)
+  const fpKeyRef = useRef('')
+  const avpKeyRef = useRef('')
+  const vazKeyRef = useRef('')
   const modeRef = useRef(mode)
   const vpModeRef = useRef(vpMode)
   const unitRef = useRef(unit)
@@ -1076,6 +1122,7 @@ export function FootprintOverlay({
   vpT1Ref.current = vpT1
   const binSafe = Math.max(1, Math.round(Number(binMult) || 1))
   const vpBinSafe = Math.max(1, Math.round(Number(vpBinMult ?? binMult) || 1))
+  const vazBinSafe = Math.max(1, Math.round(Number(vazBinMult ?? binMult) || 1))
   const wantFpData = show || showImb || showUa
   const sigs: OfSigFlags = {
     imb: showImb,
@@ -1109,6 +1156,10 @@ export function FootprintOverlay({
       vazRef.current = []
       flowRef.current = []
       avpRef.current = null
+      fpKeyRef.current = ''
+      avpKeyRef.current = ''
+      vazKeyRef.current = ''
+      onVazBarsRef.current?.([])
       const c = canvasRef.current?.getContext('2d')
       if (c && canvasRef.current) {
         c.setTransform(1, 0, 0, 1, 0, 0)
@@ -1127,12 +1178,14 @@ export function FootprintOverlay({
 
     const paint = () => {
       if (!canvasRef.current || !chartRef.current || !seriesRef.current) return
+      onVazBarsRef.current?.(showVazRef.current ? vazRef.current : [])
       draw(
         canvasRef.current,
         chartRef.current,
         seriesRef.current,
         barsRef.current,
-        tickRef.current,
+        fpTickRef.current,
+        avpTickRef.current,
         Math.max(1, tf) * 60,
         unitRef.current,
         modeRef.current,
@@ -1182,93 +1235,109 @@ export function FootprintOverlay({
       })
     }
 
+    const avpWindow = (win: { t0: number; t1: number }) => {
+      const a = vpT0Ref.current
+      const b = vpT1Ref.current
+      let t0 = a != null && Number.isFinite(a) ? a : win.t0
+      let t1 = b != null && Number.isFinite(b) ? b + tf * 60 : win.t1
+      if (t1 <= t0) t1 = t0 + tf * 60
+      return { t0, t1 }
+    }
+
     const load = () => {
       const win = visibleWindow()
       if (!win) return
       const hints: string[] = []
       const fpZoomed =
         win.barPx >= FOOTPRINT_MIN_BAR_PX && win.nBars <= FOOTPRINT_MAX_BARS
-      const reuseVazFromFp = wantFpData && showVazRef.current && fpZoomed
+      const reuseVazFromFp = wantFpData && showVazRef.current && fpZoomed && vazBinSafe === binSafe
 
       if (wantFpData) {
         if (!fpZoomed) {
           fpAc.current.abort()
           fpAc.current = new AbortController()
           barsRef.current = []
+          fpKeyRef.current = `zoom:${Math.round(win.nBars)}`
           hints.push('Zoom in for footprint')
           applyFpCandles(false)
         } else {
-          hints.push('Loading footprint…')
-          fpAc.current.abort()
-          fpAc.current = new AbortController()
-          void fetchFootprint(
-            { symbol, tf, t0: win.t0, t1: win.t1, bin_mult: binSafe },
-            fpAc.current.signal,
-          )
-            .then((r) => {
-              if (aborted) return
-              if (!r.ok || r.reason === 'zoom_in') {
-                barsRef.current = []
-                applyFpCandles(false)
-                setHint(showVazRef.current && vazRef.current.length ? null : 'Zoom in for footprint')
+          const fpKey = `${symbol}:${tf}:${binSafe}:${win.t0}:${win.t1}`
+          if (fpKey !== fpKeyRef.current || !barsRef.current.length) {
+            fpKeyRef.current = fpKey
+            hints.push('Loading footprint…')
+            fpAc.current.abort()
+            fpAc.current = new AbortController()
+            void fetchFootprint(
+              { symbol, tf, t0: win.t0, t1: win.t1, bin_mult: binSafe },
+              fpAc.current.signal,
+            )
+              .then((r) => {
+                if (aborted) return
+                if (!r.ok || r.reason === 'zoom_in') {
+                  barsRef.current = []
+                  applyFpCandles(false)
+                  setHint(showVazRef.current && vazRef.current.length ? null : 'Zoom in for footprint')
+                  paint()
+                  return
+                }
+                barsRef.current = r.bars || []
+                if (showVazRef.current) vazRef.current = barsRef.current
+                fpTickRef.current = Number(r.tick_size || fpTickRef.current || 0.01)
+                applyFpCandles(true)
+                setHint(barsRef.current.length ? null : 'No ticks in view')
                 paint()
-                return
-              }
-              barsRef.current = r.bars || []
-              if (showVazRef.current) vazRef.current = barsRef.current
-              tickRef.current = Number(r.tick_size || tickRef.current || 0.01)
-              applyFpCandles(true)
-              setHint(barsRef.current.length ? null : 'No ticks in view')
-              paint()
-            })
-            .catch((e) => {
-              if (aborted || (e instanceof DOMException && e.name === 'AbortError')) return
-              barsRef.current = []
-              setHint(String(e.message || e))
-              paint()
-            })
+              })
+              .catch((e) => {
+                if (aborted || (e instanceof DOMException && e.name === 'AbortError')) return
+                barsRef.current = []
+                setHint(String(e.message || e))
+                paint()
+              })
+          }
         }
       } else {
         fpAc.current.abort()
         barsRef.current = []
+        fpKeyRef.current = ''
         applyFpCandles(false)
       }
 
       if (showVpRef.current) {
-        const a = vpT0Ref.current
-        const b = vpT1Ref.current
-        let t0 = a != null && Number.isFinite(a) ? a : win.t0
-        let t1 = b != null && Number.isFinite(b) ? b + tf * 60 : win.t1
-        if (t1 <= t0) t1 = t0 + tf * 60
-        vpAc.current.abort()
-        vpAc.current = new AbortController()
-        if (!showRef.current) hints.push('Loading AVP…')
-        void fetchAnchoredProfile(
-          { symbol, tf, t0, t1, bin_mult: vpBinSafe },
-          vpAc.current.signal,
-        )
-          .then((r) => {
-            if (aborted) return
-            if (!r.ok) {
-              avpRef.current = null
-              if (!showRef.current) setHint('AVP range failed')
+        const { t0, t1 } = avpWindow(win)
+        const avpKey = `${symbol}:${tf}:${vpBinSafe}:${t0}:${t1}`
+        if (avpKey !== avpKeyRef.current || !avpRef.current) {
+          avpKeyRef.current = avpKey
+          vpAc.current.abort()
+          vpAc.current = new AbortController()
+          if (!showRef.current) hints.push('Loading AVP…')
+          void fetchAnchoredProfile(
+            { symbol, tf, t0, t1, bin_mult: vpBinSafe },
+            vpAc.current.signal,
+          )
+            .then((r) => {
+              if (aborted) return
+              if (!r.ok) {
+                avpRef.current = null
+                if (!showRef.current) setHint('AVP range failed')
+                paint()
+                return
+              }
+              avpRef.current = r
+              avpTickRef.current = Number(r.tick_size || avpTickRef.current || 0.01)
+              if (!showRef.current) setHint(r.levels?.length ? null : 'No ticks in AVP range')
               paint()
-              return
-            }
-            avpRef.current = r
-            tickRef.current = Number(r.tick_size || tickRef.current || 0.01)
-            if (!showRef.current) setHint(r.levels?.length ? null : 'No ticks in AVP range')
-            paint()
-          })
-          .catch((e) => {
-            if (aborted || (e instanceof DOMException && e.name === 'AbortError')) return
-            avpRef.current = null
-            if (!showRef.current) setHint(String(e.message || e))
-            paint()
-          })
+            })
+            .catch((e) => {
+              if (aborted || (e instanceof DOMException && e.name === 'AbortError')) return
+              avpRef.current = null
+              if (!showRef.current) setHint(String(e.message || e))
+              paint()
+            })
+        }
       } else {
         vpAc.current.abort()
         avpRef.current = null
+        avpKeyRef.current = ''
       }
 
       if (showVazRef.current) {
@@ -1276,39 +1345,47 @@ export function FootprintOverlay({
           vazAc.current.abort()
           vazAc.current = new AbortController()
           vazRef.current = []
+          vazKeyRef.current = `zoom:${Math.round(win.nBars)}`
           if (!showRef.current) hints.push('Zoom in for VAZ')
         } else if (reuseVazFromFp) {
           vazAc.current.abort()
+          vazKeyRef.current = `${symbol}:${tf}:${vazBinSafe}:${win.t0}:${win.t1}:fp`
+          if (barsRef.current.length) vazRef.current = barsRef.current
         } else {
-          vazAc.current.abort()
-          vazAc.current = new AbortController()
-          void fetchValueArea(
-            { symbol, tf, t0: win.t0, t1: win.t1, bin_mult: binSafe },
-            vazAc.current.signal,
-          )
-            .then((r) => {
-              if (aborted) return
-              if (!r.ok || r.reason === 'zoom_in') {
-                vazRef.current = []
-                if (!showRef.current) setHint('Zoom in for VAZ')
+          const vazKey = `${symbol}:${tf}:${vazBinSafe}:${win.t0}:${win.t1}`
+          if (vazKey !== vazKeyRef.current || !vazRef.current.length) {
+            vazKeyRef.current = vazKey
+            vazAc.current.abort()
+            vazAc.current = new AbortController()
+            void fetchValueArea(
+              { symbol, tf, t0: win.t0, t1: win.t1, bin_mult: vazBinSafe },
+              vazAc.current.signal,
+            )
+              .then((r) => {
+                if (aborted) return
+                if (!r.ok || r.reason === 'zoom_in') {
+                  vazRef.current = []
+                  if (!showRef.current) setHint('Zoom in for VAZ')
+                  paint()
+                  return
+                }
+                vazRef.current = r.bars || []
+                fpTickRef.current = Number(r.tick_size || fpTickRef.current || 0.01)
+                if (!showRef.current) setHint(vazRef.current.length ? null : 'No ticks in view')
                 paint()
-                return
-              }
-              vazRef.current = r.bars || []
-              tickRef.current = Number(r.tick_size || tickRef.current || 0.01)
-              if (!showRef.current) setHint(vazRef.current.length ? null : 'No ticks in view')
-              paint()
-            })
-            .catch((e) => {
-              if (aborted || (e instanceof DOMException && e.name === 'AbortError')) return
-              vazRef.current = []
-              if (!showRef.current) setHint(String(e.message || e))
-              paint()
-            })
+              })
+              .catch((e) => {
+                if (aborted || (e instanceof DOMException && e.name === 'AbortError')) return
+                vazRef.current = []
+                if (!showRef.current) setHint(String(e.message || e))
+                paint()
+              })
+          }
         }
       } else {
         vazAc.current.abort()
         vazRef.current = []
+        vazKeyRef.current = ''
       }
 
       const want = showCotRef.current || showMinMaxRef.current
@@ -1370,6 +1447,9 @@ export function FootprintOverlay({
     schedule()
     chart.timeScale().subscribeVisibleLogicalRangeChange(schedule)
     window.addEventListener('resize', schedule)
+    const wrap = wrapRef.current
+    const ro = wrap ? new ResizeObserver(() => paint()) : null
+    if (wrap && ro) ro.observe(wrap)
     return () => {
       aborted = true
       fpAc.current.abort()
@@ -1379,8 +1459,9 @@ export function FootprintOverlay({
       if (timer != null) window.clearTimeout(timer)
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(schedule)
       window.removeEventListener('resize', schedule)
+      ro?.disconnect()
     }
-  }, [active, show, showVaz, showCot, showMinMax, showVp, showImb, showUa, symbol, tf, binSafe, vpBinSafe, vpT0, vpT1, chartEpoch, chartRef, seriesRef, wrapRef, barTimes])
+  }, [active, show, showVaz, showCot, showMinMax, showVp, showImb, showUa, symbol, tf, binSafe, vpBinSafe, vazBinSafe, vpT0, vpT1, chartEpoch, chartRef, seriesRef, wrapRef, barTimes])
 
   useEffect(() => {
     if (!active) return
@@ -1393,7 +1474,8 @@ export function FootprintOverlay({
       chart,
       series,
       barsRef.current,
-      tickRef.current,
+      fpTickRef.current,
+      avpTickRef.current,
       Math.max(1, tf) * 60,
       unit,
       mode,

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   CandlestickSeries,
   createChart,
@@ -11,7 +12,7 @@ import {
   type IPaneApi,
 } from '@stocksharp/chart'
 import { fetchFlowStats, type FootprintBar, type OrderflowBar } from '../api'
-import { attachCandlePricePan, fitPriceToCandles } from '../chartPricePan'
+import { attachCandlePricePan, clipPlotCanvases, fitPriceToCandles } from '../chartPricePan'
 import { computeVwap, parseBandMultipliers, type VwapSession, type VwapSource } from '../computeVwap'
 import { FootprintOverlay, type CandleSeries, type FootprintMode } from '../FootprintOverlay'
 import { fmt2 } from '../format'
@@ -24,6 +25,9 @@ type Props = {
   symbol: string
   tf: number
   visible?: boolean
+  studiesTabHost?: HTMLElement | null
+  studiesDrawerHost?: HTMLElement | null
+  onStudiesChange?: (open: boolean, pinned: boolean) => void
 }
 
 const VWAP_COLOR = '#26a69a'
@@ -198,6 +202,7 @@ function sessionCvd(bars: OrderflowBar[], unit: Unit): HistogramData[] {
 
 type Tip = {
   time: string
+  ts: number
   open: number
   high: number
   low: number
@@ -207,13 +212,64 @@ type Tip = {
   delta_pct: number
   cvd?: number
   vwap?: number
+  vwapBands?: { mult: number; up: number; dn: number }[]
+  ma?: number
+  vaz?: { vah: number; poc: number; val: number }
+  idh?: number
+  idl?: number
   minD?: number
   maxD?: number
   ch?: number
   cl?: number
 }
 
-export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
+function sessionDay(ts: number): string {
+  return new Date(ts * 1000).toISOString().slice(0, 10)
+}
+
+function lookupVazBar(map: Map<number, FootprintBar>, t: number, tfSec: number): FootprintBar | undefined {
+  const hit = map.get(t) ?? map.get(Math.floor(t)) ?? map.get(Math.round(t))
+  if (hit) return hit
+  const slack = Math.max(1, tfSec)
+  for (const [k, b] of map) {
+    if (Math.abs(Number(k) - t) <= slack) return b
+  }
+  return undefined
+}
+
+function vazFromFlow(f: FootprintBar | undefined, unit: Unit): Tip['vaz'] {
+  if (!f) return undefined
+  const val = unit === 'quote' ? f.val : (f.valBase ?? f.val)
+  const vah = unit === 'quote' ? f.vah : (f.vahBase ?? f.vah)
+  const poc = unit === 'quote' ? f.poc : (f.pocBase ?? f.poc)
+  if (val == null || vah == null || !Number.isFinite(val) || !Number.isFinite(vah)) return undefined
+  const lo = Math.min(Number(val), Number(vah))
+  const hi = Math.max(Number(val), Number(vah))
+  const mid = poc != null && Number.isFinite(Number(poc)) ? Number(poc) : (lo + hi) / 2
+  return { val: lo, poc: mid, vah: hi }
+}
+
+function vwapBandList(
+  vp: { bands: Record<string, number> } | undefined,
+  bands: number[],
+): Tip['vwapBands'] {
+  if (!vp) return undefined
+  return bands.map((mult) => ({
+    mult,
+    up: vp.bands[`up${mult}`],
+    dn: vp.bands[`dn${mult}`],
+  }))
+}
+
+export function OrderflowChart({
+  bars,
+  symbol,
+  tf,
+  visible = true,
+  studiesTabHost = null,
+  studiesDrawerHost = null,
+  onStudiesChange,
+}: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
   const navRef = useRef<HTMLDivElement>(null)
@@ -233,7 +289,9 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
   const [fpMode, setFpMode] = useState<FootprintMode>('profile')
   const [fpBinMult, setFpBinMult] = useState(1)
   const [showFootprint, setShowFootprint] = useState(true)
-  const [showVaz, setShowVaz] = useState(true)
+  const [showVaz, setShowVaz] = useState(false)
+  const [vazBinMode, setVazBinMode] = useState<'default' | 'custom'>('default')
+  const [vazBinMult, setVazBinMult] = useState(1)
   const [showVwap, setShowVwap] = useState(false)
   const [showMa, setShowMa] = useState(false)
   const [maPeriod, setMaPeriod] = useState(21)
@@ -241,7 +299,7 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
   const [maSrc] = useState<MaSrc>('close')
   const [showVp, setShowVp] = useState(false)
   const [showIdhl, setShowIdhl] = useState(true)
-  const [showBarStats, setShowBarStats] = useState(true)
+  const [showBarStats, setShowBarStats] = useState(false)
   const [barStatOn, setBarStatOn] = useState({ ch: true, cl: true, min: true, max: true })
   const [showImb, setShowImb] = useState(false)
   const [showDiv, setShowDiv] = useState(false)
@@ -259,27 +317,30 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
   const [bigMult, setBigMult] = useState(1)
   const [vpMode, setVpMode] = useState<FootprintMode>('profile')
   const [vpBinMult, setVpBinMult] = useState(1)
+  const [vpBinMode, setVpBinMode] = useState<'default' | 'custom'>('default')
   const [vpT0, setVpT0] = useState<number | null>(null)
   const [vpT1, setVpT1] = useState<number | null>(null)
-  const [showLegend, setShowLegend] = useState(false)
-  const [showHoverTip, setShowHoverTip] = useState(true)
+  const [tipOpen, setTipOpen] = useState(true)
   const [paneOn, setPaneOn] = useState<Record<HistKey, boolean>>({
-    vol: true,
-    delta: true,
-    dp: true,
+    vol: false,
+    delta: false,
+    dp: false,
     cvd: false,
   })
   const paneOnRef = useRef(paneOn)
   paneOnRef.current = paneOn
-  const [rightOpen, setRightOpen] = useState(false)
-  const [rightPinned, setRightPinned] = useState(false)
-  const skipRightHoverRef = useRef(false)
+  const [studiesOpen, setStudiesOpen] = useState(false)
+  const [studiesPinned, setStudiesPinned] = useState(false)
+  const onStudiesChangeRef = useRef(onStudiesChange)
+  onStudiesChangeRef.current = onStudiesChange
   const [vwapSource] = useState<VwapSource>('hlc3')
   const [vwapSession] = useState<VwapSession>('binance')
   const [vwapBandsRaw, setVwapBandsRaw] = useState('1,2')
   const [dpThr, setDpThr] = useState(50)
   const [tip, setTip] = useState<Tip | null>(null)
   const [flow, setFlow] = useState<FootprintBar[]>([])
+  const [vazBars, setVazBars] = useState<FootprintBar[]>([])
+  const vazSigRef = useRef('')
   const [stripCells, setStripCells] = useState<
     { time: number; x: number; w: number; maxD?: number; minD?: number; ch?: number; cl?: number }[]
   >([])
@@ -290,7 +351,10 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
   const flowTimer = useRef<number | null>(null)
 
   const binSafe = Math.max(1, Math.round(fpBinMult) || 1)
-  const vpBinSafe = Math.max(1, Math.round(vpBinMult) || 1)
+  const vpBinSafe =
+    vpBinMode === 'custom' ? Math.max(1, Math.round(vpBinMult) || 1) : binSafe
+  const vazBinSafe =
+    vazBinMode === 'custom' ? Math.max(1, Math.round(vazBinMult) || 1) : binSafe
   const unitLabel = unit === 'quote' ? 'USDT' : 'BASE'
   const kind = priceKind
   const showVpRef = useRef(showVp)
@@ -332,6 +396,15 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
     if (!showVwap) return []
     return computeVwap(asBarRows, unit, vwapSettings)
   }, [asBarRows, showVwap, unit, vwapSettings])
+  const maPts = useMemo(
+    () => (showMa ? maSeries(bars, maPeriod, maType, maSrc) : []),
+    [showMa, bars, maPeriod, maType, maSrc],
+  )
+  const maByTime = useMemo(() => {
+    const m = new Map<number, number>()
+    for (const p of maPts) m.set(p.time, p.value)
+    return m
+  }, [maPts])
   const barTimes = useMemo(() => bars.map((b) => b.time), [bars])
   const guides = useMemo(
     () => bars.map((b) => ({ time: b.time, high: b.high, low: b.low })),
@@ -368,13 +441,63 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
     for (const f of flow) m.set(f.time, f)
     return m
   }, [flow])
+  const vazByTime = useMemo(() => {
+    const m = new Map<number, FootprintBar>()
+    for (const b of vazBars) m.set(Number(b.time), b)
+    return m
+  }, [vazBars])
   const cvdByTime = useMemo(() => {
     const m = new Map<number, number>()
     for (const p of sessionCvd(bars, unit)) m.set(Number(p.time), Number(p.value))
     return m
   }, [bars, unit])
-  const hoverRef = useRef({ byTime, flowByTime, cvdByTime, unit, vwapSeries, showVwap })
-  hoverRef.current = { byTime, flowByTime, cvdByTime, unit, vwapSeries, showVwap }
+  const idhlByTime = useMemo(() => {
+    const m = new Map<number, { idh: number; idl: number }>()
+    let day = ''
+    let hi = -Infinity
+    let lo = Infinity
+    for (const b of bars) {
+      const d = sessionDay(b.time)
+      if (d !== day) {
+        day = d
+        hi = b.high
+        lo = b.low
+      } else {
+        if (b.high > hi) hi = b.high
+        if (b.low < lo) lo = b.low
+      }
+      m.set(b.time, { idh: hi, idl: lo })
+    }
+    return m
+  }, [bars])
+  const hoverRef = useRef({
+    byTime,
+    flowByTime,
+    cvdByTime,
+    idhlByTime,
+    unit,
+    vwapSeries,
+    showVwap,
+    vwapBandMults: vwapSettings.bands,
+    maByTime,
+    showMa,
+    showVaz,
+    vazByTime,
+  })
+  hoverRef.current = {
+    byTime,
+    flowByTime,
+    cvdByTime,
+    idhlByTime,
+    unit,
+    vwapSeries,
+    showVwap,
+    vwapBandMults: vwapSettings.bands,
+    maByTime,
+    showMa,
+    showVaz,
+    vazByTime,
+  }
   const barsRef = useRef(bars)
   barsRef.current = bars
   const flowByTimeRef = useRef(flowByTime)
@@ -388,9 +511,12 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
 
   const lastBar = bars[bars.length - 1]
   const lastFlow = lastBar ? flowByTime.get(lastBar.time) : undefined
-  const inspect: Tip | null = tip ?? (lastBar
+  const lastIdhl = lastBar ? idhlByTime.get(lastBar.time) : undefined
+  const lastVp = lastBar && showVwap ? vwapSeries.find((p) => p.time === lastBar.time) : undefined
+  const inspectSrc: Tip | null = tip ?? (lastBar
     ? {
         time: lastBar.time_iso,
+        ts: lastBar.time,
         open: lastBar.open,
         high: lastBar.high,
         low: lastBar.low,
@@ -399,12 +525,26 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
         delta: deltaOf(lastBar, unit),
         delta_pct: lastBar.delta_pct,
         cvd: cvdByTime.get(lastBar.time),
+        vwap: lastVp?.vwap,
+        vwapBands: vwapBandList(lastVp, vwapSettings.bands),
+        ma: showMa ? maByTime.get(lastBar.time) : undefined,
+        idh: lastIdhl?.idh,
+        idl: lastIdhl?.idl,
         minD: unit === 'quote' ? lastFlow?.minDeltaQuote : lastFlow?.minDelta,
         maxD: unit === 'quote' ? lastFlow?.maxDeltaQuote : lastFlow?.maxDelta,
         ch: unit === 'quote' ? lastFlow?.cotHighQuote : lastFlow?.cotHigh,
         cl: unit === 'quote' ? lastFlow?.cotLowQuote : lastFlow?.cotLow,
       }
     : null)
+  const inspect: Tip | null =
+    inspectSrc == null
+      ? null
+      : {
+          ...inspectSrc,
+          vaz: showVaz
+            ? vazFromFlow(lookupVazBar(vazByTime, inspectSrc.ts, Math.max(1, tf) * 60), unit)
+            : undefined,
+        }
 
   const loadFlowVisible = () => {
     const list = barsRef.current
@@ -462,7 +602,24 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
     const chart = chartRef.current
     if (!chart || histRef.current[key]) return
     const pane = chart.addPane({ height: 56, minHeight: 22 })
-    const series = pane.addSeries(HistogramSeries, { color: '#3fb950', priceFormat: { type: 'volume' } })
+    try {
+      pane.priceScale('right').applyOptions({ minimumWidth: 108 } as never)
+    } catch {
+      /* ignore */
+    }
+    const series = pane.addSeries(HistogramSeries, {
+      color: '#3fb950',
+      lastValueVisible: true,
+      priceLineVisible: false,
+      priceFormat: { type: 'volume' },
+    })
+    try {
+      series.applyOptions({
+        priceFormat: { type: 'custom', formatter: (p: number) => fmtPlot(p) },
+      } as never)
+    } catch {
+      /* ignore */
+    }
     series.setData(histData(key))
     const handle: HistHandle = { pane, series }
     if (key === 'dp') {
@@ -501,6 +658,36 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
     delete histRef.current[key]
   }
 
+  const stretchMainPane = () => {
+    const chart = chartRef.current
+    const host = hostRef.current
+    if (!chart || !host) return
+    const hostH = host.clientHeight
+    const hostW = host.clientWidth
+    if (hostH < 40 || hostW < 40) return
+    try {
+      chart.applyOptions({ width: hostW, height: hostH })
+      chart.resize(hostW, hostH)
+      const panes = chart.panes()
+      const main = panes[0]
+      if (main) {
+        if (panes.length <= 1) {
+          main.applyOptions({ minHeight: 80, height: Math.max(120, hostH - 36) })
+        } else {
+          let used = 0
+          for (let i = 1; i < panes.length; i++) {
+            used += panes[i].getSize()?.height ?? 0
+          }
+          const h = Math.max(120, hostH - used - 32)
+          main.applyOptions({ minHeight: 80, height: h })
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    clipPlotCanvases(host, chart)
+  }
+
   const applyPaneVis = () => {
     const on = paneOnRef.current
     for (const key of HIST_KEYS) {
@@ -515,6 +702,7 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
       if (w > 8 && h > 8) {
         chart.applyOptions({ width: w, height: h })
         chart.resize(w, h)
+        stretchMainPane()
       }
     }
   }
@@ -622,6 +810,10 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
   }
 
   useEffect(() => {
+    onStudiesChangeRef.current?.(studiesOpen, studiesPinned)
+  }, [studiesOpen, studiesPinned])
+
+  useEffect(() => {
     const el = hostRef.current
     if (!el || !bars.length) return
     const saved = rangeRef.current
@@ -634,8 +826,14 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
         timeVisible: true,
         timeZone: 'Asia/Kolkata',
         locale: 'en-IN',
-      },
-      rightPriceScale: { borderColor: '#30363d', scaleMargins: { top: 0.06, bottom: 0.08 } },
+        rightOffset: 8,
+      } as never,
+      rightPriceScale: {
+        borderColor: '#30363d',
+        scaleMargins: { top: 0.06, bottom: 0.08 },
+        minimumWidth: 108,
+        visible: true,
+      } as never,
       crosshair: { mode: CrosshairMode.Normal },
       handleScroll: { mouseWheel: true, pressedMouseMove: true },
       handleScale: { axisPressedMouseMove: true, mouseWheel: true },
@@ -668,6 +866,19 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
       maLine.setData(maSeries(bars, maPeriod, maType, maSrc))
     }
     candles.setData(bars.map((b) => candlePoint(b, kind, dpThrRef.current)))
+    try {
+      chart.priceScale('right').applyOptions({ minimumWidth: 108, visible: true } as never)
+      chart.panes()[0]?.priceScale('right').applyOptions({ minimumWidth: 108 } as never)
+    } catch {
+      /* ignore */
+    }
+    try {
+      ;(chart.timeScale() as unknown as { applyOptions: (o: object) => void }).applyOptions({
+        rightOffset: 8,
+      })
+    } catch {
+      /* ignore */
+    }
     if (kind === 'line') {
       const line = chart.addSeries(LineSeries, {
         color: '#58a6ff',
@@ -713,8 +924,7 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
     }
 
     try {
-      const main = chart.panes()[0]
-      main?.applyOptions({ minHeight: 80, height: Math.max(180, main.options().height || 240) })
+      stretchMainPane()
     } catch {
       /* ignore */
     }
@@ -733,9 +943,11 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
       }
       const f = ctx.flowByTime.get(t)
       const vp = ctx.showVwap ? ctx.vwapSeries.find((p) => p.time === t) : undefined
+      const idhl = ctx.idhlByTime.get(t)
       const u = ctx.unit
       setTip({
         time: b.time_iso,
+        ts: t,
         open: b.open,
         high: b.high,
         low: b.low,
@@ -745,6 +957,13 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
         delta_pct: b.delta_pct,
         cvd: ctx.cvdByTime.get(t),
         vwap: vp?.vwap,
+        vwapBands: vwapBandList(vp, ctx.vwapBandMults),
+        ma: ctx.showMa ? ctx.maByTime.get(t) : undefined,
+        vaz: ctx.showVaz
+          ? vazFromFlow(lookupVazBar(ctx.vazByTime, t, Math.max(1, tfRef.current) * 60), u)
+          : undefined,
+        idh: idhl?.idh,
+        idl: idhl?.idl,
         minD: u === 'quote' ? f?.minDeltaQuote : f?.minDelta,
         maxD: u === 'quote' ? f?.maxDeltaQuote : f?.maxDelta,
         ch: u === 'quote' ? f?.cotHighQuote : f?.cotHigh,
@@ -774,7 +993,19 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
       if (w < 8 || h < 8) return
       chart.applyOptions({ width: w, height: h })
       chart.resize(w, h)
-      requestAnimationFrame(syncPaneOverlays)
+      try {
+        ;(chart.timeScale() as unknown as { applyOptions: (o: object) => void }).applyOptions({
+          rightOffset: 8,
+        })
+      } catch {
+        /* ignore */
+      }
+      stretchMainPane()
+      requestAnimationFrame(() => {
+        stretchMainPane()
+        clipPlotCanvases(el, chart)
+        syncPaneOverlays()
+      })
     }
     onResize()
     requestAnimationFrame(() => {
@@ -797,6 +1028,7 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
     window.addEventListener('resize', onResize)
     const ro = new ResizeObserver(() => onResize())
     ro.observe(el)
+    if (wrapRef.current) ro.observe(wrapRef.current)
     const detachPricePan = attachCandlePricePan(chart, el)
     setChartEpoch((n) => n + 1)
 
@@ -835,6 +1067,7 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
     if (w < 8 || h < 8) return
     chart.applyOptions({ width: w, height: h })
     chart.resize(w, h)
+    stretchMainPane()
     requestAnimationFrame(syncPaneOverlays)
   }, [visible])
 
@@ -910,7 +1143,16 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
     fitCandles()
   }
   const end = () => {
-    chartRef.current?.timeScale().scrollToRealTime()
+    const ts = chartRef.current?.timeScale()
+    if (!ts) return
+    ts.scrollToRealTime()
+    try {
+      ;(ts as unknown as { applyOptions: (o: object) => void }).applyOptions({ rightOffset: 8 })
+    } catch {
+      /* ignore */
+    }
+    const r = ts.getVisibleLogicalRange()
+    if (r) ts.setVisibleLogicalRange({ from: r.from, to: r.to + 8 })
   }
   const offsetRight = () => {
     const ts = chartRef.current?.timeScale()
@@ -955,7 +1197,11 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
   }
   const priceOnly = paneLayouts.length <= 1
   const bull = inspect ? inspect.close >= inspect.open : false
-  const goldBar = inspect ? Math.abs(inspect.delta_pct) >= Math.abs(dpThr || 0) && Math.abs(dpThr || 0) > 0 : false
+  const goldBar =
+    inspect != null &&
+    paneOn.dp &&
+    Math.abs(inspect.delta_pct) >= Math.abs(dpThr || 0) &&
+    Math.abs(dpThr || 0) > 0
   const pricePl = paneLayouts[0]
   const stripRows: { key: 'max' | 'min' | 'ch' | 'cl'; lab: string }[] = showBarStats
     ? (
@@ -1008,23 +1254,19 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
     vpPickRef.current = 'start'
   }
 
-  const toggleRightPin = () => {
-    if (rightPinned || rightOpen) {
-      skipRightHoverRef.current = true
-      setRightPinned(false)
-      setRightOpen(false)
+  const toggleStudiesPin = () => {
+    if (studiesOpen || studiesPinned) {
+      setStudiesPinned(false)
+      setStudiesOpen(false)
     } else {
-      setRightPinned(true)
-      setRightOpen(true)
+      setStudiesPinned(true)
+      setStudiesOpen(true)
     }
   }
 
   const plotterText = (pl: PaneLayout, i: number): string | null => {
     if (!inspect) return null
-    if (i === 0) {
-      if (showHoverTip) return null
-      return `O ${fmt2(inspect.open)}  H ${fmt2(inspect.high)}  L ${fmt2(inspect.low)}  C ${fmt2(inspect.close)}`
-    }
+    if (i === 0) return null
     const key = histKeyForPane(pl.id)
     if (!key || !paneOn[key]) return null
     if (key === 'vol') return `Vol ${fmtPlot(inspect.volume)}`
@@ -1034,61 +1276,153 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
     return null
   }
 
+  const showTipStudies =
+    paneOn.vol ||
+    paneOn.delta ||
+    paneOn.dp ||
+    paneOn.cvd ||
+    (showVwap && inspect?.vwap != null) ||
+    (showMa && inspect?.ma != null) ||
+    (showVaz && inspect?.vaz != null) ||
+    (showIdhl && inspect?.idh != null)
+
   return (
     <div className="panel chart-panel of-chart" style={{ display: visible ? undefined : 'none' }}>
       <div className="chart-wrap" ref={wrapRef}>
         {inspect && (
-          <div className={`of-inspector ${goldBar ? 'gold' : bull ? 'up' : 'dn'}`}>
-            {showHoverTip && (
+          <div className={`of-inspector ${goldBar ? 'gold' : bull ? 'up' : 'dn'}${tipOpen ? '' : ' collapsed'}`}>
+            <div className="tt-head">
+              <div className="tt-time">{inspect.time.replace('T', ' ').slice(0, 19)} IST</div>
+              <button
+                type="button"
+                className="tt-fold"
+                title={tipOpen ? 'Hide values' : 'Show values'}
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setTipOpen((v) => !v)
+                }}
+              >
+                {tipOpen ? '▾' : '▸'}
+              </button>
+            </div>
+            {tipOpen && (
               <>
-                <div className="tt-time">{inspect.time.replace('T', ' ').slice(0, 19)} IST</div>
                 <div className="tt-ohlc">
                   O {fmt2(inspect.open)} H {fmt2(inspect.high)} L {fmt2(inspect.low)} C {fmt2(inspect.close)}
                 </div>
-                <div className="tt-flow">
-                  <span>
-                    Vol <b>{fmtPlot(inspect.volume)}</b>
-                  </span>
-                  <span>
-                    Δ <b className={clsSigned(inspect.delta)}>{fmtPlot(inspect.delta)}</b>
-                  </span>
-                  <span>
-                    Δ% <b className={goldBar ? 'anom-ch' : clsSigned(inspect.delta_pct)}>{fmt2(inspect.delta_pct)}</b>
-                  </span>
-                  {inspect.cvd != null && (
-                    <span>
-                      CVD <b className={clsSigned(inspect.cvd)}>{fmtPlot(inspect.cvd)}</b>
-                    </span>
-                  )}
-                </div>
+                {showTipStudies && (
+                  <div className="tt-flow">
+                    {showVwap && inspect.vwap != null && (
+                      <div className="tt-row">
+                        <span>
+                          VWAP <b>{fmt2(inspect.vwap)}</b>
+                        </span>
+                        {inspect.vwapBands?.map((b) => (
+                          <span key={b.mult}>
+                            +{b.mult}σ <b>{fmt2(b.up)}</b>
+                            {'  '}
+                            −{b.mult}σ <b>{fmt2(b.dn)}</b>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {showMa && inspect.ma != null && (
+                      <div className="tt-row">
+                        <span>
+                          {maType.toUpperCase()} {maPeriod} <b>{fmt2(inspect.ma)}</b>
+                        </span>
+                      </div>
+                    )}
+                    {showVaz && inspect.vaz && (
+                      <div className="tt-row">
+                        <span>
+                          VAH <b className="tt-vah">{fmt2(inspect.vaz.vah)}</b>
+                        </span>
+                        <span>
+                          POC <b className="tt-poc">{fmt2(inspect.vaz.poc)}</b>
+                        </span>
+                        <span>
+                          VAL <b className="tt-val">{fmt2(inspect.vaz.val)}</b>
+                        </span>
+                      </div>
+                    )}
+                    {showIdhl && inspect.idh != null && inspect.idl != null && (
+                      <div className="tt-row">
+                        <span>
+                          IDH <b className="tt-idh">{fmt2(inspect.idh)}</b>
+                        </span>
+                        <span>
+                          IDL <b className="tt-idl">{fmt2(inspect.idl)}</b>
+                        </span>
+                      </div>
+                    )}
+                    {paneOn.vol && (
+                      <div className="tt-row">
+                        <span>
+                          Vol <b>{fmtPlot(inspect.volume)}</b>
+                        </span>
+                      </div>
+                    )}
+                    {paneOn.delta && (
+                      <div className="tt-row">
+                        <span>
+                          Δ <b className={clsSigned(inspect.delta)}>{fmtPlot(inspect.delta)}</b>
+                        </span>
+                      </div>
+                    )}
+                    {paneOn.dp && (
+                      <div className="tt-row">
+                        <span>
+                          Δ% <b className={goldBar ? 'anom-ch' : clsSigned(inspect.delta_pct)}>{fmt2(inspect.delta_pct)}</b>
+                        </span>
+                      </div>
+                    )}
+                    {paneOn.cvd && inspect.cvd != null && (
+                      <div className="tt-row">
+                        <span>
+                          CVD <b className={clsSigned(inspect.cvd)}>{fmtPlot(inspect.cvd)}</b>
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {showBarStats && (
+                  <div className="of-bar-stats">
+                    <div className="of-bar-stats-lab">Bar Statistics</div>
+                    <div className="tt-flow">
+                      {barStatOn.max && (
+                        <div className="tt-row">
+                          <span>
+                            MaxΔ <b className={statCls('max', inspect.maxD)}>{inspect.maxD == null ? '—' : fmtPlot(inspect.maxD)}</b>
+                          </span>
+                        </div>
+                      )}
+                      {barStatOn.min && (
+                        <div className="tt-row">
+                          <span>
+                            MinΔ <b className={statCls('min', inspect.minD)}>{inspect.minD == null ? '—' : fmtPlot(inspect.minD)}</b>
+                          </span>
+                        </div>
+                      )}
+                      {barStatOn.ch && (
+                        <div className="tt-row">
+                          <span>
+                            CH <b className={statCls('ch', inspect.ch)}>{inspect.ch == null ? '—' : fmtPlot(inspect.ch)}</b>
+                          </span>
+                        </div>
+                      )}
+                      {barStatOn.cl && (
+                        <div className="tt-row">
+                          <span>
+                            CL <b className={statCls('cl', inspect.cl)}>{inspect.cl == null ? '—' : fmtPlot(inspect.cl)}</b>
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </>
-            )}
-            {showBarStats && (
-              <div className="of-bar-stats">
-                <div className="of-bar-stats-lab">Bar Statistics</div>
-                <div className="tt-flow">
-                  {barStatOn.max && (
-                    <span>
-                      MaxΔ <b className={statCls('max', inspect.maxD)}>{inspect.maxD == null ? '—' : fmtPlot(inspect.maxD)}</b>
-                    </span>
-                  )}
-                  {barStatOn.min && (
-                    <span>
-                      MinΔ <b className={statCls('min', inspect.minD)}>{inspect.minD == null ? '—' : fmtPlot(inspect.minD)}</b>
-                    </span>
-                  )}
-                  {barStatOn.ch && (
-                    <span>
-                      CH <b className={statCls('ch', inspect.ch)}>{inspect.ch == null ? '—' : fmtPlot(inspect.ch)}</b>
-                    </span>
-                  )}
-                  {barStatOn.cl && (
-                    <span>
-                      CL <b className={statCls('cl', inspect.cl)}>{inspect.cl == null ? '—' : fmtPlot(inspect.cl)}</b>
-                    </span>
-                  )}
-                </div>
-              </div>
             )}
           </div>
         )}
@@ -1105,6 +1439,7 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
           showVp={showVp}
           vpMode={vpMode}
           vpBinMult={vpBinSafe}
+          vazBinMult={vazBinSafe}
           vpT0={vpT0 != null && vpT1 != null ? Math.min(vpT0, vpT1) : vpT0}
           vpT1={vpT0 != null && vpT1 != null ? Math.max(vpT0, vpT1) : vpT1}
           showIdhl={showIdhl}
@@ -1130,6 +1465,14 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
           mode={fpMode}
           binMult={binSafe}
           barTimes={barTimes}
+          onVazBars={(next) => {
+            const sig = next
+              .map((b) => `${b.time}:${b.vah}:${b.val}:${b.poc}`)
+              .join('|')
+            if (sig === vazSigRef.current) return
+            vazSigRef.current = sig
+            setVazBars(next)
+          }}
         />
         {paneLayouts.map((pl, i) =>
           pl.height < 20 ? null : (
@@ -1233,39 +1576,44 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
         </div>
       </div>
 
-      <div
-        className={`of-rail right${rightOpen ? ' open' : ''}${rightPinned ? ' pinned' : ''}`}
-        onMouseEnter={() => {
-          if (skipRightHoverRef.current) return
-          setRightOpen(true)
-        }}
-        onMouseLeave={() => {
-          skipRightHoverRef.current = false
-          if (!rightPinned) setRightOpen(false)
-        }}
-      >
-        <button
-          type="button"
-          className={`of-edge right${rightOpen || rightPinned ? ' on' : ''}`}
-          title={rightPinned || rightOpen ? 'Hide studies' : 'Pin studies menu'}
-          onClick={toggleRightPin}
-        >
-          STUDIES
-        </button>
-        <aside className={`of-drawer right${rightOpen ? ' open' : ''}`}>
+      {studiesTabHost
+        ? createPortal(
+            <button
+              type="button"
+              className={`of-edge left studies-tab${studiesOpen || studiesPinned ? ' on' : ''}`}
+              title={studiesOpen || studiesPinned ? 'Close studies menu' : 'Open studies menu'}
+              onClick={toggleStudiesPin}
+            >
+              STUDIES
+            </button>,
+            studiesTabHost,
+          )
+        : (
+            <button
+              type="button"
+              className={`of-edge left studies-tab${studiesOpen || studiesPinned ? ' on' : ''}`}
+              title={studiesOpen || studiesPinned ? 'Close studies menu' : 'Open studies menu'}
+              onClick={toggleStudiesPin}
+            >
+              STUDIES
+            </button>
+          )}
+      {(() => {
+        const drawer = (
+        <aside className={`of-drawer studies${studiesOpen ? ' open' : ''}`}>
           <div className="of-drawer-head">
             <b>Studies</b>
             <button
               type="button"
-              className={`ghost of-pin${rightPinned ? ' on' : ''}`}
-              title={rightPinned ? 'Unpin (auto-hide)' : 'Pin open'}
-              onClick={toggleRightPin}
+              className={`ghost of-pin${studiesPinned ? ' on' : ''}`}
+              title={studiesPinned ? 'Close studies menu' : 'Pin open'}
+              onClick={toggleStudiesPin}
             >
-              {rightPinned ? '📌' : '📍'}
+              {studiesPinned ? '📌' : '📍'}
             </button>
           </div>
           <span className="of-drawer-lab">Chart style</span>
-          <div className="unit-toggle">
+          <div className="unit-toggle wrap">
             {(['candle', 'bar', 'line'] as const).map((k) => (
               <button
                 key={k}
@@ -1282,32 +1630,38 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
           </div>
 
           <span className="of-drawer-lab">Footprint</span>
-          <label className={`ov-toggle ${showFootprint ? 'on' : ''}`}>
-            <input
-              type="checkbox"
-              checked={showFootprint}
-              onChange={(e) => {
-                setShowFootprint(e.target.checked)
-                if (e.target.checked) setPriceKind('candle')
-              }}
-            />
-            Footprint
-          </label>
-          <label className="of-inline">
-            Bin ×
-            <input
-              type="number"
-              min={1}
-              max={10000}
-              value={fpBinMult}
-              onChange={(e) => setFpBinMult(Math.max(1, Number(e.target.value) || 1))}
-            />
-          </label>
-          <span className="vwap-settings-hint">
-            {fmtTick(symbolTickSize(symbol))} × {binSafe} = {fmtTick(symbolTickSize(symbol) * binSafe)} · {unitLabel}
-          </span>
+          <div className="of-fp-row">
+            <label className={`ov-toggle ${showFootprint ? 'on' : ''}`}>
+              <input
+                type="checkbox"
+                checked={showFootprint}
+                onChange={(e) => {
+                  setShowFootprint(e.target.checked)
+                  if (e.target.checked) setPriceKind('candle')
+                }}
+              />
+              Footprint
+            </label>
+            {showFootprint && (
+              <label className="of-inline">
+                Bin ×
+                <input
+                  type="number"
+                  min={1}
+                  max={10000}
+                  value={fpBinMult}
+                  onChange={(e) => setFpBinMult(Math.max(1, Number(e.target.value) || 1))}
+                />
+              </label>
+            )}
+          </div>
+          {showFootprint && (
+            <span className="vwap-settings-hint">
+              {fmtTick(symbolTickSize(symbol))} × {binSafe} = {fmtTick(symbolTickSize(symbol) * binSafe)} · {unitLabel}
+            </span>
+          )}
           <span className="of-drawer-lab">Quote</span>
-          <div className="unit-toggle">
+          <div className="unit-toggle wrap">
             <button type="button" className={unit === 'quote' ? 'active' : 'ghost'} onClick={() => setUnit('quote')}>
               USDT
             </button>
@@ -1319,105 +1673,212 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
           <div className="unit-toggle wrap">
             {(['profile', 'bidask', 'delta', 'volume'] as const).map((m) => (
               <button key={m} type="button" className={fpMode === m ? 'active' : 'ghost'} onClick={() => setFpMode(m)}>
-                {m === 'bidask' ? 'Bid/Ask' : m === 'volume' ? 'Total volume' : m[0].toUpperCase() + m.slice(1)}
+                {m === 'bidask' ? 'Bid/Ask' : m === 'volume' ? 'Vol' : m[0].toUpperCase() + m.slice(1)}
               </button>
             ))}
           </div>
 
           <span className="of-drawer-lab">Indicators</span>
-          <label className={`ov-toggle ${showVwap ? 'on' : ''}`}>
-            <input type="checkbox" checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)} />
-            VWAP
-          </label>
-          {showVwap && (
-            <label className="of-inline" title="σ multipliers">
-              Bands
-              <input value={vwapBandsRaw} onChange={(e) => setVwapBandsRaw(e.target.value)} placeholder="1,2" />
+          <div className="of-chip-grid">
+            <label className={`ov-toggle ${showVwap ? 'on' : ''}`}>
+              <input type="checkbox" checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)} />
+              VWAP
             </label>
-          )}
-          <label className={`ov-toggle ${showMa ? 'on' : ''}`}>
-            <input type="checkbox" checked={showMa} onChange={(e) => setShowMa(e.target.checked)} />
-            MA
-          </label>
-          {showMa && (
-            <>
-              <div className="unit-toggle wrap">
-                {(['sma', 'ema'] as const).map((t) => (
-                  <button key={t} type="button" className={maType === t ? 'active' : 'ghost'} onClick={() => setMaType(t)}>
-                    {t.toUpperCase()}
+            {showVwap && (
+              <div className="of-chip-extra">
+                <label className="of-inline" title="σ multipliers">
+                  Bands
+                  <input value={vwapBandsRaw} onChange={(e) => setVwapBandsRaw(e.target.value)} placeholder="1,2" />
+                </label>
+              </div>
+            )}
+            <label className={`ov-toggle ${showMa ? 'on' : ''}`}>
+              <input type="checkbox" checked={showMa} onChange={(e) => setShowMa(e.target.checked)} />
+              MA
+            </label>
+            {showMa && (
+              <div className="of-chip-extra">
+                <div className="of-set-row">
+                  <div className="unit-toggle wrap">
+                    {(['sma', 'ema'] as const).map((t) => (
+                      <button key={t} type="button" className={maType === t ? 'active' : 'ghost'} onClick={() => setMaType(t)}>
+                        {t.toUpperCase()}
+                      </button>
+                    ))}
+                  </div>
+                  <label className="of-inline">
+                    Period
+                    <input
+                      type="number"
+                      min={1}
+                      max={500}
+                      value={maPeriod}
+                      onChange={(e) => setMaPeriod(Math.max(1, Math.round(Number(e.target.value) || 1)))}
+                    />
+                  </label>
+                </div>
+              </div>
+            )}
+            <label className={`ov-toggle ${showVp ? 'on' : ''}`} title="Anchored volume profile — drag yellow handles">
+              <input type="checkbox" checked={showVp} onChange={(e) => setShowVp(e.target.checked)} />
+              AVP
+            </label>
+            {showVp && (
+              <div className="of-chip-extra">
+                <div className="of-set-row">
+                  <span className="of-inline-lab">Bin</span>
+                  <div className="unit-toggle wrap">
+                    <button
+                      type="button"
+                      className={vpBinMode === 'default' ? 'active' : 'ghost'}
+                      title="Use Footprint candlestick bin"
+                      onClick={() => setVpBinMode('default')}
+                    >
+                      Default
+                    </button>
+                    <button
+                      type="button"
+                      className={vpBinMode === 'custom' ? 'active' : 'ghost'}
+                      onClick={() => {
+                        if (vpBinMode !== 'custom') setVpBinMult(binSafe)
+                        setVpBinMode('custom')
+                      }}
+                    >
+                      Custom
+                    </button>
+                  </div>
+                  {vpBinMode === 'custom' && (
+                    <label className="of-inline">
+                      ×
+                      <input
+                        type="number"
+                        min={1}
+                        max={10000}
+                        value={vpBinMult}
+                        onChange={(e) => setVpBinMult(Math.max(1, Number(e.target.value) || 1))}
+                      />
+                    </label>
+                  )}
+                </div>
+                <span className="vwap-settings-hint">
+                  {fmtTick(symbolTickSize(symbol))} × {vpBinSafe} = {fmtTick(symbolTickSize(symbol) * vpBinSafe)}
+                </span>
+                <div className="unit-toggle wrap">
+                  {(['profile', 'bidask', 'delta', 'volume'] as const).map((m) => (
+                    <button key={m} type="button" className={vpMode === m ? 'active' : 'ghost'} onClick={() => setVpMode(m)}>
+                      {m === 'bidask' ? 'Bid/Ask' : m === 'volume' ? 'Vol' : m[0].toUpperCase() + m.slice(1)}
+                    </button>
+                  ))}
+                </div>
+                <span className="vwap-settings-hint">
+                  {vpT0 != null ? fmtIstShort(vpT0) : '—'} → {vpT1 != null ? fmtIstShort(vpT1) : '—'}
+                </span>
+                <div className="unit-toggle wrap">
+                  <button type="button" className="ghost" onClick={useVisibleVp}>
+                    Visible
                   </button>
-                ))}
-              </div>
-              <label className="of-inline">
-                Period
-                <input
-                  type="number"
-                  min={1}
-                  max={500}
-                  value={maPeriod}
-                  onChange={(e) => setMaPeriod(Math.max(1, Math.round(Number(e.target.value) || 1)))}
-                />
-              </label>
-            </>
-          )}
-          <label className={`ov-toggle ${showVp ? 'on' : ''}`} title="Anchored volume profile — drag yellow handles">
-            <input type="checkbox" checked={showVp} onChange={(e) => setShowVp(e.target.checked)} />
-            AVP
-          </label>
-          {showVp && (
-            <>
-              <label className="of-inline">
-                VP bin ×
-                <input
-                  type="number"
-                  min={1}
-                  max={10000}
-                  value={vpBinMult}
-                  onChange={(e) => setVpBinMult(Math.max(1, Number(e.target.value) || 1))}
-                />
-              </label>
-              <div className="unit-toggle wrap">
-                {(['profile', 'bidask', 'delta', 'volume'] as const).map((m) => (
-                  <button key={m} type="button" className={vpMode === m ? 'active' : 'ghost'} onClick={() => setVpMode(m)}>
-                    {m === 'bidask' ? 'Bid/Ask' : m === 'volume' ? 'Total volume' : m[0].toUpperCase() + m.slice(1)}
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => {
+                      setVpT0(null)
+                      setVpT1(null)
+                    }}
+                  >
+                    Clear
                   </button>
-                ))}
+                </div>
               </div>
-              <span className="vwap-settings-hint">
-                {vpT0 != null ? fmtIstShort(vpT0) : '—'} → {vpT1 != null ? fmtIstShort(vpT1) : '—'}
-              </span>
-              <div className="unit-toggle wrap">
-                <button type="button" className="ghost" onClick={useVisibleVp}>
-                  Use visible
-                </button>
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => {
-                    setVpT0(null)
-                    setVpT1(null)
-                  }}
-                >
-                  Clear
-                </button>
+            )}
+            <label className={`ov-toggle ${showIdhl ? 'on' : ''}`} title="Intraday high / low (UTC session)">
+              <input type="checkbox" checked={showIdhl} onChange={(e) => setShowIdhl(e.target.checked)} />
+              IDH/IDL
+            </label>
+            <label className={`ov-toggle ${showVaz ? 'on' : ''}`} title="Per-bar value area (VAH / POC / VAL)">
+              <input type="checkbox" checked={showVaz} onChange={(e) => setShowVaz(e.target.checked)} />
+              VAZ
+            </label>
+            {showVaz && (
+              <div className="of-chip-extra">
+                <div className="of-set-row">
+                  <span className="of-inline-lab">Bin</span>
+                  <div className="unit-toggle wrap">
+                    <button
+                      type="button"
+                      className={vazBinMode === 'default' ? 'active' : 'ghost'}
+                      title="Use Footprint candlestick bin"
+                      onClick={() => setVazBinMode('default')}
+                    >
+                      Default
+                    </button>
+                    <button
+                      type="button"
+                      className={vazBinMode === 'custom' ? 'active' : 'ghost'}
+                      onClick={() => {
+                        if (vazBinMode !== 'custom') setVazBinMult(binSafe)
+                        setVazBinMode('custom')
+                      }}
+                    >
+                      Custom
+                    </button>
+                  </div>
+                  {vazBinMode === 'custom' && (
+                    <label className="of-inline">
+                      ×
+                      <input
+                        type="number"
+                        min={1}
+                        max={10000}
+                        value={vazBinMult}
+                        onChange={(e) => setVazBinMult(Math.max(1, Number(e.target.value) || 1))}
+                      />
+                    </label>
+                  )}
+                </div>
+                <span className="vwap-settings-hint">
+                  {fmtTick(symbolTickSize(symbol))} × {vazBinSafe} = {fmtTick(symbolTickSize(symbol) * vazBinSafe)}
+                </span>
               </div>
-            </>
-          )}
-          <label className={`ov-toggle ${showVaz ? 'on' : ''}`}>
-            <input type="checkbox" checked={showVaz} onChange={(e) => setShowVaz(e.target.checked)} />
-            VAZ
-          </label>
-          {HIST_KEYS.map((key) => (
-            <div key={key} className="of-ind-block">
-              <label className={`ov-toggle ${paneOn[key] ? 'on' : ''}`}>
+            )}
+            <label className={`ov-toggle ${showBarStats ? 'on' : ''}`} title="Bar statistics overlay">
+              <input type="checkbox" checked={showBarStats} onChange={(e) => setShowBarStats(e.target.checked)} />
+              Stats
+            </label>
+            {showBarStats && (
+              <div className="of-chip-extra">
+                <div className="unit-toggle wrap">
+                  {(
+                    [
+                      ['ch', 'COT H'],
+                      ['cl', 'COT L'],
+                      ['min', 'MinΔ'],
+                      ['max', 'MaxΔ'],
+                    ] as const
+                  ).map(([k, lab]) => (
+                    <button
+                      key={k}
+                      type="button"
+                      className={barStatOn[k] ? 'active' : 'ghost'}
+                      onClick={() => setBarStatOn((p) => ({ ...p, [k]: !p[k] }))}
+                    >
+                      {lab}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {HIST_KEYS.map((key) => (
+              <label key={key} className={`ov-toggle ${paneOn[key] ? 'on' : ''}`}>
                 <input
                   type="checkbox"
                   checked={paneOn[key]}
                   onChange={(e) => setPaneOn((p) => ({ ...p, [key]: e.target.checked }))}
                 />
-                {HIST_LABEL[key] === 'Δ%' ? 'DELTA %' : HIST_LABEL[key] === 'Vol' ? 'VOLUME' : HIST_LABEL[key] === 'Δ' ? 'DELTA' : 'CVD'}
+                {key === 'vol' ? 'Vol' : key === 'delta' ? 'VolΔ' : key === 'dp' ? 'Δ%' : 'CVD'}
               </label>
-              {key === 'dp' && paneOn.dp && (
+            ))}
+            {paneOn.dp && (
+              <div className="of-chip-extra">
                 <label className="of-inline" title="Gold bar when |Δ%| ≥ threshold">
                   Δ% thr
                   <input
@@ -1429,195 +1890,158 @@ export function OrderflowChart({ bars, symbol, tf, visible = true }: Props) {
                     onChange={(e) => setDpThr(Math.max(0, Number(e.target.value) || 0))}
                   />
                 </label>
-              )}
-            </div>
-          ))}
-          <label className={`ov-toggle ${showBarStats ? 'on' : ''}`}>
-            <input type="checkbox" checked={showBarStats} onChange={(e) => setShowBarStats(e.target.checked)} />
-            BAR STATISTICS
-          </label>
-          {showBarStats && (
-            <div className="unit-toggle wrap">
-              {(
-                [
-                  ['ch', 'COT H'],
-                  ['cl', 'COT L'],
-                  ['min', 'MinΔ'],
-                  ['max', 'MaxΔ'],
-                ] as const
-              ).map(([k, lab]) => (
-                <button
-                  key={k}
-                  type="button"
-                  className={barStatOn[k] ? 'active' : 'ghost'}
-                  onClick={() => setBarStatOn((p) => ({ ...p, [k]: !p[k] }))}
-                >
-                  {lab}
-                </button>
-              ))}
-            </div>
-          )}
-          <label className={`ov-toggle ${showImb ? 'on' : ''}`} title="Diagonal = ask vs bid one tick below">
-            <input type="checkbox" checked={showImb} onChange={(e) => setShowImb(e.target.checked)} />
-            Imbalance ratio
-          </label>
-          {showImb && (
-            <>
-              <label className="of-inline">
-                Ratio
-                <input
-                  type="number"
-                  min={1.5}
-                  max={20}
-                  step={0.5}
-                  value={imbRatio}
-                  onChange={(e) => setImbRatio(Math.max(1.5, Number(e.target.value) || 3))}
-                />
-              </label>
-              <label className="of-inline" title="Stacked same-side imbalances required">
-                Consec
-                <input
-                  type="number"
-                  min={1}
-                  max={20}
-                  step={1}
-                  value={imbConsec}
-                  onChange={(e) => setImbConsec(Math.max(1, Math.round(Number(e.target.value) || 1)))}
-                />
-              </label>
-              <label className={`ov-toggle ${imbIgnoreZero ? 'on' : ''}`} title="Skip pairs where bid or ask is 0">
-                <input
-                  type="checkbox"
-                  checked={imbIgnoreZero}
-                  onChange={(e) => setImbIgnoreZero(e.target.checked)}
-                />
-                Ignore 0
-              </label>
-              <div className="unit-toggle wrap">
-                <button
-                  type="button"
-                  className={imbMode === 'diagonal' ? 'active' : 'ghost'}
-                  onClick={() => setImbMode('diagonal')}
-                >
-                  Diagonal
-                </button>
-                <button
-                  type="button"
-                  className={imbMode === 'horizontal' ? 'active' : 'ghost'}
-                  onClick={() => setImbMode('horizontal')}
-                >
-                  Horizontal
-                </button>
               </div>
-            </>
-          )}
-          <label className={`ov-toggle ${showDiv ? 'on' : ''}`}>
-            <input type="checkbox" checked={showDiv} onChange={(e) => setShowDiv(e.target.checked)} />
-            Delta divergence
-          </label>
-          <label className={`ov-toggle ${showAbsorb ? 'on' : ''}`}>
-            <input type="checkbox" checked={showAbsorb} onChange={(e) => setShowAbsorb(e.target.checked)} />
-            Absorption
-          </label>
-          {showAbsorb && (
-            <>
-              <div className="unit-toggle wrap">
-                <button
-                  type="button"
-                  className={absorbMode === 'body' ? 'active' : 'ghost'}
-                  title="|close−open| / (high−low) below Body %"
-                  onClick={() => setAbsorbMode('body')}
-                >
-                  Body
-                </button>
-                <button
-                  type="button"
-                  className={absorbMode === 'range' ? 'active' : 'ghost'}
-                  title="high−low ≤ BB(20, 1) of prior ranges"
-                  onClick={() => setAbsorbMode('range')}
-                >
-                  Range
-                </button>
+            )}
+            <label className={`ov-toggle ${showImb ? 'on' : ''}`} title="Diagonal = ask vs bid one tick below">
+              <input type="checkbox" checked={showImb} onChange={(e) => setShowImb(e.target.checked)} />
+              Imb
+            </label>
+            {showImb && (
+              <div className="of-chip-extra">
+                <div className="of-set-row">
+                  <label className="of-inline">
+                    Ratio
+                    <input
+                      type="number"
+                      min={1.5}
+                      max={20}
+                      step={0.5}
+                      value={imbRatio}
+                      onChange={(e) => setImbRatio(Math.max(1.5, Number(e.target.value) || 3))}
+                    />
+                  </label>
+                  <label className="of-inline" title="Stacked same-side imbalances required">
+                    Consec
+                    <input
+                      type="number"
+                      min={1}
+                      max={20}
+                      step={1}
+                      value={imbConsec}
+                      onChange={(e) => setImbConsec(Math.max(1, Math.round(Number(e.target.value) || 1)))}
+                    />
+                  </label>
+                </div>
+                <div className="of-set-row">
+                  <label className={`ov-toggle ${imbIgnoreZero ? 'on' : ''}`} title="Skip pairs where bid or ask is 0">
+                    <input
+                      type="checkbox"
+                      checked={imbIgnoreZero}
+                      onChange={(e) => setImbIgnoreZero(e.target.checked)}
+                    />
+                    Ignore 0
+                  </label>
+                  <div className="unit-toggle wrap">
+                    <button
+                      type="button"
+                      className={imbMode === 'diagonal' ? 'active' : 'ghost'}
+                      onClick={() => setImbMode('diagonal')}
+                    >
+                      Diag
+                    </button>
+                    <button
+                      type="button"
+                      className={imbMode === 'horizontal' ? 'active' : 'ghost'}
+                      onClick={() => setImbMode('horizontal')}
+                    >
+                      Horiz
+                    </button>
+                  </div>
+                </div>
               </div>
-              {absorbMode === 'body' && (
-                <label className="of-inline" title="Small body: |C−O| / (H−L) < this %">
-                  Body %
+            )}
+            <label className={`ov-toggle ${showDiv ? 'on' : ''}`}>
+              <input type="checkbox" checked={showDiv} onChange={(e) => setShowDiv(e.target.checked)} />
+              Δ Div
+            </label>
+            <label className={`ov-toggle ${showAbsorb ? 'on' : ''}`}>
+              <input type="checkbox" checked={showAbsorb} onChange={(e) => setShowAbsorb(e.target.checked)} />
+              Absorb
+            </label>
+            {showAbsorb && (
+              <div className="of-chip-extra">
+                <div className="of-set-row">
+                  <div className="unit-toggle wrap">
+                    <button
+                      type="button"
+                      className={absorbMode === 'body' ? 'active' : 'ghost'}
+                      title="|close−open| / (high−low) below Body %"
+                      onClick={() => setAbsorbMode('body')}
+                    >
+                      Body
+                    </button>
+                    <button
+                      type="button"
+                      className={absorbMode === 'range' ? 'active' : 'ghost'}
+                      title="high−low ≤ BB(20, 1) of prior ranges"
+                      onClick={() => setAbsorbMode('range')}
+                    >
+                      Range
+                    </button>
+                  </div>
+                  {absorbMode === 'body' && (
+                    <label className="of-inline" title="Small body: |C−O| / (H−L) < this %">
+                      Body %
+                      <input
+                        type="number"
+                        min={5}
+                        max={90}
+                        step={1}
+                        value={absorbBodyPct}
+                        onChange={(e) => setAbsorbBodyPct(Math.max(5, Math.min(90, Number(e.target.value) || 35)))}
+                      />
+                    </label>
+                  )}
+                  <label className="of-inline" title="Volume > mean + σ×this (20). Also needs HH or LL.">
+                    σ ×
+                    <input
+                      type="number"
+                      min={0.5}
+                      max={10}
+                      step={0.1}
+                      value={bigMult}
+                      onChange={(e) => setBigMult(Math.max(0.5, Number(e.target.value) || 1))}
+                    />
+                  </label>
+                </div>
+              </div>
+            )}
+            <label className={`ov-toggle ${showUa ? 'on' : ''}`} title="No ask at high / no bid at low — zoom in">
+              <input type="checkbox" checked={showUa} onChange={(e) => setShowUa(e.target.checked)} />
+              UA
+            </label>
+            <label className={`ov-toggle ${showBigVol ? 'on' : ''}`}>
+              <input type="checkbox" checked={showBigVol} onChange={(e) => setShowBigVol(e.target.checked)} />
+              BigVol
+            </label>
+            <label className={`ov-toggle ${showBigAsk ? 'on' : ''}`}>
+              <input type="checkbox" checked={showBigAsk} onChange={(e) => setShowBigAsk(e.target.checked)} />
+              BigAsk
+            </label>
+            <label className={`ov-toggle ${showBigBid ? 'on' : ''}`}>
+              <input type="checkbox" checked={showBigBid} onChange={(e) => setShowBigBid(e.target.checked)} />
+              BigBid
+            </label>
+            {(showBigVol || showBigAsk || showBigBid) && !showAbsorb && (
+              <div className="of-chip-extra">
+                <label className="of-inline" title="Fires when value > 20-bar mean + σ × this">
+                  σ ×
                   <input
                     type="number"
-                    min={5}
-                    max={90}
-                    step={1}
-                    value={absorbBodyPct}
-                    onChange={(e) => setAbsorbBodyPct(Math.max(5, Math.min(90, Number(e.target.value) || 35)))}
+                    min={0.5}
+                    max={10}
+                    step={0.1}
+                    value={bigMult}
+                    onChange={(e) => setBigMult(Math.max(0.5, Number(e.target.value) || 1))}
                   />
                 </label>
-              )}
-              <label
-                className="of-inline"
-                title="Volume > mean + σ×this (20). Also needs HH or LL."
-              >
-                σ ×
-                <input
-                  type="number"
-                  min={0.5}
-                  max={10}
-                  step={0.1}
-                  value={bigMult}
-                  onChange={(e) => setBigMult(Math.max(0.5, Number(e.target.value) || 1))}
-                />
-              </label>
-            </>
-          )}
-          <label className={`ov-toggle ${showUa ? 'on' : ''}`} title="No ask at high / no bid at low — zoom in">
-            <input type="checkbox" checked={showUa} onChange={(e) => setShowUa(e.target.checked)} />
-            Unfinished auction
-          </label>
-          <label className={`ov-toggle ${showBigVol ? 'on' : ''}`}>
-            <input type="checkbox" checked={showBigVol} onChange={(e) => setShowBigVol(e.target.checked)} />
-            BigVolume
-          </label>
-          <label className={`ov-toggle ${showBigAsk ? 'on' : ''}`}>
-            <input type="checkbox" checked={showBigAsk} onChange={(e) => setShowBigAsk(e.target.checked)} />
-            BigAskDelta
-          </label>
-          <label className={`ov-toggle ${showBigBid ? 'on' : ''}`}>
-            <input type="checkbox" checked={showBigBid} onChange={(e) => setShowBigBid(e.target.checked)} />
-            BigBidDelta
-          </label>
-          {(showBigVol || showBigAsk || showBigBid) && !showAbsorb && (
-            <label className="of-inline" title="Fires when value > 20-bar mean + σ × this">
-              σ ×
-              <input
-                type="number"
-                min={0.5}
-                max={10}
-                step={0.1}
-                value={bigMult}
-                onChange={(e) => setBigMult(Math.max(0.5, Number(e.target.value) || 1))}
-              />
-            </label>
-          )}
-
-          <span className="of-drawer-lab">Others</span>
-          <label className={`ov-toggle ${showIdhl ? 'on' : ''}`}>
-            <input type="checkbox" checked={showIdhl} onChange={(e) => setShowIdhl(e.target.checked)} />
-            IDH/IDL
-          </label>
-          <label className={`ov-toggle ${showLegend ? 'on' : ''}`}>
-            <input type="checkbox" checked={showLegend} onChange={(e) => setShowLegend(e.target.checked)} />
-            Legend
-          </label>
-          <label className={`ov-toggle ${showHoverTip ? 'on' : ''}`}>
-            <input type="checkbox" checked={showHoverTip} onChange={(e) => setShowHoverTip(e.target.checked)} />
-            Tip
-          </label>
-          {showLegend && (
-            <p className="hint">
-              First footprint pass reads ticks (slow); later pans use cache. AVP is one composite profile with 70% VA — no 512-bar cap. Absorption = HH/LL + range ≤ BB(20,1) + volume &gt; mean+σ. Big* use 20-bar σ, not a simple average. Imbalance / unfinished need zoom-in levels.
-            </p>
-          )}
+              </div>
+            )}
+          </div>
         </aside>
-      </div>
+        )
+        return studiesDrawerHost ? createPortal(drawer, studiesDrawerHost) : drawer
+      })()}
     </div>
   )
 }

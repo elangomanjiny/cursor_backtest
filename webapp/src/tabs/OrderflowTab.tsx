@@ -48,11 +48,12 @@ export function OrderflowTab({ exchange, symbol, start, end, tf, dataReady, acti
   cellsRef.current = cells
   const [leftOpen, setLeftOpen] = useState(true)
   const [leftPinned, setLeftPinned] = useState(false)
-  const skipLeftHoverRef = useRef(false)
+  const [studiesTabHost, setStudiesTabHost] = useState<HTMLDivElement | null>(null)
+  const [studiesDrawerHost, setStudiesDrawerHost] = useState<HTMLDivElement | null>(null)
+  const [studiesOpen, setStudiesOpen] = useState(false)
 
   const toggleLeftPin = () => {
-    if (leftPinned) {
-      skipLeftHoverRef.current = true
+    if (leftOpen || leftPinned) {
       setLeftPinned(false)
       setLeftOpen(false)
     } else {
@@ -102,32 +103,26 @@ export function OrderflowTab({ exchange, symbol, start, end, tf, dataReady, acti
   return (
     <div className="of-shell">
       <div className="of-hud">
-        <div
-          className={`of-rail left${leftOpen ? ' open' : ''}${leftPinned ? ' pinned' : ''}`}
-          onMouseEnter={() => {
-            if (skipLeftHoverRef.current) return
-            setLeftOpen(true)
-          }}
-          onMouseLeave={() => {
-            skipLeftHoverRef.current = false
-            if (!leftPinned) setLeftOpen(false)
-          }}
-        >
-        <button
-          type="button"
-          className={`of-edge left${leftOpen || leftPinned ? ' on' : ''}`}
-          title={leftPinned ? 'Unpin data menu' : 'Pin data menu'}
-          onClick={toggleLeftPin}
-        >
-          DATA
-        </button>
-        <aside className={`of-drawer left${leftOpen ? ' open' : ''}`}>
+        <div className={`of-left-col${leftOpen ? ' data-open' : ''}${studiesOpen ? ' studies-open' : ''}`}>
+          <div className="of-tab-stack">
+            <button
+              type="button"
+              className={`of-edge left data-tab${leftOpen || leftPinned ? ' on' : ''}`}
+              title={leftOpen || leftPinned ? 'Close data menu' : 'Open data menu'}
+              onClick={toggleLeftPin}
+            >
+              DATA
+            </button>
+            <div className="of-studies-tab-host" ref={setStudiesTabHost} />
+          </div>
+          <div className="of-data-slot">
+            <aside className={`of-drawer left${leftOpen ? ' open' : ''}`}>
           <div className="of-drawer-head">
             <b>Data</b>
             <button
               type="button"
               className={`ghost of-pin${leftPinned ? ' on' : ''}`}
-              title={leftPinned ? 'Unpin (auto-hide)' : 'Pin open'}
+              title={leftPinned ? 'Close data menu' : 'Pin open'}
               onClick={toggleLeftPin}
             >
               {leftPinned ? '📌' : '📍'}
@@ -219,13 +214,23 @@ export function OrderflowTab({ exchange, symbol, start, end, tf, dataReady, acti
             </p>
           )}
         </aside>
+          </div>
+          <div className="of-studies-slot" ref={setStudiesDrawerHost} />
         </div>
 
         <div className={`of-grid l-${layout}`}>
           {shown.map((cell, i) => (
             <div key={i} className="of-cell">
               {cell.bars && cell.bars.length > 0 ? (
-                <OrderflowChart bars={cell.bars} symbol={form.symbol} tf={cell.tf} visible={active} />
+                <OrderflowChart
+                  bars={cell.bars}
+                  symbol={form.symbol}
+                  tf={cell.tf}
+                  visible={active}
+                  studiesTabHost={i === 0 ? studiesTabHost : null}
+                  studiesDrawerHost={i === 0 ? studiesDrawerHost : null}
+                  onStudiesChange={(open) => setStudiesOpen(open)}
+                />
               ) : (
                 <div className="of-empty">
                   {cell.busy ? 'Building bars…' : 'Open DATA (left edge) and Submit.'}
