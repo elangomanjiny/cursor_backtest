@@ -1,9 +1,11 @@
 """Quant-style performance metrics from trades + equity curve."""
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Sequence
 
 import numpy as np
+import pandas as pd
 
 from backend.engine.formatting import round_obj
 
@@ -27,6 +29,11 @@ METRIC_CATEGORIES: dict[str, list[tuple[str, str]]] = {
         ("max_consec_wins", "Max consec wins"),
         ("avg_mfe", "Avg MFE"),
         ("e_ratio", "E-ratio"),
+        ("avg_ttmfe", "Avg tMFE"),
+        ("avg_ttmae", "Avg tMAE"),
+        ("avg_dt", "Avg ΔT"),
+        ("pct_mae_first", "% MAE-first"),
+        ("pct_mfe_first", "% MFE-first"),
     ],
     "Money management": [
         ("net_pnl", "Net PnL"),
@@ -120,6 +127,71 @@ def compute_trade_metrics(
     avg_mae = float(np.mean(maes)) if maes else 0.0
     e_ratio = (avg_mfe / avg_mae) if avg_mae > 1e-12 else (999.0 if avg_mfe > 0 else 0.0)
 
+    def _field(t: Any, key: str) -> Any:
+        if isinstance(t, dict):
+            return t.get(key)
+        return getattr(t, key, None)
+
+    def _as_dt(v: Any) -> datetime | None:
+        if v is None:
+            return None
+        if isinstance(v, datetime):
+            return v
+        try:
+            ts = pd.Timestamp(v)
+        except (ValueError, TypeError):
+            return None
+        if pd.isna(ts):
+            return None
+        return ts.to_pydatetime()
+
+    def _mins(later: Any, earlier: Any) -> float | None:
+        a = _as_dt(later)
+        b = _as_dt(earlier)
+        if a is None or b is None:
+            return None
+        return max(0.0, (a - b).total_seconds() / 60.0)
+
+    ttmfes: list[float] = []
+    ttmaes: list[float] = []
+    dts: list[float] = []
+    mae_first = mfe_first = premature = giveback = momentum = 0
+    timed = 0
+    tf = max(int(tf_minutes or 1), 1)
+    for t in trades:
+        entry = _field(t, "entry_time")
+        t_mfe = _mins(_field(t, "mfe_time"), entry)
+        t_mae = _mins(_field(t, "mae_time"), entry)
+        hold = _mins(_field(t, "exit_time"), entry) or 0.0
+        if t_mfe is not None:
+            ttmfes.append(t_mfe)
+        if t_mae is not None:
+            ttmaes.append(t_mae)
+            if (t_mae / tf) <= 2.0 + 1e-9:
+                premature += 1
+        if t_mfe is not None and t_mae is not None:
+            timed += 1
+            dt = t_mfe - t_mae
+            dts.append(dt)
+            if dt > 1e-9:
+                mae_first += 1
+            elif dt < -1e-9:
+                mfe_first += 1
+                giveback += 1
+        if t_mfe is not None and hold > 1e-9 and (t_mfe / hold) >= 0.70:
+            momentum += 1
+
+    n_mae = len(ttmaes)
+    n_hold = n
+    avg_ttmfe = float(np.mean(ttmfes)) if ttmfes else 0.0
+    avg_ttmae = float(np.mean(ttmaes)) if ttmaes else 0.0
+    avg_dt = float(np.mean(dts)) if dts else 0.0
+    pct_mae_first = (100.0 * mae_first / timed) if timed else 0.0
+    pct_mfe_first = (100.0 * mfe_first / timed) if timed else 0.0
+    pct_premature = (100.0 * premature / n_mae) if n_mae else 0.0
+    pct_giveback = (100.0 * giveback / timed) if timed else 0.0
+    pct_momentum = (100.0 * momentum / n_hold) if n_hold else 0.0
+
     if equity_points:
         eq = [float(e["equity"]) for e in equity_points]
     else:
@@ -191,6 +263,14 @@ def compute_trade_metrics(
             "avg_mfe": avg_mfe,
             "avg_mae": avg_mae,
             "e_ratio": e_ratio,
+            "avg_ttmfe": avg_ttmfe,
+            "avg_ttmae": avg_ttmae,
+            "avg_dt": avg_dt,
+            "pct_mae_first": pct_mae_first,
+            "pct_mfe_first": pct_mfe_first,
+            "pct_premature": pct_premature,
+            "pct_giveback": pct_giveback,
+            "pct_momentum": pct_momentum,
             "max_consec_wins": max_w,
             "max_consec_losses": max_l,
             "kelly_fraction": kelly,

@@ -18,6 +18,8 @@ LOGS = ROOT / "logs"
 ENGINE_ID = "volume_delta_hybrid"
 # Placeholder SL/TP when Risk is off (never plotted / never filled unless Trail/BE arms a real stop)
 FAR_LEVEL = 1e12
+# Extra same-side adds after the first fill (total lots = volume × (1 + n))
+SCALE_MAX = 3
 
 
 @dataclass
@@ -38,6 +40,9 @@ class Trade:
     range: float
     mfe: float = 0.0
     mae: float = 0.0
+    # First tick that printed the running MFE / MAE extreme
+    mfe_time: datetime | None = None
+    mae_time: datetime | None = None
     # Realized costs in quote currency
     slippage: float = 0.0
     fee: float = 0.0
@@ -54,16 +59,35 @@ class Trade:
     stop_init: float = 0.0
     # Compact trail staircase [{time, stop}] when Trail is on
     trail_path: list | None = None
+    lots: float = 0.0
+    # Extra same-side adds after the first fill (0 = no scale-in)
+    scale_n: int = 0
+    # Each add: {time, price, lots} (IST time, slipped fill)
+    scale_fills: list | None = None
 
 
-def _excursions(active: dict[str, Any], h: float, l: float) -> None:
+def _touch_excursions(
+    active: dict[str, Any], fav: float, adv: float, ts: datetime | None = None
+) -> None:
+    """Raise MFE/MAE on a strict new extreme and stamp first-touch time."""
+    if fav > float(active.get("mfe", 0.0)):
+        active["mfe"] = float(fav)
+        if ts is not None:
+            active["mfe_time"] = ts
+    if adv > float(active.get("mae", 0.0)):
+        active["mae"] = float(adv)
+        if ts is not None:
+            active["mae_time"] = ts
+
+
+def _excursions(
+    active: dict[str, Any], h: float, l: float, ts: datetime | None = None
+) -> None:
     entry = active["entry"]
     if active["is_long"]:
-        active["mfe"] = max(float(active.get("mfe", 0.0)), h - entry)
-        active["mae"] = max(float(active.get("mae", 0.0)), entry - l)
+        _touch_excursions(active, h - entry, entry - l, ts)
     else:
-        active["mfe"] = max(float(active.get("mfe", 0.0)), entry - l)
-        active["mae"] = max(float(active.get("mae", 0.0)), h - entry)
+        _touch_excursions(active, entry - l, h - entry, ts)
 
 
 def _apply_slip(px: float, *, is_long: bool, is_entry: bool, slip_pct: float) -> float:
@@ -235,14 +259,23 @@ def _make_trade(
     is_long = bool(active["is_long"])
     entry = float(active["entry"])  # already slipped at entry
     raw_entry = float(active.get("raw_entry", entry))
+    lots = float(active.get("lots") or volume)
+    if lots <= 0:
+        lots = float(volume)
     exit_px = _apply_slip(px, is_long=is_long, is_entry=False, slip_pct=slip_pct)
-    pnl = (exit_px - entry) * volume if is_long else (entry - exit_px) * volume
-    slip_cost = (abs(entry - raw_entry) + abs(exit_px - px)) * volume
+    pnl = (exit_px - entry) * lots if is_long else (entry - exit_px) * lots
+    exit_slip = abs(exit_px - px) * lots
+    slip_cost = float(active.get("slip_entry") or 0.0) + exit_slip
+    if slip_cost <= 0:
+        slip_cost = (abs(entry - raw_entry) + abs(exit_px - px)) * lots
     fee = 0.0
     if fee_pct > 0:
-        # After slippage, both legs: (entry + exit) × lots × Fee%/100
-        # = 2 × avg(entry, exit) × lots × Fee%/100
-        fee = (abs(entry) + abs(exit_px)) * volume * (fee_pct / 100.0)
+        # Every entry fill (initial + each scale-in) + one exit of full size.
+        exit_fee = abs(exit_px) * lots * (fee_pct / 100.0)
+        fee_entry = float(active.get("fee_entry") or 0.0)
+        if fee_entry <= 0:
+            fee_entry = abs(entry) * lots * (fee_pct / 100.0)
+        fee = fee_entry + exit_fee
         pnl -= fee
     tag = str(active.get("entry_tag") or ("LE" if is_long else "SE"))
     return Trade(
@@ -262,6 +295,12 @@ def _make_trade(
         range=active["range"],
         mfe=float(active.get("mfe", 0.0)),
         mae=float(active.get("mae", 0.0)),
+        mfe_time=(
+            _to_ist(active["mfe_time"]) if active.get("mfe_time") is not None else None
+        ),
+        mae_time=(
+            _to_ist(active["mae_time"]) if active.get("mae_time") is not None else None
+        ),
         slippage=slip_cost,
         fee=fee,
         entry_tag=tag,
@@ -281,6 +320,9 @@ def _make_trade(
         ),
         stop_init=float(active.get("stop_init") or active.get("stop") or 0.0),
         trail_path=_finalize_trail_path(active, ot),
+        lots=lots,
+        scale_n=int(active.get("scale_n") or 0),
+        scale_fills=list(active.get("scale_fills") or []) or None,
     )
 
 
@@ -856,13 +898,11 @@ def _scan_ticks_until(
         stop = float(active["stop"])
         target = float(active["target"])
 
-        # MFE/MAE from actual trades
+        # MFE/MAE from actual trades (first-touch timestamps)
         if is_long:
-            active["mfe"] = max(float(active.get("mfe", 0.0)), px - entry)
-            active["mae"] = max(float(active.get("mae", 0.0)), entry - px)
+            _touch_excursions(active, px - entry, entry - px, ts)
         else:
-            active["mfe"] = max(float(active.get("mfe", 0.0)), entry - px)
-            active["mae"] = max(float(active.get("mae", 0.0)), px - entry)
+            _touch_excursions(active, entry - px, px - entry, ts)
 
         if _past_session_flat(ts, exit_time):
             return i + 1, ts, px, ("LTX" if is_long else "STX")
@@ -974,6 +1014,7 @@ def run_backtest(
     base_tf_minutes: int = 15,
     base_threshold: float = 30.0,
     base_bars: pd.DataFrame | None = None,
+    scale_in: int = 0,
 ) -> BacktestResult:
     """
     Hybrid engine: bar AGGR/entry levels + tick SL/TP/session fills.
@@ -1059,6 +1100,7 @@ def run_backtest(
     aggr_reverse = not mtf  # Dir + Non-Dir + Pro; Pro-MTF uses LMTFX/SMTFX, not LR/SR
     # BreakEven: arm from be_unit/be_value (when). Lock = CTC × (slip USDT + fee USDT) / lots.
     be_on = 1 if int(break_even or 0) else 0
+    scale_on = 1 if int(scale_in or 0) else 0
     if be_u == "range":
         be_frac = 0.5
     elif be_u == "pct":
@@ -1116,6 +1158,7 @@ def run_backtest(
 
     long_setup = None  # Wait=false directional / pro
     short_setup = None
+    scale_setup: dict[str, Any] | None = None
     orb: dict[str, Any] | None = None  # Wait=true shared ORB range
     pending_reentry: dict[str, Any] | None = None
     aggr_flip: dict[str, Any] | None = None  # Directional: reverse at next bar open
@@ -1154,7 +1197,7 @@ def run_backtest(
             active["pending_events"] = []
 
     def _close(exit_ts: datetime, exit_px: float, reason: str, events: list[str]) -> Trade:
-        nonlocal active, realized
+        nonlocal active, realized, scale_setup
         assert active is not None
         t = _make_trade(active, exit_ts, exit_px, reason, volume, slip_pct=slip, fee_pct=fee)
         trades.append(t)
@@ -1162,7 +1205,75 @@ def run_backtest(
         events.append(f"{reason}@{exit_px:.2f}")
         _push_equity(exit_ts)
         active = None
+        scale_setup = None
         return t
+
+    def _cost_be_px(pos: dict[str, Any]) -> float:
+        """Open-trade breakeven: slipped avg entry ± accrued entry-leg fees in price."""
+        entry = float(pos["entry"])
+        lots_now = max(float(pos.get("lots") or volume), 1e-12)
+        fee_q = float(pos.get("fee_entry") or 0.0)
+        if fee_q <= 0 and fee > 0:
+            fee_q = abs(entry) * lots_now * (fee / 100.0)
+        fee_off = fee_q / lots_now
+        return entry + fee_off if pos["is_long"] else entry - fee_off
+
+    def _apply_scale(raw: float, events: list[str], fill_time: datetime) -> bool:
+        """Add one `volume` lot if in profit after fees and new fill is through cost BE."""
+        nonlocal active
+        assert active is not None
+        is_long = bool(active["is_long"])
+        n = int(active.get("scale_n") or 0)
+        if n >= SCALE_MAX:
+            events.append("SCALE-SKIP-MAX")
+            return False
+        old_entry = float(active["entry"])
+        lots_now = float(active.get("lots") or volume)
+        add = float(volume)
+        fee_so_far = float(active.get("fee_entry") or 0.0)
+        if fee_so_far <= 0 and fee > 0:
+            fee_so_far = abs(old_entry) * lots_now * (fee / 100.0)
+        mtm = (raw - old_entry) * lots_now if is_long else (old_entry - raw) * lots_now
+        if mtm <= fee_so_far:
+            events.append("SCALE-SKIP-PNL")
+            return False
+        new_fill = _apply_slip(raw, is_long=is_long, is_entry=True, slip_pct=slip)
+        be = _cost_be_px(active)
+        be_ok = (new_fill > be) if is_long else (new_fill < be)
+        if not be_ok:
+            events.append("SCALE-SKIP-BE")
+            return False
+        new_lots = lots_now + add
+        old_raw = float(active.get("raw_entry", old_entry))
+        add_fee = abs(new_fill) * add * (fee / 100.0) if fee > 0 else 0.0
+        add_slip = abs(new_fill - raw) * add
+        active["entry"] = (old_entry * lots_now + new_fill * add) / new_lots
+        active["raw_entry"] = (old_raw * lots_now + raw * add) / new_lots
+        active["lots"] = new_lots
+        active["scale_n"] = n + 1
+        active["fee_entry"] = fee_so_far + add_fee
+        active["slip_entry"] = float(active.get("slip_entry") or 0.0) + add_slip
+        fills = list(active.get("scale_fills") or [])
+        fills.append(
+            {
+                "time": _to_ist(fill_time),
+                "price": new_fill,
+                "lots": add,
+            }
+        )
+        active["scale_fills"] = fills
+        tag0 = str(active.get("entry_tag") or ("LE" if is_long else "SE"))
+        if "+" not in tag0:
+            active["entry_tag"] = f"{tag0}+"
+        lock_off = _be_ctc_price_offset(float(active["entry"]), new_lots, slip, fee, ctc)
+        if is_long:
+            active["be_lock"] = float(active["entry"]) + lock_off
+        else:
+            active["be_lock"] = float(active["entry"]) - lock_off
+        events.append(
+            f"SCALE-{'LE' if is_long else 'SE'}@{new_fill:.2f} lots={new_lots:.4g} fee={active['fee_entry']:.4f}"
+        )
+        return True
 
     def _tighten_from_aggr(
         hi: float,
@@ -1256,6 +1367,8 @@ def run_backtest(
             "entry_tag": tag,
             "mfe": 0.0,
             "mae": 0.0,
+            "mfe_time": None,
+            "mae_time": None,
             "signal_time": signal_time,
             "signal_high": float(signal_high),
             "signal_low": float(signal_low),
@@ -1286,6 +1399,11 @@ def run_backtest(
             "flip_px": None,
             "mtf_invalid": None,
             "pending_events": [],
+            "lots": float(volume),
+            "scale_n": 0,
+            "scale_fills": [],
+            "fee_entry": abs(entry) * float(volume) * (fee / 100.0) if fee > 0 else 0.0,
+            "slip_entry": abs(entry - raw) * float(volume),
         }
 
     def _levels(
@@ -1472,7 +1590,7 @@ def run_backtest(
 
     def _cancel_stale_setups(events: list[str], why: str) -> None:
         """Drop pending ORB / Directional setups / reverse so Flatten cannot fill next session."""
-        nonlocal orb, pending_reentry, aggr_flip, mtf_flip, long_setup, short_setup
+        nonlocal orb, pending_reentry, aggr_flip, mtf_flip, long_setup, short_setup, scale_setup
         parts: list[str] = []
         if orb is not None:
             parts.append("orb")
@@ -1492,6 +1610,9 @@ def run_backtest(
         if short_setup is not None:
             parts.append("SE-setup")
             short_setup = None
+        if scale_setup is not None:
+            parts.append("scale")
+            scale_setup = None
         if parts:
             events.append(f"FLAT-CANCEL-{why}:{'+'.join(parts)}")
 
@@ -1676,6 +1797,23 @@ def run_backtest(
                     closed_this_bar = _handle_exit(ot, o, want, events, until=bar_end)
                     tick_managed = True
             mtf_flip = None
+
+        # Scale-in at this bar's open (same-side AGGR from prior bar), before ticks.
+        if scale_on and scale_setup is not None:
+            if scale_setup["signal_time"] < ot:
+                scale_setup["bars"] = int(scale_setup.get("bars", 0)) + 1
+            if active is None:
+                scale_setup = None
+            elif (
+                int(scale_setup.get("bars", 0)) >= 1
+                and in_win
+                and not session_flat
+                and bool(active["is_long"]) == bool(scale_setup.get("is_long"))
+            ):
+                _apply_scale(o, events, ot)
+                scale_setup = None
+            elif int(scale_setup.get("bars", 0)) >= 1:
+                scale_setup = None
 
         # --- manage open on ticks through this bar ---
         if active is not None and not tick_managed:
@@ -1984,6 +2122,32 @@ def run_backtest(
             if aggr_reverse and active is not None:
                 _arm_flip_from_aggr(side, h, l, rng, ot, dlt, events, pro_tag=pro_tag)
 
+            if (
+                scale_on
+                and active is not None
+                and not session_flat
+                and int(active.get("scale_n") or 0) < SCALE_MAX
+            ):
+                want_long = bool(active["is_long"])
+                same = False
+                if pro:
+                    if want_long and pro_tag and _pro_long_bias(pro_tag):
+                        same = True
+                    elif (not want_long) and pro_tag and _pro_short_bias(pro_tag):
+                        same = True
+                else:
+                    same = (want_long and side == "Buy") or (
+                        (not want_long) and side == "Sell"
+                    )
+                if mtf and same:
+                    if want_long and not _mtf_accept_long(l, mtf_inv):
+                        same = False
+                    if (not want_long) and not _mtf_accept_short(h, mtf_inv):
+                        same = False
+                if same:
+                    scale_setup = {"signal_time": ot, "bars": 0, "is_long": want_long}
+                    events.append("SCALE-ARM")
+
             if session_flat:
                 events.append("AGGR-SKIP-FLAT")
             elif wait_and_trade:
@@ -2176,6 +2340,8 @@ def run_backtest(
         "re_entry": re_en,
         "stop_to_be": stobe,
         "break_even": int(be_on),
+        "scale_in": int(scale_on),
+        "scale_adds": sum(int(t.scale_n or 0) for t in trades),
         "break_even_pct": round(be_frac * 100.0, 2),
         "strategy_mode": (
             "pro_mtf"
@@ -2281,9 +2447,26 @@ def result_to_jsonable(r: BacktestResult) -> dict[str, Any]:
 
     def ser_trade(t: Trade) -> dict[str, Any]:
         d = asdict(t)
-        for k in ("entry_time", "exit_time", "signal_time", "be_moved_time"):
+        for k in (
+            "entry_time",
+            "exit_time",
+            "signal_time",
+            "be_moved_time",
+            "mfe_time",
+            "mae_time",
+        ):
             if d.get(k) is not None:
                 d[k] = d[k].isoformat()
+        fills = d.get("scale_fills")
+        if fills:
+            out_fills = []
+            for f in fills:
+                item = dict(f)
+                ts = item.get("time")
+                if ts is not None and hasattr(ts, "isoformat"):
+                    item["time"] = ts.isoformat()
+                out_fills.append(item)
+            d["scale_fills"] = out_fills
         return round_obj(d)
 
     def ser_agg(a: Aggressive) -> dict[str, Any]:

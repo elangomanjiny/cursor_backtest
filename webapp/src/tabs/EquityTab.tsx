@@ -2,7 +2,6 @@ import { useMemo, useState } from 'react'
 import type { BacktestResult } from '../api'
 import { computeDashboard, INITIAL_CAPITAL } from '../dashboard/computeDashboard'
 import { SyncedDepthCharts } from '../dashboard/SyncedDepthCharts'
-import { ExcursionScatter } from '../dashboard/ExcursionScatter'
 import { fmt2 } from '../format'
 
 type Props = {
@@ -12,7 +11,6 @@ type Props = {
 }
 
 type SideFilter = 'both' | 'long' | 'short'
-type ChartKind = 'equity' | 'excursion'
 
 function rebuildBySide(data: BacktestResult, side: SideFilter): BacktestResult {
   if (side === 'both') return data
@@ -48,7 +46,6 @@ function rebuildBySide(data: BacktestResult, side: SideFilter): BacktestResult {
 
 export function EquityTab({ data, visible = true }: Props) {
   const [sideFilter, setSideFilter] = useState<SideFilter>('both')
-  const [chartKind, setChartKind] = useState<ChartKind>('equity')
   const [capital, setCapital] = useState(INITIAL_CAPITAL)
 
   const scoped = useMemo(
@@ -102,15 +99,6 @@ export function EquityTab({ data, visible = true }: Props) {
             }}
           />
         </label>
-        <select
-          className="equity-kind-select"
-          value={chartKind}
-          onChange={(e) => setChartKind(e.target.value === 'excursion' ? 'excursion' : 'equity')}
-          aria-label="Chart type"
-        >
-          <option value="equity">Equity</option>
-          <option value="excursion">Excursion</option>
-        </select>
         <div className="equity-side-filters" role="group" aria-label="Equity side filter">
           {(
             [
@@ -131,11 +119,7 @@ export function EquityTab({ data, visible = true }: Props) {
         </div>
       </header>
       <div className="equity-curve-body">
-        {chartKind === 'equity' ? (
-          <SyncedDepthCharts model={model} visible={visible} startCapital={capital} />
-        ) : (
-          <ExcursionScatter trades={scoped.trades} symbol={data.symbol} />
-        )}
+        <SyncedDepthCharts model={model} visible={visible} startCapital={capital} />
       </div>
     </div>
   )

@@ -1146,6 +1146,18 @@ th.sorted-desc .sort-ind {
   color-scheme: dark;
   width: auto;
 }
+.control-strip input[type="date"] {
+  width: 9.6rem;
+  color-scheme: dark;
+}
+.control-strip input.sym-plain {
+  width: 7.25rem;
+  text-transform: uppercase;
+}
+.control-strip select.exch-plain {
+  width: auto;
+  min-width: 8.25rem;
+}
 
 .chart-area {
   flex: 1 1 auto;
@@ -2683,6 +2695,47 @@ th.sorted-desc .sort-ind {
   border: none;
   background: transparent;
 }
+.excursion-tab-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  height: calc(100vh - 120px);
+  max-height: calc(100vh - 120px);
+  overflow: hidden;
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+.pod-exc {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+  padding: 8px 10px 10px;
+  overflow: auto;
+  background: #0b1220;
+}
+.pod-exc .pod-exc-metrics {
+  flex: 0 0 auto;
+}
+.pod-exc .pod-card-exc-timing,
+.pod-exc .pod-exc-size {
+  flex: 0 0 auto;
+}
+.pod-exc-size {
+  flex: 1 1 auto;
+  min-height: 480px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.pod-exc-size .excursion-grid {
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 440px;
+  grid-template-rows: auto minmax(300px, 1fr) auto;
+}
 .pod-perf {
   display: flex;
   flex-direction: column;
@@ -2742,6 +2795,45 @@ th.sorted-desc .sort-ind {
   grid-template-rows: repeat(2, minmax(0, 1fr));
   gap: 10px;
   overflow: hidden;
+}
+.pod-card-exc-timing {
+  flex: 0 0 auto;
+  min-height: 280px;
+  overflow: auto;
+}
+.temporal-exc {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+.temporal-exc-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.temporal-exc-count {
+  font-size: 0.68rem;
+  color: #8b949e;
+}
+.temporal-exc-svg {
+  width: 100%;
+  max-height: 280px;
+}
+.temporal-exc-diag {
+  stroke: #58a6ff;
+  stroke-width: 1.25;
+  stroke-dasharray: 5 4;
+}
+.temporal-exc-diag-lab {
+  fill: #58a6ff;
+  font-size: 10px;
+  font-family: ui-monospace, monospace;
+}
+.temporal-exc-legend {
+  flex-wrap: wrap;
 }
 .pod-perf-grid .pod-stat-card {
   min-height: 0;
@@ -2821,7 +2913,8 @@ th.sorted-desc .sort-ind {
 }
 
 .chart-fill:has(.equity-curve-panel),
-.chart-fill:has(.performance-panel) {
+.chart-fill:has(.performance-panel),
+.chart-fill:has(.excursion-tab-panel) {
   overflow: hidden;
   padding: 0;
 }

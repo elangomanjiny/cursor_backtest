@@ -155,6 +155,7 @@ const DEFAULTS: StrategyParams = {
   fee_pct: 0.05,
   time_stop_minutes: 0, // always off — TStop UI removed
   re_entry: 0,
+  scale_in: 0,
   stop_to_be: 0,
   break_even: 0,
   break_even_pct: 50,
@@ -179,7 +180,9 @@ export default function App() {
   const [err, setErr] = useState<string | null>(null)
   const [sessionStarted, setSessionStarted] = useState(false)
   const [ofVisited, setOfVisited] = useState(false)
-  const [view, setView] = useState<'charts' | 'trades' | 'equity' | 'performance'>('charts')
+  const [view, setView] = useState<
+    'charts' | 'trades' | 'equity' | 'performance' | 'excursion'
+  >('charts')
   const [optProgress, setOptProgress] = useState<{
     done: number
     total: number
@@ -198,7 +201,10 @@ export default function App() {
     void fetchHealth()
       .then(setHealth)
       .catch(() => undefined)
-    // restore readiness if parquet already present
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
     void fetchDataStatus({
       exchange: params.exchange,
       symbol: params.symbol,
@@ -206,9 +212,14 @@ export default function App() {
       end: params.end,
       tf: params.tf,
     })
-      .then(setAvailability)
+      .then((a) => {
+        if (!cancelled) setAvailability(a)
+      })
       .catch(() => undefined)
-  }, [])
+    return () => {
+      cancelled = true
+    }
+  }, [params.exchange, params.symbol, params.start, params.end, params.tf])
 
   const onLoadData = async () => {
     setBusy(true)
@@ -237,7 +248,39 @@ export default function App() {
     setBusy(true)
     setErr(null)
     try {
-      const bt = await fetchBacktest(p)
+      const symbol = p.symbol.trim().toUpperCase()
+      if (!symbol) {
+        throw new Error('Symbol is required.')
+      }
+      const payload: StrategyParams = { ...p, symbol }
+      let status = await fetchDataStatus({
+        exchange: payload.exchange,
+        symbol: payload.symbol,
+        start: payload.start,
+        end: payload.end,
+        tf: payload.tf,
+      })
+      if (id !== reqId.current) return undefined
+      if (!status.ready) {
+        const res = await loadData({
+          exchange: payload.exchange,
+          symbol: payload.symbol,
+          start: payload.start,
+          end: payload.end,
+          tf: payload.tf,
+        })
+        if (id !== reqId.current) return undefined
+        status = res.availability
+        setAvailability(status)
+        if (!status.ready) {
+          throw new Error(
+            'Could not load data for this exchange/symbol/range. Check the IST dates (max 370 days) and symbol.',
+          )
+        }
+      } else {
+        setAvailability(status)
+      }
+      const bt = await fetchBacktest(payload)
       if (id !== reqId.current) return undefined
       clearChartRange()
       resetChartStudy()
@@ -514,7 +557,7 @@ export default function App() {
             className={`${step === id ? 'active' : ''} ${
               id === 1 && dataReady ? 'ready' : ''
             } ${id > 1 && dataReady ? 'ready' : ''}`}
-            disabled={id > 1 && id !== 4 && !dataReady}
+            disabled={id === 3 && !dataReady}
             onClick={() => {
               if (id === 4) setOfVisited(true)
               setStep(id)

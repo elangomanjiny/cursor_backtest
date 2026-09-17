@@ -1,4 +1,5 @@
 import type { BacktestResult, TradeRow } from '../api'
+import { summarizeExcursionTiming, type ExcursionTimingStats } from './excursionTiming'
 
 /** Starting equity for the Equity Curve tab (cumulative PnL is added on top). */
 export const INITIAL_CAPITAL = 10_000
@@ -136,6 +137,15 @@ export type SideBucketStats = {
   stepsPerYear: number
   equitySpark: number[]
   ddSpark: number[]
+  avgTmfe: number
+  avgTmae: number
+  avgDt: number
+  pctMaeFirst: number
+  pctMfeFirst: number
+  pctPremature: number
+  pctGiveback: number
+  pctMomentum: number
+  timedExcursions: number
 }
 
 export type DashboardModel = {
@@ -199,6 +209,15 @@ function emptySideStats(): SideBucketStats {
     stepsPerYear: 0,
     equitySpark: [],
     ddSpark: [],
+    avgTmfe: 0,
+    avgTmae: 0,
+    avgDt: 0,
+    pctMaeFirst: 0,
+    pctMfeFirst: 0,
+    pctPremature: 0,
+    pctGiveback: 0,
+    pctMomentum: 0,
+    timedExcursions: 0,
   }
 }
 
@@ -273,7 +292,12 @@ function pathRisk(pnls: number[]) {
   }
 }
 
-function computeSideBucket(trades: TradeRow[], volume: number, notionalFallback: number): SideBucketStats {
+function computeSideBucket(
+  trades: TradeRow[],
+  volume: number,
+  notionalFallback: number,
+  tfMinutes: number,
+): SideBucketStats {
   if (!trades.length) return emptySideStats()
   const pnls = trades.map((t) => Number(t.pnl) || 0)
   const wins = pnls.filter((p) => p > 0)
@@ -312,6 +336,7 @@ function computeSideBucket(trades: TradeRow[], volume: number, notionalFallback:
   const totalFriction = totalSlippage + totalFees
   const feeDragPct = grossProfit > 1e-12 ? (totalFriction / grossProfit) * 100 : 0
   const risk = pathRisk(pnls)
+  const timing: ExcursionTimingStats = summarizeExcursionTiming(trades, tfMinutes)
   return {
     trades: trades.length,
     netPnl: net,
@@ -341,6 +366,15 @@ function computeSideBucket(trades: TradeRow[], volume: number, notionalFallback:
     totalFriction,
     feeDragPct,
     ...risk,
+    avgTmfe: timing.avgTmfe,
+    avgTmae: timing.avgTmae,
+    avgDt: timing.avgDt,
+    pctMaeFirst: timing.pctMaeFirst,
+    pctMfeFirst: timing.pctMfeFirst,
+    pctPremature: timing.pctPremature,
+    pctGiveback: timing.pctGiveback,
+    pctMomentum: timing.pctMomentum,
+    timedExcursions: timing.timed,
   }
 }
 
@@ -726,10 +760,11 @@ export function computeDashboard(
 
   const longList = trades.filter((t) => isLongSide(t.side))
   const shortList = trades.filter((t) => isShortSide(t.side))
+  const tfMinutes = Number(data.tf_minutes || 15)
   const bySide = {
-    all: computeSideBucket(trades, volume, avgNotional),
-    long: computeSideBucket(longList, volume, avgNotional),
-    short: computeSideBucket(shortList, volume, avgNotional),
+    all: computeSideBucket(trades, volume, avgNotional, tfMinutes),
+    long: computeSideBucket(longList, volume, avgNotional, tfMinutes),
+    short: computeSideBucket(shortList, volume, avgNotional, tfMinutes),
   }
 
   const equityRawSpark = downsample(equity.map((e) => e.equity))

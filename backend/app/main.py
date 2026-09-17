@@ -44,7 +44,7 @@ from backend.engine.volume_delta import (  # noqa: E402
     write_parity_report,
 )
 
-APP_VERSION = "2.2.18"
+APP_VERSION = "2.2.24"
 app = FastAPI(title="cursor_backtest", version=APP_VERSION)
 app.add_middleware(
     CORSMiddleware,
@@ -458,6 +458,7 @@ def backtest(
     pro_mtf_mode: bool = False,
     base_tf: int = Query(15, alias="base_tf"),
     base_threshold: float = 30.0,
+    scale_in: int = 0,
 ):
     avail = _ensure_ready(
         exchange, symbol, start or "2026-08-01", end or "2026-08-03", tf
@@ -547,6 +548,7 @@ def backtest(
             base_tf_minutes=int(base_tf),
             base_threshold=float(base_threshold),
             base_bars=base_scoped,
+            scale_in=1 if int(scale_in or 0) else 0,
         )
     except FileNotFoundError as e:
         raise HTTPException(409, str(e)) from e
@@ -610,6 +612,7 @@ def backtest(
             "pro_mtf_mode": bool(pro_mtf_mode),
             "base_tf": int(base_tf),
             "base_threshold": float(base_threshold),
+            "scale_in": 1 if int(scale_in or 0) else 0,
             "start": start,
             "end": end,
             "dayofweek": dayofweek,

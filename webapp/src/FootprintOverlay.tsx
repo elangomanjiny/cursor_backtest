@@ -65,7 +65,7 @@ type Props = {
   showImb?: boolean
   showDiv?: boolean
   showAbsorb?: boolean
-  absorbMode?: 'body' | 'range'
+  absorbMode?: 'body' | 'range' | 'extreme'
   absorbBodyPct?: number
   showUa?: boolean
   showBigVol?: boolean
@@ -527,7 +527,7 @@ export type OfSigFlags = {
   imb: boolean
   div: boolean
   absorb: boolean
-  absorbMode: 'body' | 'range'
+  absorbMode: 'body' | 'range' | 'extreme'
   absorbBodyPct: number
   ua: boolean
   bigVol: boolean
@@ -554,6 +554,53 @@ function markTri(
   ctx.lineTo(x + 4, y + dir * 8)
   ctx.closePath()
   ctx.fill()
+}
+
+function markBubble(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  radius: number,
+  fill: string,
+  stroke: string,
+) {
+  const r = Math.max(3.5, Math.min(14, radius))
+  ctx.beginPath()
+  ctx.arc(x, y, r, 0, Math.PI * 2)
+  ctx.fillStyle = fill
+  ctx.fill()
+  ctx.strokeStyle = stroke
+  ctx.lineWidth = 1.2
+  ctx.stroke()
+}
+
+function levelTot(lv: FootprintLevel, unit: Unit): number {
+  return volOf(lv, unit, 'ask') + volOf(lv, unit, 'bid')
+}
+
+function levelDelta(lv: FootprintLevel, unit: Unit): number {
+  return volOf(lv, unit, 'ask') - volOf(lv, unit, 'bid')
+}
+
+function pickMaxLevel(
+  levels: FootprintLevel[],
+  score: (lv: FootprintLevel) => number,
+): FootprintLevel | null {
+  let best: FootprintLevel | null = null
+  let bestV = 0
+  for (const lv of levels) {
+    const v = score(lv)
+    if (v > bestV) {
+      bestV = v
+      best = lv
+    }
+  }
+  return bestV > 0 ? best : null
+}
+
+function bubbleRadius(v: number, maxV: number, bw: number): number {
+  if (v <= 0 || maxV <= 0) return 5
+  return 4 + (v / maxV) * Math.min(12, Math.max(6, bw * 0.38))
 }
 
 function sigmaHigh(x: number, mid: number | null | undefined, std: number | null | undefined, k: number): boolean {
@@ -667,14 +714,34 @@ function drawOfSignals(
     const yH = series.priceToCoordinate(b.high)
     const yL = series.priceToCoordinate(b.low)
     if (yH == null || yL == null) continue
+    const fp = fpBy.get(b.time)
+    const levels = [...(fp?.levels ?? [])].sort((a, c) => a.price - c.price)
+    const maxLv = Math.max(1, ...levels.map((lv) => levelTot(lv, unit)))
+
+    const paintAt = (price: number, vol: number, fill: string, stroke: string) => {
+      const y = series.priceToCoordinate(price)
+      if (y == null) return false
+      markBubble(ctx, slot.mid, y, bubbleRadius(vol, maxLv, slot.bw), fill, stroke)
+      return true
+    }
+
     if (sigs.bigVol && sigmaHigh(b.volume, b.volMid, b.volStd, k)) {
-      markTri(ctx, slot.mid, yL + 10, 1, '#58a6ff')
+      const lv = pickMaxLevel(levels, (x) => levelTot(x, unit))
+      if (!lv || !paintAt(lv.price, levelTot(lv, unit), 'rgba(88,166,255,0.42)', '#58a6ff')) {
+        markTri(ctx, slot.mid, yL + 10, 1, '#58a6ff')
+      }
     }
     if (sigs.bigAsk && b.delta > 0 && sigmaHigh(b.delta, b.dAbsMid, b.dAbsStd, k)) {
-      markTri(ctx, slot.mid + 6, yH - 10, -1, '#3fb950')
+      const lv = pickMaxLevel(levels, (x) => volOf(x, unit, 'ask'))
+      if (!lv || !paintAt(lv.price, volOf(lv, unit, 'ask'), 'rgba(63,185,80,0.42)', '#3fb950')) {
+        markTri(ctx, slot.mid + 6, yH - 10, -1, '#3fb950')
+      }
     }
     if (sigs.bigBid && b.delta < 0 && sigmaHigh(Math.abs(b.delta), b.dAbsMid, b.dAbsStd, k)) {
-      markTri(ctx, slot.mid - 6, yL + 10, 1, '#f85149')
+      const lv = pickMaxLevel(levels, (x) => volOf(x, unit, 'bid'))
+      if (!lv || !paintAt(lv.price, volOf(lv, unit, 'bid'), 'rgba(248,81,73,0.42)', '#f85149')) {
+        markTri(ctx, slot.mid - 6, yL + 10, 1, '#f85149')
+      }
     }
     if (sigs.div && i > 0) {
       const p = ofBars[i - 1]
@@ -682,16 +749,52 @@ function drawOfSignals(
       if (b.low < p.low && b.delta > p.delta) markTri(ctx, slot.mid, yL + 16, 1, '#a371f7')
     }
     const rng = Math.max(1e-9, b.range ?? b.high - b.low)
-    const bodyOk = Math.abs(b.close - b.open) / rng < Math.max(0.05, (sigs.absorbBodyPct || 35) / 100)
-    const rangeOk = rangeInBand(rng, b.rangeUpper)
-    const sizeOk = sigs.absorbMode === 'body' ? bodyOk : rangeOk
-    if (sigs.absorb && (b.hh || b.ll) && sizeOk && sigmaHigh(b.volume, b.volMid, b.volStd, k)) {
-      ctx.strokeStyle = '#f0b429'
-      ctx.lineWidth = 1.4
-      ctx.strokeRect(slot.x0, yH, slot.bw, yL - yH)
+    if (sigs.absorb && sigs.absorbMode === 'extreme') {
+      const bodyHi = Math.max(b.open, b.close)
+      const bodyLo = Math.min(b.open, b.close)
+      const goldFill = 'rgba(240,180,41,0.40)'
+      const gold = '#f0b429'
+      if (b.close > b.open && b.low < bodyLo - 1e-12) {
+        const wick = levels.filter((lv) => lv.price <= bodyLo + 1e-9)
+        const wVol = wick.reduce((s, lv) => s + levelTot(lv, unit), 0)
+        const wDlt = wick.reduce((s, lv) => s + levelDelta(lv, unit), 0)
+        const volOk = wick.length
+          ? sigmaHigh(wVol, b.volMid, b.volStd, k) || sigmaHigh(b.volume, b.volMid, b.volStd, k)
+          : sigmaHigh(b.volume, b.volMid, b.volStd, k)
+        const dltOk = wick.length ? wDlt < 0 : b.delta < 0
+        if (volOk && dltOk) {
+          const lv = pickMaxLevel(wick, (x) => levelTot(x, unit))
+          if (!lv || !paintAt(lv.price, levelTot(lv, unit), goldFill, gold)) {
+            paintAt(b.low, b.volume, goldFill, gold)
+          }
+        }
+      }
+      if (b.close < b.open && b.high > bodyHi + 1e-12) {
+        const wick = levels.filter((lv) => lv.price >= bodyHi - 1e-9)
+        const wVol = wick.reduce((s, lv) => s + levelTot(lv, unit), 0)
+        const wDlt = wick.reduce((s, lv) => s + levelDelta(lv, unit), 0)
+        const volOk = wick.length
+          ? sigmaHigh(wVol, b.volMid, b.volStd, k) || sigmaHigh(b.volume, b.volMid, b.volStd, k)
+          : sigmaHigh(b.volume, b.volMid, b.volStd, k)
+        const dltOk = wick.length ? wDlt > 0 : b.delta > 0
+        if (volOk && dltOk) {
+          const lv = pickMaxLevel(wick, (x) => levelTot(x, unit))
+          if (!lv || !paintAt(lv.price, levelTot(lv, unit), goldFill, gold)) {
+            paintAt(b.high, b.volume, goldFill, gold)
+          }
+        }
+      }
+    } else if (sigs.absorb) {
+      const bodyOk =
+        Math.abs(b.close - b.open) / rng < Math.max(0.05, (sigs.absorbBodyPct || 35) / 100)
+      const rangeOk = rangeInBand(rng, b.rangeUpper)
+      const sizeOk = sigs.absorbMode === 'body' ? bodyOk : rangeOk
+      if ((b.hh || b.ll) && sizeOk && sigmaHigh(b.volume, b.volMid, b.volStd, k)) {
+        ctx.strokeStyle = '#f0b429'
+        ctx.lineWidth = 1.4
+        ctx.strokeRect(slot.x0, yH, slot.bw, yL - yH)
+      }
     }
-    const fp = fpBy.get(b.time)
-    const levels = [...(fp?.levels ?? [])].sort((a, c) => a.price - c.price)
     if (sigs.ua && levels.length) {
       const hi = levels[levels.length - 1]
       const lo = levels[0]
@@ -1123,7 +1226,14 @@ export function FootprintOverlay({
   const binSafe = Math.max(1, Math.round(Number(binMult) || 1))
   const vpBinSafe = Math.max(1, Math.round(Number(vpBinMult ?? binMult) || 1))
   const vazBinSafe = Math.max(1, Math.round(Number(vazBinMult ?? binMult) || 1))
-  const wantFpData = show || showImb || showUa
+  const wantFpData =
+    show ||
+    showImb ||
+    showUa ||
+    showBigVol ||
+    showBigAsk ||
+    showBigBid ||
+    (showAbsorb && absorbMode === 'extreme')
   const sigs: OfSigFlags = {
     imb: showImb,
     div: showDiv,
@@ -1283,7 +1393,7 @@ export function FootprintOverlay({
                 barsRef.current = r.bars || []
                 if (showVazRef.current) vazRef.current = barsRef.current
                 fpTickRef.current = Number(r.tick_size || fpTickRef.current || 0.01)
-                applyFpCandles(true)
+                applyFpCandles(showRef.current)
                 setHint(barsRef.current.length ? null : 'No ticks in view')
                 paint()
               })
@@ -1461,7 +1571,7 @@ export function FootprintOverlay({
       window.removeEventListener('resize', schedule)
       ro?.disconnect()
     }
-  }, [active, show, showVaz, showCot, showMinMax, showVp, showImb, showUa, symbol, tf, binSafe, vpBinSafe, vazBinSafe, vpT0, vpT1, chartEpoch, chartRef, seriesRef, wrapRef, barTimes])
+  }, [active, show, showVaz, showCot, showMinMax, showVp, showImb, showUa, wantFpData, symbol, tf, binSafe, vpBinSafe, vazBinSafe, vpT0, vpT1, chartEpoch, chartRef, seriesRef, wrapRef, barTimes])
 
   useEffect(() => {
     if (!active) return

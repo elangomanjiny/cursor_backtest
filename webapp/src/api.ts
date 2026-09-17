@@ -48,6 +48,8 @@ export type StrategyParams = {
   time_stop_minutes: number
   /** After SSL/LSL in WaitAndTrade ORB: 1 = re-enter if price returns to entry; 0 = off. */
   re_entry: number
+  /** Same-side AGGR while in profit and through cost BE: add one more `volume` lot (max 3). */
+  scale_in: number
   /** 1 = move stop to new AGGR extreme only if past entry (BE+); 0 = always tighten. */
   stop_to_be: number
   /** 1 = BreakEven on; 0 = off. */
@@ -165,6 +167,16 @@ export type TradeRow = {
   range: number
   mfe?: number
   mae?: number
+  /** First tick that printed the running MFE extreme. */
+  mfe_time?: string | null
+  /** First tick that printed the running MAE extreme. */
+  mae_time?: string | null
+  /** Position size in lots (grows when Scale-in adds). */
+  lots?: number
+  /** Extra same-side adds after the first fill. */
+  scale_n?: number
+  /** Each scale-in fill (IST time, slipped price, added lots). */
+  scale_fills?: { time: string; price: number; lots: number }[] | null
   /** Realized slippage cost (quote). */
   slippage?: number
   /** Realized fees (quote). */
@@ -262,6 +274,8 @@ export type OptimizeTradeLite = {
   pnl: number
   mfe?: number
   mae?: number
+  mfe_time?: string | null
+  mae_time?: string | null
   slippage?: number
   fee?: number
   entry_tag?: string
@@ -301,6 +315,8 @@ export type OptimizePoint = {
   volume?: number
   trades: number
   entry_tags?: Record<string, number>
+  scale_in?: number
+  scale_adds?: number
   net_pnl: number
   /** Fill gross = Net + Fees (slip already in Entry/Exit). */
   gross_pnl?: number
@@ -321,6 +337,14 @@ export type OptimizePoint = {
   e_ratio?: number
   avg_mfe?: number
   avg_mae?: number
+  avg_ttmfe?: number
+  avg_ttmae?: number
+  avg_dt?: number
+  pct_mae_first?: number
+  pct_mfe_first?: number
+  pct_premature?: number
+  pct_giveback?: number
+  pct_momentum?: number
   ulcer_index?: number
   kelly_fraction?: number
   total_slippage?: number

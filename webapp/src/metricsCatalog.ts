@@ -25,6 +25,11 @@ export const METRIC_CATEGORIES: {
       { key: 'payoff_ratio', label: 'Payoff' },
       { key: 'avg_mfe', label: 'Avg MFE' },
       { key: 'e_ratio', label: 'E-ratio' },
+      { key: 'avg_ttmfe', label: 'Avg tMFE' },
+      { key: 'avg_ttmae', label: 'Avg tMAE' },
+      { key: 'avg_dt', label: 'Avg ΔT' },
+      { key: 'pct_mae_first', label: '% MAE-first' },
+      { key: 'pct_mfe_first', label: '% MFE-first' },
       { key: 'max_consec_wins', label: 'Max consec wins' },
     ],
   },
@@ -239,6 +244,11 @@ export const OPTIMIZE_REPORT_COLUMNS: OptReportCol[] = [
   },
   { key: 'avg_mfe', header: 'avg_mfe', label: 'Avg MFE', section: 'metric', format: 'num' },
   { key: 'avg_mae', header: 'avg_mae', label: 'Avg MAE', section: 'metric', format: 'num' },
+  { key: 'avg_ttmfe', header: 'avg_ttmfe', label: 'Avg tMFE', section: 'metric', format: 'num' },
+  { key: 'avg_ttmae', header: 'avg_ttmae', label: 'Avg tMAE', section: 'metric', format: 'num' },
+  { key: 'avg_dt', header: 'avg_dt', label: 'Avg ΔT', section: 'metric', format: 'num' },
+  { key: 'pct_mae_first', header: 'pct_mae_first', label: '% MAE-first', section: 'metric', format: 'num' },
+  { key: 'pct_mfe_first', header: 'pct_mfe_first', label: '% MFE-first', section: 'metric', format: 'num' },
   { key: 'ulcer_index', header: 'ulcer_index', label: 'Ulcer', section: 'metric', format: 'num' },
   {
     key: 'downside_deviation',
@@ -453,6 +463,8 @@ type TradeLiteRow = {
   pnl?: number
   mfe?: number
   mae?: number
+  mfe_time?: string | null
+  mae_time?: string | null
   slippage?: number
   fee?: number
   volume?: number
@@ -482,6 +494,10 @@ const TRADE_CSV_HEADERS = [
   'PnL',
   'MFE',
   'MAE',
+  'tMFE',
+  'tMAE',
+  'dT',
+  'Seq',
   'EntryTag',
   'ExitTag',
   'BE_Moved',
@@ -525,6 +541,12 @@ export function downloadComboDetailCsv(
       const slip = Number(t.slippage ?? 0)
       const fee = Number(t.fee ?? 0)
       const gross = net + fee
+      const entryMs = t.entry_time ? new Date(t.entry_time).getTime() : NaN
+      const mfeMs = t.mfe_time ? new Date(t.mfe_time).getTime() : NaN
+      const maeMs = t.mae_time ? new Date(t.mae_time).getTime() : NaN
+      const hasDt = Number.isFinite(entryMs) && Number.isFinite(mfeMs) && Number.isFinite(maeMs)
+      const dtMin = hasDt ? (mfeMs - maeMs) / 60000 : null
+      const seq = dtMin == null ? '' : dtMin > 0 ? 'MAE→' : dtMin < 0 ? 'MFE→' : 'same'
       lines.push(
         [
           i + 1,
@@ -545,6 +567,10 @@ export function downloadComboDetailCsv(
           net,
           t.mfe ?? '',
           t.mae ?? '',
+          t.mfe_time ?? '',
+          t.mae_time ?? '',
+          dtMin,
+          seq,
           t.entry_tag ?? '',
           t.exit_reason ?? '',
           t.be_moved ? 1 : 0,

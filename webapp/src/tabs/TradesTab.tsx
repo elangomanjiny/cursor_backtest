@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from 'react'
 import type { AggressiveRow, BacktestResult, BarRow, TradeRow } from '../api'
+import { fmtMinsBars, tradeExcursionTiming, type ExcursionSeq } from '../dashboard/excursionTiming'
 import { fmt2, fmtCost } from '../format'
 import { selectTrade, useChartStudy } from '../chartStudyStore'
 import { SortTh, useSortable } from '../useSortable'
@@ -84,6 +85,14 @@ type TradeView = {
   mfeLabel: string
   maeLabel: string
   eRatio: number
+  tMfeMin: number
+  tMaeMin: number
+  dtMin: number
+  tMfeLabel: string
+  tMaeLabel: string
+  dtLabel: string
+  seq: ExcursionSeq
+  tMfePct: number
 }
 
 type AggrView = {
@@ -113,13 +122,13 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
 
   const tradeRows = useMemo(() => {
     if (!data) return [] as TradeView[]
-    const lots = Number(data.volume)
     const tick = instrumentTickSize(data.symbol)
     const slipPct = Number(data.params?.slippage_pct ?? data.stats?.slippage_pct ?? 0)
     const feePct = Number(data.params?.fee_pct ?? data.stats?.fee_pct ?? 0)
     let run = 0
     return data.trades.map((t, i) => {
       run += Number(t.pnl) || 0
+      const lots = Number(t.lots ?? data.volume)
       const sig = findSignalBar(data, t)
       const sigDT = splitDT(t.signal_time)
       const o =
@@ -151,6 +160,7 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
       const mfeTicks = tick > 0 ? mfe / tick : 0
       const maeTicks = tick > 0 ? mae / tick : 0
       const eRatio = maeAbs > 1e-12 ? mfe / maeAbs : mfe > 0 ? 999 : 0
+      const timing = tradeExcursionTiming(t, data.tf_minutes)
       const slip = Number(t.slippage ?? 0)
       const fee = Number(t.fee ?? 0)
       const feeExpect =
@@ -159,7 +169,11 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
         (feePct / 100)
       const avg = (Math.abs(Number(t.entry_price)) + Math.abs(Number(t.exit_price))) / 2
       const slipTip = `Both fills: long entry + / exit −, short entry − / exit +. Slip% ${slipPct}. Quote ${fmtCost(slip)}.`
-      const feeTip = `After slip, both legs: (entry+exit)×lots×Fee%/100 = 2×avg(${fmt2(avg)})×${lots}×${feePct}/100 = ${fmtCost(feeExpect)}`
+      const nAdds = Number(t.scale_n || 0)
+      const feeTip =
+        nAdds > 0
+          ? `Scale-in: ${nAdds} add(s). Entry fee on each fill + exit on ${lots} lots. Engine ${fmtCost(fee)}.`
+          : `After slip, both legs: (entry+exit)×lots×Fee%/100 = 2×avg(${fmt2(avg)})×${lots}×${feePct}/100 = ${fmtCost(feeExpect)}`
       return {
         idx: i,
         date: sigDT.date,
@@ -198,6 +212,17 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
         mfeLabel: `${fmt2(mfeTicks)} / ${fmt2(mfe)}`,
         maeLabel: `${fmt2(maeTicks)} / ${fmt2(mae)}`,
         eRatio,
+        tMfeMin: timing.tMfeMin ?? -1,
+        tMaeMin: timing.tMaeMin ?? -1,
+        dtMin: timing.dtMin ?? 0,
+        tMfeLabel: fmtMinsBars(timing.tMfeMin, timing.tMfeBars),
+        tMaeLabel: fmtMinsBars(timing.tMaeMin, timing.tMaeBars),
+        dtLabel:
+          timing.dtMin == null
+            ? '—'
+            : `${timing.dtMin >= 0 ? '+' : ''}${fmt2(timing.dtMin)}`,
+        seq: timing.seq,
+        tMfePct: timing.tMfePct ?? -1,
       }
     })
   }, [data])
@@ -241,7 +266,9 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
         <p className="hint">
           Click a trade row to jump to it on the Visualization chart. Click column headers to sort.
           MFE / MAE shown as <b>ticks / price</b> (tick={data ? instrumentTickSize(data.symbol) : '—'}
-          ). MAE is signed negative (adverse). E-ratio = |MFE|÷|MAE| in price.
+          ). MAE is signed negative (adverse). E-ratio = |MFE|÷|MAE| in price. tMFE / tMAE =
+          minutes / bars to the first extreme. ΔT = tMFE − tMAE; MAE→ = drawdown first, MFE→ =
+          green first.
         </p>
       </div>
 
@@ -384,6 +411,46 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
                   >
                     E-ratio
                   </SortTh>
+                  <SortTh
+                    col="tMfeMin"
+                    sort={tradesSort.sort}
+                    onSort={tradesSort.toggle}
+                    title="Time to first MFE — minutes / bars"
+                  >
+                    tMFE
+                  </SortTh>
+                  <SortTh
+                    col="tMaeMin"
+                    sort={tradesSort.sort}
+                    onSort={tradesSort.toggle}
+                    title="Time to first MAE — minutes / bars"
+                  >
+                    tMAE
+                  </SortTh>
+                  <SortTh
+                    col="dtMin"
+                    sort={tradesSort.sort}
+                    onSort={tradesSort.toggle}
+                    title="ΔT = tMFE − tMAE. Positive = MAE first."
+                  >
+                    ΔT
+                  </SortTh>
+                  <SortTh
+                    col="seq"
+                    sort={tradesSort.sort}
+                    onSort={tradesSort.toggle}
+                    title="MAE→ drawdown first. MFE→ green first."
+                  >
+                    Seq
+                  </SortTh>
+                  <SortTh
+                    col="tMfePct"
+                    sort={tradesSort.sort}
+                    onSort={tradesSort.toggle}
+                    title="tMFE as % of hold. High = momentum into the exit."
+                  >
+                    tMFE%
+                  </SortTh>
                 </tr>
               </thead>
               <tbody>
@@ -435,6 +502,23 @@ export function TradesTab({ data, onOpenOnChart }: Props) {
                         {r.maeLabel}
                       </td>
                       <td>{fmt2(r.eRatio)}</td>
+                      <td title={r.tMfeLabel}>{r.tMfeLabel}</td>
+                      <td title={r.tMaeLabel}>{r.tMaeLabel}</td>
+                      <td
+                        className={
+                          r.dtLabel === '—' ? undefined : r.dtMin >= 0 ? 'pos' : 'neg'
+                        }
+                      >
+                        {r.dtLabel}
+                      </td>
+                      <td
+                        className={
+                          r.seq === 'MAE→' ? 'neg' : r.seq === 'MFE→' ? 'pos' : undefined
+                        }
+                      >
+                        {r.seq}
+                      </td>
+                      <td>{r.tMfePct < 0 ? '—' : `${fmt2(r.tMfePct)}%`}</td>
                     </tr>
                   )
                 })}

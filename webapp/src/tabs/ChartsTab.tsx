@@ -97,6 +97,7 @@ function markerSizeFromBarPx(barPx: number, kind: ChartMarker['kind']): number {
 type TradeTip = {
   side: 'Long' | 'Short' | 'Flat'
   entry?: number
+  lots?: number
   sl?: number
   tp?: number
   be?: { state: 'locked' | 'waiting'; px: number; arm?: number }
@@ -237,6 +238,7 @@ function buildTradeTip(data: BacktestResult, barSec: number): TradeTip {
   const tip: TradeTip = {
     side: tr.side === 'Short' ? 'Short' : 'Long',
     entry: Number(tr.entry_price),
+    lots: Number(tr.lots ?? data.volume),
   }
   if (slOn) {
     const sl = Number(tr.stop_init ?? tr.stop)
@@ -247,7 +249,7 @@ function buildTradeTip(data: BacktestResult, barSec: number): TradeTip {
     if (!isFarPx(tp)) tip.tp = tp
   }
   if (beOn) {
-    const { arm, lock } = bePrices(tr, p, data.symbol, Number(data.volume))
+    const { arm, lock } = bePrices(tr, p, data.symbol, Number(tr.lots ?? data.volume))
     const locked =
       Boolean(tr.be_moved) &&
       (tr.be_moved_time ? isoToSec(tr.be_moved_time) < barSec + tfSec : true)
@@ -530,8 +532,6 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
     }
 
     const tfSec = Math.max(1, data.tf_minutes) * 60
-    const lots = Number(data.volume)
-    const lotsLbl = fmt2(lots)
     const snap = (iso: string) =>
       snapToBarTime(Math.floor(new Date(iso).getTime() / 1000), barTimes, tfSec)
 
@@ -592,7 +592,12 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
         const stopPx = hasTrail ? initStop : Number(tr.stop)
         const beOn = flagOn(data.params?.break_even ?? data.stats?.break_even ?? data.break_even)
         const slOn = flagOn(data.params?.sl_on ?? data.stats?.sl_on)
-        const { lock: beLockPx } = bePrices(tr, data.params, data.symbol, Number(data.volume))
+        const { lock: beLockPx } = bePrices(
+          tr,
+          data.params,
+          data.symbol,
+          Number(tr.lots ?? data.volume),
+        )
         let tBe = tr.be_moved_time ? snap(tr.be_moved_time) : null
         if (tBe != null) {
           if (tBe < t0) tBe = t0
@@ -759,6 +764,8 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
         const entryColor = rev ? '#d2a8ff' : short ? '#f85149' : '#3fb950'
         const entryPos: 'aboveBar' | 'belowBar' = short ? 'aboveBar' : 'belowBar'
         const tEntry = snap(tr.entry_time)
+        const lotsN = Number(tr.lots ?? data.volume)
+        const lotsLblTr = fmt2(lotsN)
         // Triangles for entries (distinct from AGGR circles)
         markers.push({
           time: tEntry as never,
@@ -773,8 +780,26 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
           position: entryPos,
           color: entryColor,
           line1: tagIn,
-          line2: `${fmt2(tr.entry_price)} - ${lotsLbl}`,
+          line2: `${fmt2(tr.entry_price)} - ${lotsLblTr}`,
         })
+        for (const sf of tr.scale_fills ?? []) {
+          const tAdd = snap(sf.time)
+          markers.push({
+            time: tAdd as never,
+            position: entryPos,
+            color: '#f0b429',
+            shape: short ? 'arrowDown' : 'arrowUp',
+            kind: 'trade',
+          })
+          tradeLabels.push({
+            time: tAdd,
+            price: Number(sf.price),
+            position: entryPos,
+            color: '#f0b429',
+            line1: `${tagIn} add`,
+            line2: `${fmt2(Number(sf.price))} - ${fmt2(Number(sf.lots))}`,
+          })
+        }
 
         const reason = (tr.exit_reason || '').toUpperCase()
         const exitRev = reason === 'LR' || reason === 'SR'
@@ -814,7 +839,7 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
           position: exitPos,
           color: exitColor,
           line1: String(tr.exit_reason || ''),
-          line2: `${fmt2(tr.exit_price)} - ${lotsLbl}`,
+          line2: `${fmt2(tr.exit_price)} - ${lotsLblTr}`,
         })
       }
     }
@@ -1636,6 +1661,11 @@ export function ChartsTab({ data, visible = true, proMode = false, proMtfMode = 
                     <span>
                       Entry <b>{fmt2(tip.trade.entry)}</b>
                     </span>
+                    {tip.trade.lots != null && (
+                      <span>
+                        Lots <b>{fmt2(tip.trade.lots)}</b>
+                      </span>
+                    )}
                   </div>
                   {(tip.trade.sl != null ||
                     tip.trade.tp != null ||

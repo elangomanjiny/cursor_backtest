@@ -304,7 +304,7 @@ export function OrderflowChart({
   const [showImb, setShowImb] = useState(false)
   const [showDiv, setShowDiv] = useState(false)
   const [showAbsorb, setShowAbsorb] = useState(false)
-  const [absorbMode, setAbsorbMode] = useState<'body' | 'range'>('range')
+  const [absorbMode, setAbsorbMode] = useState<'body' | 'range' | 'extreme'>('range')
   const [absorbBodyPct, setAbsorbBodyPct] = useState(35)
   const [showUa, setShowUa] = useState(false)
   const [showBigVol, setShowBigVol] = useState(false)
@@ -1978,6 +1978,14 @@ export function OrderflowChart({
                     >
                       Range
                     </button>
+                    <button
+                      type="button"
+                      className={absorbMode === 'extreme' ? 'active' : 'ghost'}
+                      title="Wick absorption: lower wick + sell delta + close>open, or upper wick + buy delta + close<open. Bubble at the wick price."
+                      onClick={() => setAbsorbMode('extreme')}
+                    >
+                      Extreme
+                    </button>
                   </div>
                   {absorbMode === 'body' && (
                     <label className="of-inline" title="Small body: |C−O| / (H−L) < this %">
@@ -1992,7 +2000,14 @@ export function OrderflowChart({
                       />
                     </label>
                   )}
-                  <label className="of-inline" title="Volume > mean + σ×this (20). Also needs HH or LL.">
+                  <label
+                    className="of-inline"
+                    title={
+                      absorbMode === 'extreme'
+                        ? 'Wick volume (or bar volume) > mean + σ×this (20)'
+                        : 'Volume > mean + σ×this (20). Body/Range also need HH or LL.'
+                    }
+                  >
                     σ ×
                     <input
                       type="number"

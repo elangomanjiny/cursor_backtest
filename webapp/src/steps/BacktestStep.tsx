@@ -2,6 +2,7 @@ import type { Dispatch, SetStateAction } from 'react'
 import type { BacktestResult, StrategyParams } from '../api'
 import { ChartsTab } from '../tabs/ChartsTab'
 import { EquityTab } from '../tabs/EquityTab'
+import { ExcursionTab } from '../tabs/ExcursionTab'
 import { PerformanceTab } from '../tabs/PerformanceTab'
 import { TradesTab } from '../tabs/TradesTab'
 import { MetricsPanel } from '../components/MetricsPanel'
@@ -16,8 +17,8 @@ type Props = {
   sessionStarted: boolean
   onRun: () => void
   onGoOptimize: () => void
-  view: 'charts' | 'trades' | 'equity' | 'performance'
-  onView: (v: 'charts' | 'trades' | 'equity' | 'performance') => void
+  view: 'charts' | 'trades' | 'equity' | 'performance' | 'excursion'
+  onView: (v: 'charts' | 'trades' | 'equity' | 'performance' | 'excursion') => void
 }
 
 function minsToTime(m: number): string {
@@ -71,10 +72,51 @@ export function BacktestStep({
       <div className="control-strip">
         <div className="strip-seg">
           <span className="strip-lab">DATA</span>
-          <span>{params.exchange}</span>
-          <b>{params.symbol}</b>
-          <span title="IST calendar dates. Start is 00:00 inclusive; End is 00:00 exclusive.">
-            {params.start} → {params.end} IST
+          <label title="Exchange for this backtest">
+            Exchange
+            <select
+              className="exch-plain"
+              value={params.exchange}
+              disabled={busy}
+              onChange={(e) => set('exchange', e.target.value)}
+            >
+              <option value="BINANCE_UM">Binance USD-M</option>
+            </select>
+          </label>
+          <label title="Futures symbol (required)">
+            Symbol
+            <input
+              className="sym-plain"
+              value={params.symbol}
+              disabled={busy}
+              list="bt-symbols"
+              onChange={(e) => set('symbol', e.target.value.toUpperCase())}
+            />
+            <datalist id="bt-symbols">
+              <option value="ETHUSDT" />
+              <option value="BTCUSDT" />
+            </datalist>
+          </label>
+          <label title="Inclusive. 00:00 IST on this date.">
+            Start
+            <input
+              type="date"
+              disabled={busy}
+              value={params.start}
+              onChange={(e) => set('start', e.target.value)}
+            />
+          </label>
+          <label title="Exclusive. Window ends at 00:00 IST on this date (that day is not included).">
+            End
+            <input
+              type="date"
+              disabled={busy}
+              value={params.end}
+              onChange={(e) => set('end', e.target.value)}
+            />
+          </label>
+          <span title="IST calendar. Start is 00:00 inclusive; End is 00:00 exclusive.">
+            IST
           </span>
           <label>
             TF
@@ -426,6 +468,16 @@ export function BacktestStep({
               onChange={(e) => set('volume', Number(e.target.value))}
             />
           </label>
+          <div
+            className="strip-pair"
+            title="Same-side AGGR while the open trade is in profit after entry fees, and the add fill is through cost BE (avg slipped entry ± accrued entry-leg fees). Adds one Vol lot, max 3. Each add pays its own entry fee; exit fee is on full size. Opposite signal still reverses/flattens."
+          >
+            <span>Scale-in</span>
+            <GreenSwitch
+              on={params.scale_in === 1}
+              onChange={(on) => set('scale_in', on ? 1 : 0)}
+            />
+          </div>
         </div>
 
         <span className="strip-div" aria-hidden />
@@ -498,7 +550,7 @@ export function BacktestStep({
           <button
             disabled={busy}
             onClick={onRun}
-            title="Run with the current settings. Changing params does not auto-run."
+            title="Load this exchange/symbol/range if needed, then run. Changing params does not auto-run."
           >
             {busy ? '…' : sessionStarted ? 'Run' : 'Run backtest'}
           </button>
@@ -516,6 +568,7 @@ export function BacktestStep({
               ['trades', 'Trades'],
               ['equity', 'Equity Curve'],
               ['performance', 'Performance'],
+              ['excursion', 'Excursion'],
             ] as const
           ).map(([id, label]) => (
             <button
@@ -550,10 +603,13 @@ export function BacktestStep({
           {view === 'trades' && <TradesTab data={data} onOpenOnChart={() => onView('charts')} />}
           <EquityTab data={data} visible={view === 'equity'} />
           <PerformanceTab data={data} visible={view === 'performance'} />
+          <ExcursionTab data={data} visible={view === 'excursion'} />
         </div>
       </div>
 
-      {view !== 'equity' && view !== 'performance' && <MetricsPanel stats={data?.stats || null} />}
+      {view !== 'equity' && view !== 'performance' && view !== 'excursion' && (
+        <MetricsPanel stats={data?.stats || null} />
+      )}
     </div>
   )
 }

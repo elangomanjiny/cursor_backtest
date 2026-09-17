@@ -559,6 +559,7 @@ def _worker_eval(job: dict[str, Any]) -> dict[str, Any]:
         base_tf_minutes=base_tf or 15,
         base_threshold=base_thr or 30.0,
         base_bars=base_bars,
+        scale_in=1 if int(c.get("scale_in") or 0) else 0,
     )
     m = compute_trade_metrics(
         result.trades,
@@ -630,6 +631,8 @@ def _worker_eval(job: dict[str, Any]) -> dict[str, Any]:
                 "pnl": float(t.pnl),
                 "mfe": float(t.mfe),
                 "mae": float(t.mae),
+                "mfe_time": t.mfe_time.isoformat() if t.mfe_time is not None else None,
+                "mae_time": t.mae_time.isoformat() if t.mae_time is not None else None,
                 "slippage": float(t.slippage),
                 "fee": float(t.fee),
                 "entry_tag": t.entry_tag,
@@ -670,6 +673,7 @@ def _eval_combo_local(
         "trade_mode": trade_mode,
         "time_stop_minutes": tstop,
         "pro_vwap_sigma": float(pro_vwap_sigma),
+        "scale_in": 0,
     }
     try:
         return _worker_eval(job)
