@@ -14,7 +14,13 @@ import {
 import { fetchFlowStats, type FootprintBar, type OrderflowBar } from '../api'
 import { attachCandlePricePan, clipPlotCanvases, fitPriceToCandles } from '../chartPricePan'
 import { computeVwap, parseBandMultipliers, type VwapSession, type VwapSource } from '../computeVwap'
-import { FootprintOverlay, type CandleSeries, type FootprintMode } from '../FootprintOverlay'
+import { computeSupertrend } from '../computeSupertrend'
+import {
+  FootprintOverlay,
+  type CandleSeries,
+  type FootprintMode,
+  type StavpProfileRow,
+} from '../FootprintOverlay'
 import { fmt2 } from '../format'
 
 export type PriceKind = 'candle' | 'bar' | 'line'
@@ -214,6 +220,9 @@ type Tip = {
   vwap?: number
   vwapBands?: { mult: number; up: number; dn: number }[]
   ma?: number
+  st?: number
+  stTrend?: 1 | -1
+  stavp?: { vah: number; poc: number; val: number }
   vaz?: { vah: number; poc: number; val: number }
   idh?: number
   idl?: number
@@ -242,6 +251,23 @@ function vazFromFlow(f: FootprintBar | undefined, unit: Unit): Tip['vaz'] {
   const val = unit === 'quote' ? f.val : (f.valBase ?? f.val)
   const vah = unit === 'quote' ? f.vah : (f.vahBase ?? f.vah)
   const poc = unit === 'quote' ? f.poc : (f.pocBase ?? f.poc)
+  if (val == null || vah == null || !Number.isFinite(val) || !Number.isFinite(vah)) return undefined
+  const lo = Math.min(Number(val), Number(vah))
+  const hi = Math.max(Number(val), Number(vah))
+  const mid = poc != null && Number.isFinite(Number(poc)) ? Number(poc) : (lo + hi) / 2
+  return { val: lo, poc: mid, vah: hi }
+}
+
+function stavpVaFrom(
+  rows: StavpProfileRow[],
+  time: number,
+  unit: Unit,
+): Tip['stavp'] {
+  const row = rows.find((r) => time >= r.t0 && time < r.t1)
+  if (!row) return undefined
+  const val = unit === 'quote' ? row.val : (row.valBase ?? row.val)
+  const vah = unit === 'quote' ? row.vah : (row.vahBase ?? row.vah)
+  const poc = unit === 'quote' ? row.poc : (row.pocBase ?? row.poc)
   if (val == null || vah == null || !Number.isFinite(val) || !Number.isFinite(vah)) return undefined
   const lo = Math.min(Number(val), Number(vah))
   const hi = Math.max(Number(val), Number(vah))
@@ -298,6 +324,14 @@ export function OrderflowChart({
   const [maType, setMaType] = useState<MaType>('sma')
   const [maSrc] = useState<MaSrc>('close')
   const [showVp, setShowVp] = useState(false)
+  const [showStavp, setShowStavp] = useState(false)
+  const [stPeriod, setStPeriod] = useState(10)
+  const [stMult, setStMult] = useState(3)
+  const [stavpMode, setStavpMode] = useState<FootprintMode>('profile')
+  const [stavpBinMode, setStavpBinMode] = useState<'default' | 'custom'>('default')
+  const [stavpBinMult, setStavpBinMult] = useState(1)
+  const [stavpWidthPct, setStavpWidthPct] = useState(50)
+  const [stavpProfiles, setStavpProfiles] = useState<StavpProfileRow[]>([])
   const [showIdhl, setShowIdhl] = useState(true)
   const [showBarStats, setShowBarStats] = useState(false)
   const [barStatOn, setBarStatOn] = useState({ ch: true, cl: true, min: true, max: true })
@@ -355,6 +389,11 @@ export function OrderflowChart({
     vpBinMode === 'custom' ? Math.max(1, Math.round(vpBinMult) || 1) : binSafe
   const vazBinSafe =
     vazBinMode === 'custom' ? Math.max(1, Math.round(vazBinMult) || 1) : binSafe
+  const stavpBinSafe =
+    stavpBinMode === 'custom' ? Math.max(1, Math.round(stavpBinMult) || 1) : binSafe
+  const stPeriodSafe = Math.min(200, Math.max(1, Math.round(stPeriod) || 10))
+  const stMultSafe = Math.min(20, Math.max(0.1, Number(stMult) || 3))
+  const stavpWidthSafe = Math.min(100, Math.max(10, Math.round(stavpWidthPct) || 50))
   const unitLabel = unit === 'quote' ? 'USDT' : 'BASE'
   const kind = priceKind
   const showVpRef = useRef(showVp)
@@ -405,6 +444,18 @@ export function OrderflowChart({
     for (const p of maPts) m.set(p.time, p.value)
     return m
   }, [maPts])
+  const stavpCalc = useMemo(
+    () =>
+      showStavp
+        ? computeSupertrend(bars, stPeriodSafe, stMultSafe, Math.max(1, tf) * 60)
+        : { points: [], legs: [] },
+    [showStavp, bars, stPeriodSafe, stMultSafe, tf],
+  )
+  const stByTime = useMemo(() => {
+    const m = new Map<number, { value: number; trend: 1 | -1 }>()
+    for (const p of stavpCalc.points) m.set(p.time, { value: p.value, trend: p.trend })
+    return m
+  }, [stavpCalc.points])
   const barTimes = useMemo(() => bars.map((b) => b.time), [bars])
   const guides = useMemo(
     () => bars.map((b) => ({ time: b.time, high: b.high, low: b.low })),
@@ -481,6 +532,9 @@ export function OrderflowChart({
     vwapBandMults: vwapSettings.bands,
     maByTime,
     showMa,
+    showStavp,
+    stByTime,
+    stavpProfiles,
     showVaz,
     vazByTime,
   })
@@ -495,6 +549,9 @@ export function OrderflowChart({
     vwapBandMults: vwapSettings.bands,
     maByTime,
     showMa,
+    showStavp,
+    stByTime,
+    stavpProfiles,
     showVaz,
     vazByTime,
   }
@@ -528,6 +585,9 @@ export function OrderflowChart({
         vwap: lastVp?.vwap,
         vwapBands: vwapBandList(lastVp, vwapSettings.bands),
         ma: showMa ? maByTime.get(lastBar.time) : undefined,
+        st: showStavp ? stByTime.get(lastBar.time)?.value : undefined,
+        stTrend: showStavp ? stByTime.get(lastBar.time)?.trend : undefined,
+        stavp: showStavp ? stavpVaFrom(stavpProfiles, lastBar.time, unit) : undefined,
         idh: lastIdhl?.idh,
         idl: lastIdhl?.idl,
         minD: unit === 'quote' ? lastFlow?.minDeltaQuote : lastFlow?.minDelta,
@@ -959,6 +1019,9 @@ export function OrderflowChart({
         vwap: vp?.vwap,
         vwapBands: vwapBandList(vp, ctx.vwapBandMults),
         ma: ctx.showMa ? ctx.maByTime.get(t) : undefined,
+        st: ctx.showStavp ? ctx.stByTime.get(t)?.value : undefined,
+        stTrend: ctx.showStavp ? ctx.stByTime.get(t)?.trend : undefined,
+        stavp: ctx.showStavp ? stavpVaFrom(ctx.stavpProfiles, t, u) : undefined,
         vaz: ctx.showVaz
           ? vazFromFlow(lookupVazBar(ctx.vazByTime, t, Math.max(1, tfRef.current) * 60), u)
           : undefined,
@@ -1283,6 +1346,7 @@ export function OrderflowChart({
     paneOn.cvd ||
     (showVwap && inspect?.vwap != null) ||
     (showMa && inspect?.ma != null) ||
+    (showStavp && (inspect?.st != null || inspect?.stavp != null)) ||
     (showVaz && inspect?.vaz != null) ||
     (showIdhl && inspect?.idh != null)
 
@@ -1331,6 +1395,28 @@ export function OrderflowChart({
                       <div className="tt-row">
                         <span>
                           {maType.toUpperCase()} {maPeriod} <b>{fmt2(inspect.ma)}</b>
+                        </span>
+                      </div>
+                    )}
+                    {showStavp && inspect.st != null && (
+                      <div className="tt-row">
+                        <span>
+                          ST {stPeriodSafe}/{stMultSafe}{' '}
+                          <b className={inspect.stTrend === 1 ? 'tt-vah' : 'tt-val'}>{fmt2(inspect.st)}</b>
+                          {inspect.stTrend === 1 ? ' up' : inspect.stTrend === -1 ? ' dn' : ''}
+                        </span>
+                      </div>
+                    )}
+                    {showStavp && inspect.stavp && (
+                      <div className="tt-row">
+                        <span>
+                          STAVP VAH <b className="tt-vah">{fmt2(inspect.stavp.vah)}</b>
+                        </span>
+                        <span>
+                          POC <b className="tt-poc">{fmt2(inspect.stavp.poc)}</b>
+                        </span>
+                        <span>
+                          VAL <b className="tt-val">{fmt2(inspect.stavp.val)}</b>
                         </span>
                       </div>
                     )}
@@ -1442,6 +1528,13 @@ export function OrderflowChart({
           vazBinMult={vazBinSafe}
           vpT0={vpT0 != null && vpT1 != null ? Math.min(vpT0, vpT1) : vpT0}
           vpT1={vpT0 != null && vpT1 != null ? Math.max(vpT0, vpT1) : vpT1}
+          showStavp={showStavp}
+          stavpMode={stavpMode}
+          stavpBinMult={stavpBinSafe}
+          stavpWidthPct={stavpWidthSafe}
+          stavpLegs={stavpCalc.legs}
+          stavpPoints={stavpCalc.points}
+          onStavpProfiles={setStavpProfiles}
           showIdhl={showIdhl}
           guides={guides}
           ofBars={ofSignalBars}
@@ -1787,6 +1880,104 @@ export function OrderflowChart({
                   >
                     Clear
                   </button>
+                </div>
+              </div>
+            )}
+            <label
+              className={`ov-toggle ${showStavp ? 'on' : ''}`}
+              title="SuperTrend-anchored volume profile — developing VAH / POC / VAL per ST leg"
+            >
+              <input type="checkbox" checked={showStavp} onChange={(e) => setShowStavp(e.target.checked)} />
+              STAVP
+            </label>
+            {showStavp && (
+              <div className="of-chip-extra">
+                <div className="of-set-row">
+                  <label className="of-inline" title="ATR period">
+                    Period
+                    <input
+                      type="number"
+                      min={1}
+                      max={200}
+                      value={stPeriod}
+                      onChange={(e) => setStPeriod(Math.max(1, Math.round(Number(e.target.value) || 10)))}
+                    />
+                  </label>
+                  <label className="of-inline" title="ATR multiplier">
+                    Mult
+                    <input
+                      type="number"
+                      min={0.1}
+                      max={20}
+                      step={0.1}
+                      value={stMult}
+                      onChange={(e) => setStMult(Math.max(0.1, Number(e.target.value) || 3))}
+                    />
+                  </label>
+                  <label className="of-inline" title="Histogram width as % of SuperTrend candles">
+                    Width %
+                    <input
+                      type="number"
+                      min={10}
+                      max={100}
+                      step={5}
+                      value={stavpWidthPct}
+                      onChange={(e) =>
+                        setStavpWidthPct(Math.min(100, Math.max(10, Math.round(Number(e.target.value) || 50))))
+                      }
+                    />
+                  </label>
+                </div>
+                <div className="of-set-row">
+                  <span className="of-inline-lab">Bin</span>
+                  <div className="unit-toggle wrap">
+                    <button
+                      type="button"
+                      className={stavpBinMode === 'default' ? 'active' : 'ghost'}
+                      title="Use Footprint candlestick bin"
+                      onClick={() => setStavpBinMode('default')}
+                    >
+                      Default
+                    </button>
+                    <button
+                      type="button"
+                      className={stavpBinMode === 'custom' ? 'active' : 'ghost'}
+                      onClick={() => {
+                        if (stavpBinMode !== 'custom') setStavpBinMult(binSafe)
+                        setStavpBinMode('custom')
+                      }}
+                    >
+                      Custom
+                    </button>
+                  </div>
+                  {stavpBinMode === 'custom' && (
+                    <label className="of-inline">
+                      ×
+                      <input
+                        type="number"
+                        min={1}
+                        max={10000}
+                        value={stavpBinMult}
+                        onChange={(e) => setStavpBinMult(Math.max(1, Number(e.target.value) || 1))}
+                      />
+                    </label>
+                  )}
+                </div>
+                <span className="vwap-settings-hint">
+                  {fmtTick(symbolTickSize(symbol))} × {stavpBinSafe} = {fmtTick(symbolTickSize(symbol) * stavpBinSafe)} ·{' '}
+                  {stavpWidthSafe}% of each ST leg
+                </span>
+                <div className="unit-toggle wrap">
+                  {(['profile', 'bidask', 'delta', 'volume'] as const).map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      className={stavpMode === m ? 'active' : 'ghost'}
+                      onClick={() => setStavpMode(m)}
+                    >
+                      {m === 'bidask' ? 'Bid/Ask' : m === 'volume' ? 'Vol' : m[0].toUpperCase() + m.slice(1)}
+                    </button>
+                  ))}
                 </div>
               </div>
             )}

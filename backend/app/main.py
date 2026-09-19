@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 import json
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -28,6 +28,7 @@ from backend.engine.footprint import (  # noqa: E402
     MAX_FOOTPRINT_BARS,
     MAX_VAZ_BARS,
     build_anchored_profile,
+    build_anchored_profiles,
     build_flow_stats,
     build_footprint_bars,
 )
@@ -44,7 +45,7 @@ from backend.engine.volume_delta import (  # noqa: E402
     write_parity_report,
 )
 
-APP_VERSION = "2.2.24"
+APP_VERSION = "2.2.26"
 app = FastAPI(title="cursor_backtest", version=APP_VERSION)
 app.add_middleware(
     CORSMiddleware,
@@ -346,6 +347,38 @@ def anchored_profile(
             t0_unix=int(t0),
             t1_unix=int(t1),
             bin_mult=int(bin_mult),
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(409, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return round_obj(out)
+
+
+@app.post("/api/anchored-profiles")
+def anchored_profiles(payload: dict = Body(...)):
+    """Several anchored profiles from one tick pass (STAVP legs)."""
+    symbol = str(payload.get("symbol") or "ETHUSDT")
+    tf = int(payload.get("tf") or 15)
+    bin_mult = int(payload.get("bin_mult") or 1)
+    raw = payload.get("ranges") or []
+    if tf not in SUPPORTED_TF:
+        raise HTTPException(400, f"tf must be one of {list(SUPPORTED_TF)}")
+    ranges: list[tuple[int, int]] = []
+    for row in raw:
+        try:
+            a = int(row.get("t0") if isinstance(row, dict) else row[0])
+            b = int(row.get("t1") if isinstance(row, dict) else row[1])
+        except (TypeError, ValueError, IndexError, AttributeError):
+            continue
+        if b > a:
+            ranges.append((a, b))
+    try:
+        out = build_anchored_profiles(
+            symbol=symbol,
+            tf_minutes=tf,
+            bin_mult=bin_mult,
+            ranges=ranges,
         )
     except FileNotFoundError as e:
         raise HTTPException(409, str(e)) from e

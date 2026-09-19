@@ -566,6 +566,25 @@ export async function fetchAnchoredProfile(
   return (await r.json()) as AnchoredProfile
 }
 
+export async function fetchAnchoredProfiles(
+  p: {
+    symbol: string
+    tf: number
+    bin_mult?: number
+    ranges: { t0: number; t1: number }[]
+  },
+  signal?: AbortSignal,
+) {
+  const r = await fetch('/api/anchored-profiles', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(p),
+    signal,
+  })
+  if (!r.ok) throw new Error(await errText(r))
+  return (await r.json()) as { ok: boolean; tick_size?: number; profiles: AnchoredProfile[] }
+}
+
 export async function fetchValueArea(
   p: { symbol: string; tf: number; t0: number; t1: number; bin_mult?: number },
   signal?: AbortSignal,

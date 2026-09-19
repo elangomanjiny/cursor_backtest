@@ -703,6 +703,165 @@ def build_anchored_profile(
     }
 
 
+def _empty_profile(*, tick: float, mult: int, symbol_tick: float, tf_minutes: int, t0: int, t1: int, reason: str) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "reason": reason,
+        "tick_size": tick,
+        "bin_mult": mult,
+        "symbol_tick": symbol_tick,
+        "tf": tf_minutes,
+        "t0": int(t0),
+        "t1": int(t1),
+        "count": 0,
+        "va_pct": VALUE_AREA_PCT,
+        "poc": None,
+        "val": None,
+        "vah": None,
+        "pocBase": None,
+        "valBase": None,
+        "vahBase": None,
+        "levels": [],
+    }
+
+
+def _levels_from_binned(df: pd.DataFrame) -> list[dict[str, Any]]:
+    if df is None or df.empty:
+        return []
+    grp = (
+        df.groupby("price_r", sort=True)
+        .agg(
+            bidVolume=("bid_base", "sum"),
+            askVolume=("ask_base", "sum"),
+            bidQuote=("bid_quote", "sum"),
+            askQuote=("ask_quote", "sum"),
+            tradeCount=("quantity", "count"),
+        )
+        .reset_index()
+    )
+    return [
+        {
+            "price": float(rec.price_r),
+            "bidVolume": round(float(rec.bidVolume), 6),
+            "askVolume": round(float(rec.askVolume), 6),
+            "bidQuote": round(float(rec.bidQuote), 2),
+            "askQuote": round(float(rec.askQuote), 2),
+            "tradeCount": int(rec.tradeCount),
+        }
+        for rec in grp.itertuples(index=False)
+    ]
+
+
+def _pack_profile(
+    *,
+    levels: list[dict[str, Any]],
+    tick: float,
+    mult: int,
+    symbol_tick: float,
+    tf_minutes: int,
+    t0: int,
+    t1: int,
+) -> dict[str, Any]:
+    poc_q, val_q, vah_q = value_area_from_levels(levels, quote=True)
+    poc_b, val_b, vah_b = value_area_from_levels(levels, quote=False)
+    return {
+        "ok": True,
+        "reason": "ok" if levels else "empty",
+        "tick_size": tick,
+        "bin_mult": mult,
+        "symbol_tick": symbol_tick,
+        "tf": tf_minutes,
+        "t0": int(t0),
+        "t1": int(t1),
+        "count": len(levels),
+        "va_pct": VALUE_AREA_PCT,
+        "poc": poc_q,
+        "val": val_q,
+        "vah": vah_q,
+        "pocBase": poc_b,
+        "valBase": val_b,
+        "vahBase": vah_b,
+        "levels": levels,
+    }
+
+
+def build_anchored_profiles(
+    *,
+    symbol: str = "ETHUSDT",
+    tf_minutes: int = 15,
+    bin_mult: int = 1,
+    ranges: list[tuple[int, int]],
+    max_ranges: int = 8,
+) -> dict[str, Any]:
+    """Several composite profiles from one tick pass (STAVP legs)."""
+    tf_minutes = int(tf_minutes)
+    symbol_tick = _tick_size(symbol)
+    mult = max(1, int(bin_mult or 1))
+    tick = symbol_tick * mult
+    cleaned: list[tuple[int, int]] = []
+    for pair in ranges or []:
+        a, b = int(pair[0]), int(pair[1])
+        if b > a:
+            cleaned.append((a, b))
+        if len(cleaned) >= int(max_ranges):
+            break
+    if not cleaned:
+        return {"ok": True, "reason": "empty", "tick_size": tick, "profiles": []}
+    t0 = pd.Timestamp(min(r[0] for r in cleaned), unit="s", tz="UTC")
+    t1 = pd.Timestamp(max(r[1] for r in cleaned), unit="s", tz="UTC")
+    ticks = _load_ticks_range(symbol, t0, t1)
+    if ticks is None or ticks.empty:
+        profiles = [
+            _empty_profile(
+                tick=tick,
+                mult=mult,
+                symbol_tick=symbol_tick,
+                tf_minutes=tf_minutes,
+                t0=a,
+                t1=b,
+                reason="empty",
+            )
+            for a, b in cleaned
+        ]
+        return {"ok": True, "reason": "empty", "tick_size": tick, "profiles": profiles}
+    keep = [c for c in ("ts", "price", "quantity", "aggressor_sell") if c in ticks.columns]
+    df = ticks.loc[:, keep].copy()
+    df["ts"] = pd.to_datetime(df["ts"], utc=True)
+    sell = df["aggressor_sell"].astype(bool)
+    qty = df["quantity"]
+    px = df["price"]
+    df["bid_base"] = qty.where(sell, 0.0)
+    df["ask_base"] = qty.where(~sell, 0.0)
+    df["bid_quote"] = (qty * px).where(sell, 0.0)
+    df["ask_quote"] = (qty * px).where(~sell, 0.0)
+    df["price_r"] = _bin_prices(px, tick)
+    profiles: list[dict[str, Any]] = []
+    for a, b in cleaned:
+        ta = pd.Timestamp(int(a), unit="s", tz="UTC")
+        tb = pd.Timestamp(int(b), unit="s", tz="UTC")
+        sl = df[(df["ts"] >= ta) & (df["ts"] < tb)]
+        levels = _levels_from_binned(sl)
+        profiles.append(
+            _pack_profile(
+                levels=levels,
+                tick=tick,
+                mult=mult,
+                symbol_tick=symbol_tick,
+                tf_minutes=tf_minutes,
+                t0=a,
+                t1=b,
+            )
+        )
+    return {
+        "ok": True,
+        "reason": "ok",
+        "tick_size": tick,
+        "bin_mult": mult,
+        "count": len(profiles),
+        "profiles": profiles,
+    }
+
+
 def build_flow_stats(
     ticks: pd.DataFrame | None = None,
     *,

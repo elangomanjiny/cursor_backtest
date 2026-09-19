@@ -3868,6 +3868,7 @@ th.sorted-desc .sort-ind {
 .of-left-col.studies-open .of-studies-slot {
   flex: 0 0 214px;
   width: 214px;
+  overflow-y: auto;
 }
 .of-data-slot .of-drawer,
 .of-studies-slot .of-drawer {
