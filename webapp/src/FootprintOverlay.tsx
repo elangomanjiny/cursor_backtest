@@ -21,11 +21,10 @@ export type CandleSeries = {
 
 export type FootprintMode = 'profile' | 'bidask' | 'delta' | 'volume'
 
-export type StavpPlace = 'swings' | 'lastCandle'
-
 export type StavpProfileRow = {
   t0: number
   t1: number
+  firstTime: number
   lastTime: number
   trend: 1 | -1
   vah?: number | null
@@ -81,10 +80,8 @@ type Props = {
   vpT0?: number | null
   vpT1?: number | null
   showStavp?: boolean
-  stavpMode?: FootprintMode
   stavpBinMult?: number
   stavpWidthPct?: number
-  stavpPlace?: StavpPlace
   stavpLegs?: SupertrendLeg[]
   stavpPoints?: SupertrendPoint[]
   onStavpProfiles?: (rows: StavpProfileRow[]) => void
@@ -153,6 +150,12 @@ const COL = {
 function profileW(v: number, maxV: number, maxPx: number): number {
   if (v <= 0 || maxV <= 0 || maxPx <= 0) return 0
   return Math.max(2, (v / maxV) * maxPx)
+}
+
+function rgbaAlpha(color: string, a: number): string {
+  const m = color.match(/rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/)
+  if (!m) return color
+  return `rgba(${m[1]}, ${m[2]}, ${m[3]}, ${a})`
 }
 
 function hbar(
@@ -902,8 +905,24 @@ function drawProfileInBox(
   boxW: number,
   h: number,
   va?: { val?: number | null; poc?: number | null; vah?: number | null },
-  opts?: { shadePane?: boolean; vaX0?: number; vaW?: number; labels?: boolean; labelAt?: 'left' | 'right' },
+  opts?: {
+    shadePane?: boolean
+    vaX0?: number
+    vaW?: number
+    labels?: boolean
+    labelAt?: 'left' | 'right'
+    /** Which edge bars grow from. `right` = mirrored (bars shrink left from the box's right). */
+    align?: 'left' | 'right'
+    emphasizeVa?: boolean
+    vaFill?: string
+  },
 ) {
+  const fromRight = opts?.align === 'right'
+  const vaLo =
+    va?.val != null && va?.vah != null ? Math.min(Number(va.val), Number(va.vah)) : null
+  const vaHi =
+    va?.val != null && va?.vah != null ? Math.max(Number(va.val), Number(va.vah)) : null
+  const inVa = (p: number) => vaLo != null && vaHi != null && p >= vaLo && p <= vaHi + 1e-12
   const agg = new Map<number, { bid: number; ask: number }>()
   for (const lv of levels) {
     const p = Number(lv.price)
@@ -948,7 +967,7 @@ function drawProfileInBox(
     if (yH != null && yL != null) {
       const top = Math.min(yH, yL)
       const hh = Math.abs(yL - yH)
-      ctx.fillStyle = 'rgba(240,180,41,0.10)'
+      ctx.fillStyle = opts?.vaFill ?? 'rgba(240,180,41,0.10)'
       ctx.fillRect(x0, top, boxW, hh)
     }
   }
@@ -961,26 +980,34 @@ function drawProfileInBox(
     if (top + cellH < 0 || top > h) continue
     const tot = v.bid + v.ask
     const delta = v.ask - v.bid
+    const hot = !opts?.emphasizeVa || vaLo == null || inVa(p)
+    const volFill = opts?.emphasizeVa ? rgbaAlpha(COL.vol, hot ? 0.78 : 0.16) : COL.vol
+    const posFill = opts?.emphasizeVa ? rgbaAlpha(COL.pos, hot ? 0.78 : 0.16) : COL.pos
+    const negFill = opts?.emphasizeVa ? rgbaAlpha(COL.neg, hot ? 0.78 : 0.16) : COL.neg
+    const bidFill = opts?.emphasizeVa ? rgbaAlpha(COL.bid, hot ? 0.78 : 0.16) : COL.bid
+    const askFill = opts?.emphasizeVa ? rgbaAlpha(COL.ask, hot ? 0.78 : 0.16) : COL.ask
     if (mode === 'bidask') {
       const bidW = profileW(v.bid, Math.max(maxBid, maxAsk), boxW / 2 - 2)
       const askW = profileW(v.ask, Math.max(maxBid, maxAsk), boxW / 2 - 2)
       const mid = x0 + boxW / 2
-      hbar(ctx, mid - bidW, top, bidW, cellH, COL.bid)
-      hbar(ctx, mid, top, askW, cellH, COL.ask)
+      hbar(ctx, mid - bidW, top, bidW, cellH, bidFill)
+      hbar(ctx, mid, top, askW, cellH, askFill)
     } else if (mode === 'delta') {
       const dW = profileW(Math.abs(delta), maxAbsD, boxW)
-      hbar(ctx, x0, top, dW, cellH, delta >= 0 ? COL.pos : COL.neg)
-      if (Math.abs(p - deltaPoc) < tick / 2) pocStroke(ctx, x0, top, dW, cellH)
+      const xBar = fromRight ? x0 + boxW - dW : x0
+      hbar(ctx, xBar, top, dW, cellH, delta >= 0 ? posFill : negFill)
+      if (Math.abs(p - deltaPoc) < tick / 2) pocStroke(ctx, xBar, top, dW, cellH)
     } else if (mode === 'volume') {
       const volW = profileW(tot, maxVol, boxW)
-      hbar(ctx, x0, top, volW, cellH, COL.vol)
-      if (Math.abs(p - volPoc) < tick / 2) pocStroke(ctx, x0, top, volW, cellH)
+      const xBar = fromRight ? x0 + boxW - volW : x0
+      hbar(ctx, xBar, top, volW, cellH, volFill)
+      if (Math.abs(p - volPoc) < tick / 2) pocStroke(ctx, xBar, top, volW, cellH)
     } else {
       const volW = profileW(tot, maxVol, boxW / 2 - 1)
       const dW = profileW(Math.abs(delta), maxAbsD, boxW / 2 - 1)
       const mid = x0 + boxW / 2
-      hbar(ctx, mid - volW, top, volW, cellH, COL.vol)
-      hbar(ctx, mid, top, dW, cellH, delta >= 0 ? COL.pos : COL.neg)
+      hbar(ctx, mid - volW, top, volW, cellH, volFill)
+      hbar(ctx, mid, top, dW, cellH, delta >= 0 ? posFill : negFill)
       if (Math.abs(p - volPoc) < tick / 2) pocStroke(ctx, mid - volW, top, volW, cellH)
       if (Math.abs(p - deltaPoc) < tick / 2) pocStroke(ctx, mid, top, dW, cellH)
     }
@@ -1060,6 +1087,7 @@ function drawDevelopingVa(
   series: CandleSeries,
   points: AnchoredVaPoint[],
   unit: Unit,
+  xStart: number,
   xEnd: number,
 ) {
   if (!points.length) return
@@ -1068,6 +1096,7 @@ function drawDevelopingVa(
     { key: 'poc', base: 'pocBase', c: '#f0b429', lab: 'POC' },
     { key: 'val', base: 'valBase', c: '#58a6ff', lab: 'VAL' },
   ]
+  const clipL = Number.isFinite(xStart) ? xStart : -Infinity
   ctx.save()
   ctx.setLineDash([5, 3])
   ctx.lineWidth = 1.2
@@ -1079,19 +1108,32 @@ function drawDevelopingVa(
     let started = false
     let lastX = 0
     let lastY = 0
+    let preY: number | null = null
     for (const p of points) {
       const raw = unit === 'quote' ? p[s.key] : (p[s.base] ?? p[s.key])
       const y = raw != null && Number.isFinite(Number(raw)) ? series.priceToCoordinate(Number(raw)) : null
       const x = chart.timeScale().timeToCoordinate(p.time as never)
       if (x == null || y == null) continue
+      if (x < clipL - 0.5) {
+        preY = y
+        continue
+      }
       if (!started) {
-        ctx.moveTo(x, y)
+        const x0 = Number.isFinite(clipL) && clipL !== -Infinity ? clipL : x
+        ctx.moveTo(x0, preY ?? y)
+        if (x > x0 + 0.5) ctx.lineTo(x, y)
         started = true
       } else {
         ctx.lineTo(x, y)
       }
       lastX = x
       lastY = y
+    }
+    if (!started && preY != null && Number.isFinite(clipL) && clipL !== -Infinity) {
+      ctx.moveTo(clipL, preY)
+      lastX = clipL
+      lastY = preY
+      started = true
     }
     if (!started) continue
     if (Number.isFinite(xEnd) && xEnd > lastX) ctx.lineTo(xEnd, lastY)
@@ -1110,45 +1152,55 @@ function drawStavpLegs(
   tick: number,
   tfSec: number,
   unit: Unit,
-  mode: FootprintMode,
   widthPct: number,
   w: number,
   h: number,
-  place: StavpPlace,
 ) {
-  const pct = Math.min(100, Math.max(1, widthPct || 50)) / 100
+  /** Width % is of each *half* of the ST phase so vol and Δ never leave the candles. */
+  const pct = Math.min(100, Math.max(1, widthPct || 100)) / 100
   for (const { leg, profile } of rows) {
     if (!profile.levels?.length) continue
-    const start = barSlot(chart, leg.t0, tfSec)
+    const start = barSlot(chart, leg.firstTime, tfSec)
     const end = barSlot(chart, leg.lastTime, tfSec)
-    if (!end) continue
-    const xAnchor =
-      chart.timeScale().timeToCoordinate(leg.t0 as never) ?? start?.x0 ?? null
+    if (!start || !end) continue
+    const xStart = start.x0
     const xEnd = end.x0 + end.bw
-    if (xAnchor == null) continue
-    const legW = Math.abs(xEnd - xAnchor)
+    const left = Math.min(xStart, xEnd)
+    const right = Math.max(xStart, xEnd)
+    const legW = right - left
     if (legW < 8) continue
-    const boxW = Math.max(16, Math.min(legW, legW * pct))
-    const xHist = place === 'lastCandle' ? xEnd - boxW : xAnchor
-    drawProfileInBox(ctx, series, profile.levels, tick, unit, mode, xHist, boxW, h, undefined, {
-      shadePane: false,
-      labels: false,
+    const half = legW / 2
+    const boxW = Math.max(12, Math.min(half, half * pct))
+    const va =
+      unit === 'quote'
+        ? { val: profile.val, poc: profile.poc, vah: profile.vah }
+        : { val: profile.valBase, poc: profile.pocBase, vah: profile.vahBase }
+    const histOpts = {
+      shadePane: false as const,
+      labels: false as const,
+      emphasizeVa: true,
+      vaFill: 'rgba(240,180,41,0.22)',
+    }
+    drawProfileInBox(ctx, series, profile.levels, tick, unit, 'volume', left, boxW, h, va, {
+      ...histOpts,
+      align: 'left',
     })
+    drawAvpVa(ctx, series, left, boxW, va.vah, va.poc, va.val, undefined, 'right')
+    drawProfileInBox(ctx, series, profile.levels, tick, unit, 'delta', right - boxW, boxW, h, va, {
+      ...histOpts,
+      align: 'right',
+    })
+    drawAvpVa(ctx, series, right - boxW, boxW, va.vah, va.poc, va.val, undefined, 'left')
     const dev = profile.developing ?? []
     if (dev.length) {
-      drawDevelopingVa(ctx, chart, series, dev, unit, xEnd)
-    } else {
-      const va =
-        unit === 'quote'
-          ? { val: profile.val, poc: profile.poc, vah: profile.vah }
-          : { val: profile.valBase, poc: profile.pocBase, vah: profile.vahBase }
-      drawAvpVa(ctx, series, xAnchor, xEnd - xAnchor, va.vah, va.poc, va.val, undefined, 'right')
+      drawDevelopingVa(ctx, chart, series, dev, unit, left, right)
     }
     const yFlip = Number.isFinite(leg.startPrice) ? series.priceToCoordinate(leg.startPrice) : null
-    if (yFlip != null && xAnchor >= -8 && xAnchor <= w + 8) {
+    const xSwing = barSlot(chart, leg.t0, tfSec)?.x0 ?? left
+    if (yFlip != null && xSwing >= -8 && xSwing <= w + 8) {
       ctx.beginPath()
       ctx.fillStyle = leg.trend === 1 ? '#3fb950' : '#f85149'
-      ctx.arc(xAnchor, yFlip, 3.4, 0, Math.PI * 2)
+      ctx.arc(xSwing, yFlip, 3.4, 0, Math.PI * 2)
       ctx.fill()
       ctx.strokeStyle = 'rgba(230,237,243,0.85)'
       ctx.lineWidth = 1
@@ -1183,11 +1235,9 @@ function draw(
   ofBars?: OfSignalBar[],
   sigs?: OfSigFlags,
   stavpRows?: { leg: SupertrendLeg; profile: AnchoredProfile }[],
-  stavpMode?: FootprintMode,
   stavpWidthPct?: number,
   stavpTick?: number,
   stavpPoints?: SupertrendPoint[],
-  stavpPlace?: StavpPlace,
 ) {
   const pane = chart.panes()[0]
   const size = pane?.getSize()
@@ -1260,11 +1310,9 @@ function draw(
       stavpTick && stavpTick > 0 ? stavpTick : avpTick,
       tfSec,
       unit,
-      stavpMode ?? 'profile',
-      stavpWidthPct ?? 50,
+      stavpWidthPct ?? 100,
       w,
       h,
-      stavpPlace ?? 'swings',
     )
   }
   if (stavpPoints?.length) drawSupertrend(ctx, chart, series, stavpPoints)
@@ -1388,10 +1436,8 @@ export function FootprintOverlay({
   vpT0 = null,
   vpT1 = null,
   showStavp = false,
-  stavpMode = 'profile',
   stavpBinMult,
-  stavpWidthPct = 50,
-  stavpPlace = 'swings',
+  stavpWidthPct = 100,
   stavpLegs = [],
   stavpPoints = [],
   onStavpProfiles,
@@ -1447,9 +1493,7 @@ export function FootprintOverlay({
   const showMinMaxRef = useRef(showMinMax)
   const showVpRef = useRef(showVp)
   const showStavpRef = useRef(showStavp)
-  const stavpModeRef = useRef(stavpMode)
   const stavpWidthRef = useRef(stavpWidthPct)
-  const stavpPlaceRef = useRef(stavpPlace)
   const stavpLegsRef = useRef(stavpLegs)
   const stavpPointsRef = useRef(stavpPoints)
   const showIdhlRef = useRef(showIdhl)
@@ -1465,9 +1509,7 @@ export function FootprintOverlay({
   showMinMaxRef.current = showMinMax
   showVpRef.current = showVp
   showStavpRef.current = showStavp
-  stavpModeRef.current = stavpMode
   stavpWidthRef.current = stavpWidthPct
-  stavpPlaceRef.current = stavpPlace
   stavpLegsRef.current = stavpLegs
   stavpPointsRef.current = stavpPoints
   showIdhlRef.current = showIdhl
@@ -1478,7 +1520,8 @@ export function FootprintOverlay({
   const vpBinSafe = Math.max(1, Math.round(Number(vpBinMult ?? binMult) || 1))
   const vazBinSafe = Math.max(1, Math.round(Number(vazBinMult ?? binMult) || 1))
   const stavpBinSafe = Math.max(1, Math.round(Number(stavpBinMult ?? binMult) || 1))
-  const stavpLegKey = stavpLegs.map((l) => `${l.t0}-${l.t1}`).join('|')
+  const stavpLegKey = stavpLegs.map((l) => `${l.t0}-${l.firstTime}-${l.t1}-${l.trend}`).join('|')
+  const stavpGeomRef = useRef(stavpLegKey)
   const wantFpData =
     show ||
     showImb ||
@@ -1536,6 +1579,12 @@ export function FootprintOverlay({
 
     let timer: number | null = null
     let aborted = false
+    if (stavpGeomRef.current !== stavpLegKey) {
+      stavpGeomRef.current = stavpLegKey
+      stavpRowsRef.current = []
+      stavpKeyRef.current = ''
+      onStavpProfilesRef.current?.([])
+    }
     const fpAc = { current: new AbortController() }
     const vazAc = { current: new AbortController() }
     const vpAc = { current: new AbortController() }
@@ -1572,11 +1621,9 @@ export function FootprintOverlay({
         ofBarsRef.current,
         sigsRef.current,
         showStavpRef.current ? stavpRowsRef.current : [],
-        stavpModeRef.current,
         stavpWidthRef.current,
         stavpTickRef.current,
         showStavpRef.current ? stavpPointsRef.current : [],
-        stavpPlaceRef.current,
       )
     }
 
@@ -1714,9 +1761,11 @@ export function FootprintOverlay({
       }
 
       if (showStavpRef.current && stavpLegsRef.current.length) {
-        const vis = stavpLegsRef.current.filter((l) => l.t1 > win.t0 && l.t0 < win.t1)
+        const vis = stavpLegsRef.current.filter((l) => l.t1 > win.t0 && l.firstTime < win.t1)
         const take = vis.length > STAVP_MAX_LEGS ? vis.slice(-STAVP_MAX_LEGS) : vis
-        const stavpKey = `${symbol}:${tf}:${stavpBinSafe}:${take.map((l) => `${l.t0}-${l.t1}`).join('|')}`
+        const stavpKey = `${symbol}:${tf}:${stavpBinSafe}:${take
+          .map((l) => `${l.t0}-${l.firstTime}-${l.t1}-${l.trend}`)
+          .join('|')}`
         const already = stavpKey === stavpKeyRef.current && stavpRowsRef.current.length > 0
         if (!take.length) {
           if (stavpKeyRef.current || stavpRowsRef.current.length) {
@@ -1724,13 +1773,19 @@ export function FootprintOverlay({
             stavpKeyRef.current = ''
             onStavpProfilesRef.current?.([])
           }
-        } else if (!already && stavpKey !== stavpKeyRef.current) {
+        } else if (already) {
+          const byKey = new Map(take.map((l) => [`${l.firstTime}-${l.t1}`, l]))
+          stavpRowsRef.current = stavpRowsRef.current.map((row) => ({
+            ...row,
+            leg: byKey.get(`${row.leg.firstTime}-${row.leg.t1}`) ?? row.leg,
+          }))
+        } else if (stavpKey !== stavpKeyRef.current) {
           const pendingKey = stavpKey
+          stavpRowsRef.current = []
+          onStavpProfilesRef.current?.([])
           stavpAc.current.abort()
           stavpAc.current = new AbortController()
-          if (!showRef.current && !showVpRef.current && !stavpRowsRef.current.length) {
-            hints.push('Loading STAVP…')
-          }
+          if (!showRef.current && !showVpRef.current) hints.push('Loading STAVP…')
           const signal = stavpAc.current.signal
           void fetchAnchoredProfiles(
             {
@@ -1758,6 +1813,7 @@ export function FootprintOverlay({
                 stavpRowsRef.current.map((row) => ({
                   t0: row.leg.t0,
                   t1: row.leg.t1,
+                  firstTime: row.leg.firstTime,
                   lastTime: row.leg.lastTime,
                   trend: row.leg.trend,
                   vah: row.profile.vah,
@@ -1948,11 +2004,9 @@ export function FootprintOverlay({
       ofBars,
       sigsRef.current,
       showStavp ? stavpRowsRef.current : [],
-      stavpMode,
       stavpWidthPct,
       stavpTickRef.current,
       showStavp ? stavpPoints : [],
-      stavpPlace,
     )
   }, [
     active,
@@ -1962,9 +2016,7 @@ export function FootprintOverlay({
     showMinMax,
     showVp,
     showStavp,
-    stavpMode,
     stavpWidthPct,
-    stavpPlace,
     stavpPoints,
     vpMode,
     vpT0,

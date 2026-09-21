@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 from urllib.parse import quote
 
@@ -12,14 +13,28 @@ DEFAULT_URL = os.environ.get("QUESTDB_URL", "http://127.0.0.1:9000")
 ILP_HOST = os.environ.get("QUESTDB_ILP_HOST", "127.0.0.1")
 ILP_PORT = int(os.environ.get("QUESTDB_ILP_PORT", "9009"))
 
+_HEALTH_TTL_SEC = 20.0
+_health_cache: tuple[float, dict[str, Any]] | None = None
 
-def health(base_url: str = DEFAULT_URL, timeout: float = 2.0) -> dict[str, Any]:
+
+def health(base_url: str = DEFAULT_URL, timeout: float = 0.4) -> dict[str, Any]:
+    global _health_cache
+    now = time.monotonic()
+    if _health_cache is not None and now - _health_cache[0] < _HEALTH_TTL_SEC:
+        return _health_cache[1]
     try:
         r = httpx.get(f"{base_url.rstrip('/')}/settings", timeout=timeout)
         ok = r.status_code == 200
-        return {"ok": ok, "status_code": r.status_code, "url": base_url, "version": (r.json().get("config") or {}).get("release.version") if ok else None}
+        out: dict[str, Any] = {
+            "ok": ok,
+            "status_code": r.status_code,
+            "url": base_url,
+            "version": (r.json().get("config") or {}).get("release.version") if ok else None,
+        }
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "error": str(e), "url": base_url}
+        out = {"ok": False, "error": str(e), "url": base_url}
+    _health_cache = (now, out)
+    return out
 
 
 def exec_sql(sql: str, base_url: str = DEFAULT_URL, timeout: float = 30.0) -> dict[str, Any]:

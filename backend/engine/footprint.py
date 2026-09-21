@@ -448,6 +448,52 @@ def value_area_from_levels(
     return float(rows[poc_i]["price"]), float(rows[lo]["price"]), float(rows[hi]["price"])
 
 
+def _va_from_bins(
+    prices: np.ndarray,
+    vols: np.ndarray,
+    *,
+    pct: float = VALUE_AREA_PCT,
+    already_sorted: bool = False,
+) -> tuple[float | None, float | None, float | None]:
+    n = int(prices.size)
+    if n == 0:
+        return None, None, None
+    if already_sorted:
+        p = prices
+        v = vols
+    else:
+        order = np.argsort(prices, kind="mergesort")
+        p = prices[order]
+        v = vols[order]
+    total = float(v.sum())
+    if total <= 0:
+        return None, None, None
+    poc_i = int(np.argmax(v))
+    lo = hi = poc_i
+    covered = float(v[poc_i])
+    target = total * float(pct)
+    while covered + 1e-12 < target and (lo > 0 or hi < n - 1):
+        below = float(v[lo - 1]) if lo > 0 else -1.0
+        above = float(v[hi + 1]) if hi < n - 1 else -1.0
+        if above > below:
+            hi += 1
+            covered += float(v[hi])
+        elif below > above:
+            lo -= 1
+            covered += float(v[lo])
+        elif lo > 0 and hi < n - 1:
+            lo -= 1
+            hi += 1
+            covered += float(v[lo]) + float(v[hi])
+        elif hi < n - 1:
+            hi += 1
+            covered += float(v[hi])
+        else:
+            lo -= 1
+            covered += float(v[lo])
+    return float(p[poc_i]), float(p[lo]), float(p[hi])
+
+
 def _meta(
     *,
     ok: bool,
@@ -758,37 +804,36 @@ def _developing_va(sl: pd.DataFrame, tf_minutes: int) -> list[dict[str, Any]]:
     if sl is None or sl.empty:
         return []
     tfm = max(1, int(tf_minutes))
-    bar = sl["ts"].dt.floor(f"{tfm}min")
-    acc: dict[float, list[float]] = {}
+    px = sl["price_r"].to_numpy(dtype=np.float64, copy=False)
+    nuniq = int(np.unique(px).size) if px.size else 0
+    work = sl
+    if nuniq > 1024:
+        lo = float(np.min(px))
+        hi = float(np.max(px))
+        step = (hi - lo) / 1023.0 if hi > lo else 1.0
+        work = sl.copy()
+        work["price_r"] = lo + np.round((px - lo) / step) * step
+    g = (
+        work.assign(_bar=work["ts"].dt.floor(f"{tfm}min"))
+        .groupby(["_bar", "price_r"], sort=True)[["bid_base", "ask_base", "bid_quote", "ask_quote"]]
+        .sum()
+    )
+    if g.empty:
+        return []
+    vol_q = (g["bid_quote"] + g["ask_quote"]).unstack(fill_value=0.0).sort_index().sort_index(axis=1)
+    vol_b = (g["bid_base"] + g["ask_base"]).unstack(fill_value=0.0)
+    vol_b = vol_b.reindex(index=vol_q.index, columns=vol_q.columns, fill_value=0.0)
+    cq = vol_q.to_numpy(dtype=np.float64, copy=False).cumsum(axis=0)
+    cb = vol_b.to_numpy(dtype=np.float64, copy=False).cumsum(axis=0)
+    prices = vol_q.columns.to_numpy(dtype=np.float64, copy=False)
     out: list[dict[str, Any]] = []
-    for ts, part in sl.groupby(bar, sort=True):
-        for rec in part.itertuples(index=False):
-            p = float(rec.price_r)
-            row = acc.get(p)
-            if row is None:
-                acc[p] = [
-                    float(rec.bid_base),
-                    float(rec.ask_base),
-                    float(rec.bid_quote),
-                    float(rec.ask_quote),
-                ]
-            else:
-                row[0] += float(rec.bid_base)
-                row[1] += float(rec.ask_base)
-                row[2] += float(rec.bid_quote)
-                row[3] += float(rec.ask_quote)
-        levels = [
-            {
-                "price": p,
-                "bidVolume": v[0],
-                "askVolume": v[1],
-                "bidQuote": v[2],
-                "askQuote": v[3],
-            }
-            for p, v in acc.items()
-        ]
-        poc_q, val_q, vah_q = value_area_from_levels(levels, quote=True)
-        poc_b, val_b, vah_b = value_area_from_levels(levels, quote=False)
+    for i, ts in enumerate(vol_q.index):
+        qrow = cq[i]
+        brow = cb[i]
+        qmask = qrow > 0
+        bmask = brow > 0
+        poc_q, val_q, vah_q = _va_from_bins(prices[qmask], qrow[qmask], already_sorted=True)
+        poc_b, val_b, vah_b = _va_from_bins(prices[bmask], brow[bmask], already_sorted=True)
         t = pd.Timestamp(ts)
         if t.tzinfo is None:
             t = t.tz_localize("UTC")
@@ -797,12 +842,12 @@ def _developing_va(sl: pd.DataFrame, tf_minutes: int) -> list[dict[str, Any]]:
         out.append(
             {
                 "time": int(t.timestamp()),
-                "poc": poc_q,
-                "val": val_q,
-                "vah": vah_q,
-                "pocBase": poc_b,
-                "valBase": val_b,
-                "vahBase": vah_b,
+                "poc": None if poc_q is None else round(float(poc_q), 2),
+                "val": None if val_q is None else round(float(val_q), 2),
+                "vah": None if vah_q is None else round(float(vah_q), 2),
+                "pocBase": None if poc_b is None else round(float(poc_b), 2),
+                "valBase": None if val_b is None else round(float(val_b), 2),
+                "vahBase": None if vah_b is None else round(float(vah_b), 2),
             }
         )
     return out

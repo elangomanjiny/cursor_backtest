@@ -18,6 +18,8 @@ export type SupertrendLeg = {
   t0: number
   /** Exclusive unix (last bar + tf). */
   t1: number
+  /** First SuperTrend candle of this phase (histogram left). */
+  firstTime: number
   lastTime: number
   trend: 1 | -1
   startPrice: number
@@ -130,9 +132,10 @@ function legsFromPoints(bars: OhlcBar[], points: SupertrendPoint[], tfSec: numbe
   const legs: SupertrendLeg[] = []
   for (let i = 0; i < groups.length; i++) {
     const g = groups[i]
+    const firstTime = g.times[0]
     const lastTime = g.times[g.times.length - 1]
-    const first = byTime.get(g.times[0])
-    let t0 = g.times[0]
+    const first = byTime.get(firstTime)
+    let t0 = firstTime
     let startPrice = g.trend === 1 ? (first?.low ?? 0) : (first?.high ?? 0)
     if (i > 0) {
       const prev = groups[i - 1]
@@ -143,6 +146,7 @@ function legsFromPoints(bars: OhlcBar[], points: SupertrendPoint[], tfSec: numbe
     legs.push({
       t0,
       t1: lastTime + tfSec,
+      firstTime,
       lastTime,
       trend: g.trend,
       startPrice,

@@ -19,7 +19,6 @@ import {
   FootprintOverlay,
   type CandleSeries,
   type FootprintMode,
-  type StavpPlace,
   type StavpProfileRow,
 } from '../FootprintOverlay'
 import { fmt2 } from '../format'
@@ -264,7 +263,7 @@ function stavpVaFrom(
   time: number,
   unit: Unit,
 ): Tip['stavp'] {
-  const row = rows.find((r) => time >= r.t0 && time < r.t1)
+  const row = rows.find((r) => time >= (r.firstTime ?? r.t0) && time < r.t1)
   if (!row) return undefined
   let val = unit === 'quote' ? row.val : (row.valBase ?? row.val)
   let vah = unit === 'quote' ? row.vah : (row.vahBase ?? row.vah)
@@ -339,12 +338,10 @@ export function OrderflowChart({
   const [showStavp, setShowStavp] = useState(false)
   const [stPeriod, setStPeriod] = useState(10)
   const [stMult, setStMult] = useState(3)
-  const [stavpMode, setStavpMode] = useState<FootprintMode>('profile')
   const [stavpBinMode, setStavpBinMode] = useState<'default' | 'custom'>('default')
   const [stavpBinMult, setStavpBinMult] = useState(1)
-  const [stavpWidthPct, setStavpWidthPct] = useState(50)
-  const [stavpWidthDraft, setStavpWidthDraft] = useState('50')
-  const [stavpPlace, setStavpPlace] = useState<StavpPlace>('swings')
+  const [stavpWidthPct, setStavpWidthPct] = useState(100)
+  const [stavpWidthDraft, setStavpWidthDraft] = useState('100')
   const [stavpProfiles, setStavpProfiles] = useState<StavpProfileRow[]>([])
   const [showIdhl, setShowIdhl] = useState(true)
   const [showBarStats, setShowBarStats] = useState(false)
@@ -407,7 +404,7 @@ export function OrderflowChart({
     stavpBinMode === 'custom' ? Math.max(1, Math.round(stavpBinMult) || 1) : binSafe
   const stPeriodSafe = Math.min(200, Math.max(1, Math.round(stPeriod) || 10))
   const stMultSafe = Math.min(20, Math.max(0.1, Number(stMult) || 3))
-  const stavpWidthSafe = Math.min(100, Math.max(1, Math.round(stavpWidthPct) || 50))
+  const stavpWidthSafe = Math.min(100, Math.max(1, Math.round(stavpWidthPct) || 100))
   const unitLabel = unit === 'quote' ? 'USDT' : 'BASE'
   const kind = priceKind
   const showVpRef = useRef(showVp)
@@ -1543,10 +1540,8 @@ export function OrderflowChart({
           vpT0={vpT0 != null && vpT1 != null ? Math.min(vpT0, vpT1) : vpT0}
           vpT1={vpT0 != null && vpT1 != null ? Math.max(vpT0, vpT1) : vpT1}
           showStavp={showStavp}
-          stavpMode={stavpMode}
           stavpBinMult={stavpBinSafe}
           stavpWidthPct={stavpWidthSafe}
-          stavpPlace={stavpPlace}
           stavpLegs={stavpCalc.legs}
           stavpPoints={stavpCalc.points}
           onStavpProfiles={setStavpProfiles}
@@ -1900,7 +1895,7 @@ export function OrderflowChart({
             )}
             <label
               className={`ov-toggle ${showStavp ? 'on' : ''}`}
-              title="SuperTrend-anchored volume profile — developing VAH / POC / VAL per ST leg"
+              title="SuperTrend-anchored profile: ticks from the prior swing, histograms only inside the ST phase"
             >
               <input type="checkbox" checked={showStavp} onChange={(e) => setShowStavp(e.target.checked)} />
               STAVP
@@ -1929,7 +1924,10 @@ export function OrderflowChart({
                       onChange={(e) => setStMult(Math.max(0.1, Number(e.target.value) || 3))}
                     />
                   </label>
-                  <label className="of-inline" title="Histogram width as % of SuperTrend candles. Type a number, then click away.">
+                  <label
+                    className="of-inline"
+                    title="Width of each histogram as % of half the SuperTrend phase. 100% = volume and delta meet in the middle. Type, then click away."
+                  >
                     Width %
                     <input
                       type="number"
@@ -1940,7 +1938,7 @@ export function OrderflowChart({
                       onChange={(e) => setStavpWidthDraft(e.target.value)}
                       onBlur={() => {
                         const n = Math.round(Number(stavpWidthDraft))
-                        const next = Number.isFinite(n) ? Math.min(100, Math.max(1, n)) : 50
+                        const next = Number.isFinite(n) ? Math.min(100, Math.max(1, n)) : 100
                         setStavpWidthPct(next)
                         setStavpWidthDraft(String(next))
                       }}
@@ -1949,27 +1947,6 @@ export function OrderflowChart({
                       }}
                     />
                   </label>
-                </div>
-                <div className="of-set-row">
-                  <span className="of-inline-lab">Anchor</span>
-                  <div className="unit-toggle wrap">
-                    <button
-                      type="button"
-                      className={stavpPlace === 'swings' ? 'active' : 'ghost'}
-                      title="Histogram starts at the swing high/low anchor"
-                      onClick={() => setStavpPlace('swings')}
-                    >
-                      Swings
-                    </button>
-                    <button
-                      type="button"
-                      className={stavpPlace === 'lastCandle' ? 'active' : 'ghost'}
-                      title="Histogram ends at the last candle of the SuperTrend phase"
-                      onClick={() => setStavpPlace('lastCandle')}
-                    >
-                      Last candle
-                    </button>
-                  </div>
                 </div>
                 <div className="of-set-row">
                   <span className="of-inline-lab">Bin</span>
@@ -2008,20 +1985,8 @@ export function OrderflowChart({
                 </div>
                 <span className="vwap-settings-hint">
                   {fmtTick(symbolTickSize(symbol))} × {stavpBinSafe} = {fmtTick(symbolTickSize(symbol) * stavpBinSafe)} ·{' '}
-                  {stavpWidthSafe}% · {stavpPlace === 'swings' ? 'from swing start' : 'at last candle'}
+                  Vol from swing · plotted in ST range · Δ from end · {stavpWidthSafe}% of each half
                 </span>
-                <div className="unit-toggle wrap">
-                  {(['profile', 'bidask', 'delta', 'volume'] as const).map((m) => (
-                    <button
-                      key={m}
-                      type="button"
-                      className={stavpMode === m ? 'active' : 'ghost'}
-                      onClick={() => setStavpMode(m)}
-                    >
-                      {m === 'bidask' ? 'Bid/Ask' : m === 'volume' ? 'Vol' : m[0].toUpperCase() + m.slice(1)}
-                    </button>
-                  ))}
-                </div>
               </div>
             )}
             <label className={`ov-toggle ${showIdhl ? 'on' : ''}`} title="Intraday high / low (UTC session)">

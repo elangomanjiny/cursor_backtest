@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any
 
+SKIP_DEEP = frozenset({"levels", "developing"})
+
 # Quote costs are tiny at 0.01 lots (e.g. 0.0037). 2-dp rounding showed 0.00.
 COST_KEYS = frozenset({"fee", "slippage", "total_fees", "total_slippage"})
 
@@ -39,7 +41,10 @@ def round_obj(obj: Any, *, _key: str | None = None) -> Any:
     except Exception:
         pass
     if isinstance(obj, dict):
-        return {k: round_obj(v, _key=k) for k, v in obj.items()}
+        return {
+            k: v if k in SKIP_DEEP else round_obj(v, _key=k)
+            for k, v in obj.items()
+        }
     if isinstance(obj, list):
         return [round_obj(v) for v in obj]
     if isinstance(obj, tuple):
