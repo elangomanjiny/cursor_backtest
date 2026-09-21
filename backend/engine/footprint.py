@@ -722,6 +722,7 @@ def _empty_profile(*, tick: float, mult: int, symbol_tick: float, tf_minutes: in
         "valBase": None,
         "vahBase": None,
         "levels": [],
+        "developing": [],
     }
 
 
@@ -752,6 +753,61 @@ def _levels_from_binned(df: pd.DataFrame) -> list[dict[str, Any]]:
     ]
 
 
+def _developing_va(sl: pd.DataFrame, tf_minutes: int) -> list[dict[str, Any]]:
+    """Bar-by-bar VAH/POC/VAL from the first print of this slice (running profile)."""
+    if sl is None or sl.empty:
+        return []
+    tfm = max(1, int(tf_minutes))
+    bar = sl["ts"].dt.floor(f"{tfm}min")
+    acc: dict[float, list[float]] = {}
+    out: list[dict[str, Any]] = []
+    for ts, part in sl.groupby(bar, sort=True):
+        for rec in part.itertuples(index=False):
+            p = float(rec.price_r)
+            row = acc.get(p)
+            if row is None:
+                acc[p] = [
+                    float(rec.bid_base),
+                    float(rec.ask_base),
+                    float(rec.bid_quote),
+                    float(rec.ask_quote),
+                ]
+            else:
+                row[0] += float(rec.bid_base)
+                row[1] += float(rec.ask_base)
+                row[2] += float(rec.bid_quote)
+                row[3] += float(rec.ask_quote)
+        levels = [
+            {
+                "price": p,
+                "bidVolume": v[0],
+                "askVolume": v[1],
+                "bidQuote": v[2],
+                "askQuote": v[3],
+            }
+            for p, v in acc.items()
+        ]
+        poc_q, val_q, vah_q = value_area_from_levels(levels, quote=True)
+        poc_b, val_b, vah_b = value_area_from_levels(levels, quote=False)
+        t = pd.Timestamp(ts)
+        if t.tzinfo is None:
+            t = t.tz_localize("UTC")
+        else:
+            t = t.tz_convert("UTC")
+        out.append(
+            {
+                "time": int(t.timestamp()),
+                "poc": poc_q,
+                "val": val_q,
+                "vah": vah_q,
+                "pocBase": poc_b,
+                "valBase": val_b,
+                "vahBase": vah_b,
+            }
+        )
+    return out
+
+
 def _pack_profile(
     *,
     levels: list[dict[str, Any]],
@@ -761,6 +817,7 @@ def _pack_profile(
     tf_minutes: int,
     t0: int,
     t1: int,
+    developing: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     poc_q, val_q, vah_q = value_area_from_levels(levels, quote=True)
     poc_b, val_b, vah_b = value_area_from_levels(levels, quote=False)
@@ -782,6 +839,7 @@ def _pack_profile(
         "valBase": val_b,
         "vahBase": vah_b,
         "levels": levels,
+        "developing": developing or [],
     }
 
 
@@ -850,6 +908,7 @@ def build_anchored_profiles(
                 tf_minutes=tf_minutes,
                 t0=a,
                 t1=b,
+                developing=_developing_va(sl, tf_minutes),
             )
         )
     return {

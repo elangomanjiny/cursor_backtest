@@ -8,6 +8,7 @@ import {
   fetchFootprint,
   fetchValueArea,
   type AnchoredProfile,
+  type AnchoredVaPoint,
   type FootprintBar,
   type FootprintLevel,
 } from './api'
@@ -20,6 +21,8 @@ export type CandleSeries = {
 
 export type FootprintMode = 'profile' | 'bidask' | 'delta' | 'volume'
 
+export type StavpPlace = 'swings' | 'lastCandle'
+
 export type StavpProfileRow = {
   t0: number
   t1: number
@@ -31,6 +34,7 @@ export type StavpProfileRow = {
   vahBase?: number | null
   pocBase?: number | null
   valBase?: number | null
+  developing?: AnchoredVaPoint[]
 }
 
 export const STAVP_MAX_LEGS = 8
@@ -80,6 +84,7 @@ type Props = {
   stavpMode?: FootprintMode
   stavpBinMult?: number
   stavpWidthPct?: number
+  stavpPlace?: StavpPlace
   stavpLegs?: SupertrendLeg[]
   stavpPoints?: SupertrendPoint[]
   onStavpProfiles?: (rows: StavpProfileRow[]) => void
@@ -1049,6 +1054,54 @@ function drawSupertrend(
   ctx.restore()
 }
 
+function drawDevelopingVa(
+  ctx: CanvasRenderingContext2D,
+  chart: IChartApi,
+  series: CandleSeries,
+  points: AnchoredVaPoint[],
+  unit: Unit,
+  xEnd: number,
+) {
+  if (!points.length) return
+  const specs: { key: 'vah' | 'poc' | 'val'; base: 'vahBase' | 'pocBase' | 'valBase'; c: string; lab: string }[] = [
+    { key: 'vah', base: 'vahBase', c: '#3fb950', lab: 'VAH' },
+    { key: 'poc', base: 'pocBase', c: '#f0b429', lab: 'POC' },
+    { key: 'val', base: 'valBase', c: '#58a6ff', lab: 'VAL' },
+  ]
+  ctx.save()
+  ctx.setLineDash([5, 3])
+  ctx.lineWidth = 1.2
+  ctx.font = '10px ui-sans-serif, system-ui, sans-serif'
+  ctx.textAlign = 'left'
+  for (const s of specs) {
+    ctx.strokeStyle = s.c
+    ctx.beginPath()
+    let started = false
+    let lastX = 0
+    let lastY = 0
+    for (const p of points) {
+      const raw = unit === 'quote' ? p[s.key] : (p[s.base] ?? p[s.key])
+      const y = raw != null && Number.isFinite(Number(raw)) ? series.priceToCoordinate(Number(raw)) : null
+      const x = chart.timeScale().timeToCoordinate(p.time as never)
+      if (x == null || y == null) continue
+      if (!started) {
+        ctx.moveTo(x, y)
+        started = true
+      } else {
+        ctx.lineTo(x, y)
+      }
+      lastX = x
+      lastY = y
+    }
+    if (!started) continue
+    if (Number.isFinite(xEnd) && xEnd > lastX) ctx.lineTo(xEnd, lastY)
+    ctx.stroke()
+    ctx.fillStyle = s.c
+    ctx.fillText(s.lab, Math.max(lastX, xEnd) + 5, lastY)
+  }
+  ctx.restore()
+}
+
 function drawStavpLegs(
   ctx: CanvasRenderingContext2D,
   chart: IChartApi,
@@ -1061,8 +1114,9 @@ function drawStavpLegs(
   widthPct: number,
   w: number,
   h: number,
+  place: StavpPlace,
 ) {
-  const pct = Math.min(100, Math.max(10, widthPct || 50)) / 100
+  const pct = Math.min(100, Math.max(1, widthPct || 50)) / 100
   for (const { leg, profile } of rows) {
     if (!profile.levels?.length) continue
     const start = barSlot(chart, leg.t0, tfSec)
@@ -1072,21 +1126,24 @@ function drawStavpLegs(
       chart.timeScale().timeToCoordinate(leg.t0 as never) ?? start?.x0 ?? null
     const xEnd = end.x0 + end.bw
     if (xAnchor == null) continue
-    const visLeft = Math.max(0, Math.min(xAnchor, xEnd))
-    const visRight = Math.min(w, Math.max(xAnchor, xEnd))
-    const visW = visRight - visLeft
-    if (visW < 8) continue
-    const boxW = Math.max(20, Math.min(visW, visW * pct))
-    const xHist = visRight - boxW
-    const va =
-      unit === 'quote'
-        ? { val: profile.val, poc: profile.poc, vah: profile.vah }
-        : { val: profile.valBase, poc: profile.pocBase, vah: profile.vahBase }
-    drawProfileInBox(ctx, series, profile.levels, tick, unit, mode, xHist, boxW, h, va, {
+    const legW = Math.abs(xEnd - xAnchor)
+    if (legW < 8) continue
+    const boxW = Math.max(16, Math.min(legW, legW * pct))
+    const xHist = place === 'lastCandle' ? xEnd - boxW : xAnchor
+    drawProfileInBox(ctx, series, profile.levels, tick, unit, mode, xHist, boxW, h, undefined, {
       shadePane: false,
       labels: false,
     })
-    drawAvpVa(ctx, series, xAnchor, xEnd - xAnchor, va.vah, va.poc, va.val, undefined, 'right')
+    const dev = profile.developing ?? []
+    if (dev.length) {
+      drawDevelopingVa(ctx, chart, series, dev, unit, xEnd)
+    } else {
+      const va =
+        unit === 'quote'
+          ? { val: profile.val, poc: profile.poc, vah: profile.vah }
+          : { val: profile.valBase, poc: profile.pocBase, vah: profile.vahBase }
+      drawAvpVa(ctx, series, xAnchor, xEnd - xAnchor, va.vah, va.poc, va.val, undefined, 'right')
+    }
     const yFlip = Number.isFinite(leg.startPrice) ? series.priceToCoordinate(leg.startPrice) : null
     if (yFlip != null && xAnchor >= -8 && xAnchor <= w + 8) {
       ctx.beginPath()
@@ -1130,6 +1187,7 @@ function draw(
   stavpWidthPct?: number,
   stavpTick?: number,
   stavpPoints?: SupertrendPoint[],
+  stavpPlace?: StavpPlace,
 ) {
   const pane = chart.panes()[0]
   const size = pane?.getSize()
@@ -1206,6 +1264,7 @@ function draw(
       stavpWidthPct ?? 50,
       w,
       h,
+      stavpPlace ?? 'swings',
     )
   }
   if (stavpPoints?.length) drawSupertrend(ctx, chart, series, stavpPoints)
@@ -1332,6 +1391,7 @@ export function FootprintOverlay({
   stavpMode = 'profile',
   stavpBinMult,
   stavpWidthPct = 50,
+  stavpPlace = 'swings',
   stavpLegs = [],
   stavpPoints = [],
   onStavpProfiles,
@@ -1389,6 +1449,7 @@ export function FootprintOverlay({
   const showStavpRef = useRef(showStavp)
   const stavpModeRef = useRef(stavpMode)
   const stavpWidthRef = useRef(stavpWidthPct)
+  const stavpPlaceRef = useRef(stavpPlace)
   const stavpLegsRef = useRef(stavpLegs)
   const stavpPointsRef = useRef(stavpPoints)
   const showIdhlRef = useRef(showIdhl)
@@ -1406,6 +1467,7 @@ export function FootprintOverlay({
   showStavpRef.current = showStavp
   stavpModeRef.current = stavpMode
   stavpWidthRef.current = stavpWidthPct
+  stavpPlaceRef.current = stavpPlace
   stavpLegsRef.current = stavpLegs
   stavpPointsRef.current = stavpPoints
   showIdhlRef.current = showIdhl
@@ -1514,6 +1576,7 @@ export function FootprintOverlay({
         stavpWidthRef.current,
         stavpTickRef.current,
         showStavpRef.current ? stavpPointsRef.current : [],
+        stavpPlaceRef.current,
       )
     }
 
@@ -1703,6 +1766,7 @@ export function FootprintOverlay({
                   vahBase: row.profile.vahBase,
                   pocBase: row.profile.pocBase,
                   valBase: row.profile.valBase,
+                  developing: row.profile.developing ?? [],
                 })),
               )
               if (!showRef.current && !showVpRef.current) {
@@ -1888,6 +1952,7 @@ export function FootprintOverlay({
       stavpWidthPct,
       stavpTickRef.current,
       showStavp ? stavpPoints : [],
+      stavpPlace,
     )
   }, [
     active,
@@ -1899,6 +1964,7 @@ export function FootprintOverlay({
     showStavp,
     stavpMode,
     stavpWidthPct,
+    stavpPlace,
     stavpPoints,
     vpMode,
     vpT0,

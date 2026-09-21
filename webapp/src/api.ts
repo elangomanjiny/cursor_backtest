@@ -543,11 +543,23 @@ export async function fetchFootprint(
   return (await r.json()) as FootprintResponse
 }
 
+export type AnchoredVaPoint = {
+  time: number
+  poc?: number | null
+  val?: number | null
+  vah?: number | null
+  pocBase?: number | null
+  valBase?: number | null
+  vahBase?: number | null
+}
+
 export type AnchoredProfile = {
   ok: boolean
   reason?: string
   tick_size: number
   bin_mult?: number
+  t0?: number
+  t1?: number
   poc?: number | null
   val?: number | null
   vah?: number | null
@@ -555,6 +567,7 @@ export type AnchoredProfile = {
   valBase?: number | null
   vahBase?: number | null
   levels: FootprintLevel[]
+  developing?: AnchoredVaPoint[]
 }
 
 export async function fetchAnchoredProfile(
