@@ -1,0 +1,32 @@
+# Local "cloud-style" demo: same FastAPI + built UI, parquet on a volume.
+#   docker compose up --build
+# Optional QuestDB sidecar (not used by backtest):
+#   docker compose --profile questdb up --build
+
+services:
+  app:
+    build: .
+    ports:
+      - "${PORT:-8000}:8000"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      PORT: "8000"
+      QUESTDB_URL: ${QUESTDB_URL:-http://127.0.0.1:9000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  questdb:
+    image: questdb/questdb:8.2.3
+    profiles: ["questdb"]
+    ports:
+      - "9000:9000"
+      - "9009:9009"
+    volumes:
+      - questdb_data:/var/lib/questdb
+    environment:
+      QDB_TELEMETRY_ENABLED: "false"
+
+volumes:
+  questdb_data:

@@ -28,6 +28,8 @@ npm run build
 
 Open http://127.0.0.1:8000/
 
+Cloud-style demo (Docker + public tunnel, still parquet): see **[CLOUD.md](CLOUD.md)**.
+
 ## Notes
 
 - Date range load limited to **14 days** (Vision download size).
